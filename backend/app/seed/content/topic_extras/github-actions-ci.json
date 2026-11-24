@@ -1,0 +1,72 @@
+{
+  "slug": "github-actions-ci",
+  "why_md": "- CI turns tests and linting into an automatic gate; CD makes deploys repeatable instead of manual.\n- For a team with large untested areas, a CI pipeline is how improvements (type checks, tests) stick.\n- Secure AWS deploys from CI (OIDC, least privilege, immutable image tags) are expected knowledge for backend roles.\n- AI projects need CI too: evaluation suites, prompt regression tests and container builds run in the same pipelines.",
+  "revision_notes_md": "- Workflow = YAML in `.github/workflows/`; triggers (`on: push / pull_request / workflow_dispatch / schedule`), jobs, steps.\n- Jobs run in parallel on fresh runners unless linked with `needs:`.\n- Cache pip with `actions/setup-python` (`cache: pip`) or `actions/cache`.\n- Service containers (`services: postgres:`) give integration tests a real database.\n- AWS auth via OIDC: `permissions: id-token: write` + `aws-actions/configure-aws-credentials` with a role ARN — no long-lived keys.\n- Tag images with the commit SHA (immutable), not `latest`.\n- `concurrency:` group to prevent overlapping deploys; `environment:` for approvals and scoped secrets.\n- Never interpolate untrusted `${{ github.event.* }}` directly into `run:`; pass via env.",
+  "exercises_md": "1. Write a workflow for one service: on pull_request run ruff + pytest against a PostgreSQL service container with pip caching; on push to main build the Docker image, tag it with the commit SHA and push to ECR using OIDC.\n2. Add a matrix to run tests on Python 3.12 and 3.13, and a `concurrency` group so only one deploy runs at a time; verify by pushing twice quickly.",
+  "my_context_md": "`ForcesightJobSchedulerAndRunner` and `ECSInventoryPriceTracking` already have pytest tests (locking, next-run calculation, the SP-API client) — the natural first candidates to run automatically in a CI workflow against a PostgreSQL service container.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To make job `deploy` wait for job `test` to succeed, add `____: test` to the deploy job.",
+      "answers": [
+        "needs"
+      ],
+      "explanation": "needs: declares job dependencies; jobs otherwise run in parallel."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "For GitHub Actions to request an OIDC token for AWS, the workflow needs `permissions: id-token: ____`.",
+      "answers": [
+        "write"
+      ],
+      "explanation": "id-token: write lets the job request a signed OIDC token that AWS STS exchanges for temporary credentials."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Integration tests need PostgreSQL in CI. What's the simplest reliable option in GitHub Actions?",
+      "options": [
+        "Mock every database call",
+        "Install PostgreSQL with apt in each step",
+        "Declare `services: postgres:` with a health check and connect via localhost and the mapped port",
+        "Point tests at the production database read replica"
+      ],
+      "answer_index": 2,
+      "explanation": "Service containers start alongside the job; with a health check the tests run against a real, disposable PostgreSQL."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Where should an AWS deploy workflow get its credentials from?",
+      "options": [
+        "An OIDC-assumed IAM role scoped to the repo/branch, giving short-lived credentials",
+        "Access keys committed in a config file",
+        "Long-lived IAM user keys stored as repository secrets",
+        "The developer's local ~/.aws/credentials uploaded as an artifact"
+      ],
+      "answer_index": 0,
+      "explanation": "OIDC avoids long-lived secrets; the role's trust policy can restrict which repo/branch/environment can assume it."
+    },
+    {
+      "type": "debug",
+      "prompt": "This workflow is slow, sometimes deploys the wrong code, and has a security problem. What would you change?",
+      "code": "on: [push, pull_request]\njobs:\n  all:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: pip install -r requirements.txt\n      - run: pytest\n      - run: echo \"Deploying ${{ github.event.head_commit.message }}\"\n      - run: |\n          aws configure set aws_access_key_id ${{ secrets.AWS_KEY }}\n          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET }}\n          docker build -t $ECR_REPO:latest . && docker push $ECR_REPO:latest\n          aws ecs update-service --cluster prod --service api --force-new-deployment",
+      "answer": "- Deploys on **every** push and pull_request (any branch, including PRs) — gate deploy to `push` on `main` in a separate job with `needs: test` and an `environment`.\n- `:latest` tag is mutable: overlapping runs can deploy the wrong image. Tag with `${{ github.sha }}` and deploy that exact tag; add a `concurrency` group.\n- Long-lived AWS keys → use OIDC (`permissions: id-token: write`, `aws-actions/configure-aws-credentials` with `role-to-assume`).\n- `${{ github.event.head_commit.message }}` interpolated into `run:` is a script-injection risk; pass it through `env:` and quote it.\n- No pip cache → slow; use `actions/setup-python` with `cache: pip`.",
+      "rubric": [
+        "Separate test and deploy jobs; deploy only on main with needs",
+        "Immutable SHA tags + concurrency instead of :latest",
+        "OIDC instead of long-lived access keys",
+        "Untrusted expression injection in run:; add pip caching"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Describe the CI/CD pipeline you'd set up for a containerized Python service deployed to ECS.",
+      "answer": "**On pull request** (fast feedback, < 10 min):\n- Checkout, `setup-python` with pip cache.\n- Lint/format (ruff), type-check (mypy) on changed packages.\n- pytest with a PostgreSQL service container; upload coverage.\n- Build the Docker image (no push) to catch Dockerfile errors, using BuildKit cache.\n\n**On push to main**:\n- Re-run tests (or require them via branch protection).\n- Authenticate to AWS with **OIDC** (role scoped to this repo/branch).\n- Build and push the image to ECR tagged with the **commit SHA**.\n- Register a new task definition revision with that image and update the ECS service (or deploy via IaC); wait for the service to stabilize; roll back on failure.\n- `concurrency` group so deploys don't overlap; `environment: production` for approval and scoped secrets.\n\nAfterwards: smoke test, notify, and keep the previous task definition for quick rollback.",
+      "rubric": [
+        "PR pipeline: lint, type-check, tests with real Postgres, image build",
+        "Main: OIDC auth, push SHA-tagged image to ECR",
+        "Deploy new task definition + wait for stability / rollback",
+        "Concurrency control and protected environments"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, empty %}
+{% block title %}Targets & goals{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Targets & goals</h1><p>Targets are the daily, weekly and monthly habits you keep. Goals are larger outcomes with a date. Progress is calculated from your records, so you never update it by hand (except for manual goals).</p></div>
+</div>
+
+<div class="grid g-side">
+  <div class="stack">
+    {% call card("Targets", flush=True) %}
+      {% if targets %}
+      <table class="table">
+        {% for t in targets %}{% set lv = live.get(t.id) %}
+          <tr class="{{ 'faint' if not t.is_active }}">
+            <td>{{ t.period|label }}</td>
+            <td>{{ t.value|round|int }} {{ metric_labels[t.metric] }}</td>
+            <td style="width:35%">{% if lv %}<div class="between tiny"><span class="num">{{ lv.current|round(1) }} / {{ lv.target|round|int }}</span><span>{{ lv.percent|round|int }}%</span></div>{{ progress(lv.percent, "good" if lv.percent >= 100 else "", thin=True) }}{% else %}<span class="tiny">paused</span>{% endif %}</td>
+            <td style="text-align:right;white-space:nowrap">
+              <form method="post" action="/targets" class="inline-form"><input type="hidden" name="period" value="{{ t.period }}"><input type="hidden" name="metric" value="{{ t.metric }}"><input type="hidden" name="value" value="{{ t.value }}"><input type="hidden" name="is_active" value="{{ '0' if t.is_active else '1' }}"><button class="btn sm ghost">{{ "Pause" if t.is_active else "Resume" }}</button></form>
+              <form method="post" action="/targets/{{ t.id }}/delete" class="inline-form"><button class="btn sm ghost" title="Remove">✕</button></form>
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+      <form method="post" action="/targets" class="body row" style="flex-wrap:wrap">
+        <select name="period" style="max-width:120px">{% for p in periods %}<option value="{{ p }}">{{ p|label }}</option>{% endfor %}</select>
+        <input name="value" type="number" min="1" step="any" placeholder="Amount" required style="max-width:110px">
+        <select name="metric" style="max-width:200px">{% for k, v in metric_labels.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+        <button class="btn">Set target</button>
+        <span class="tiny faint">Setting an existing period + metric updates it.</span>
+      </form>
+    {% endcall %}
+
+    <div id="goals" class="between"><h2 class="section-title" style="margin:0">Goals</h2>
+      <a class="small" href="/targets?closed={{ 0 if closed else 1 }}#goals">{{ "Hide" if closed else "Show" }} completed / abandoned ({{ closed_count }})</a></div>
+    {% if not goals %}{{ empty("No open goals", "Add one on the right — for example \"Pass every PostgreSQL topic by March\".") }}{% endif %}
+    {% for g in goals %}
+      <section class="card" id="goal-{{ g.id }}"><div class="body">
+        <div class="between"><h3>{{ g.title }}</h3><span class="row">{{ badge(g.priority) }}{{ badge(g.status) }}</span></div>
+        {% if g.description %}<p class="small muted" style="margin:4px 0">{{ g.description }}</p>{% endif %}
+        <div class="between tiny mt"><span>{{ goal_metrics.get(g.metric, g.metric) }}{% if g.skill %} · {{ g.skill }}{% endif %} · <span class="num">{{ g.progress.current|round(1) }} / {{ g.progress.target|round|int }} {{ g.progress.unit }}</span></span>
+          <span class="{{ 'bad' if g.progress.overdue }}">{% if g.target_date %}due {{ g.target_date|date }}{% if g.progress.days_left is not none and g.status not in ("completed", "abandoned") %} · {{ g.progress.days_left }} days left{% endif %}{% endif %}</span></div>
+        {{ progress(g.progress.percent, "good" if g.progress.target_reached else ("bad" if g.progress.overdue else "")) }}
+        <div class="row mt">
+          <form method="post" action="/goals/{{ g.id }}" class="row">
+            <select name="status" style="max-width:150px">{% for s in goal_statuses %}<option value="{{ s }}" {{ 'selected' if s == g.status }}>{{ s|label }}</option>{% endfor %}</select>
+            {% if g.metric == "manual" %}<input name="manual_progress" type="number" min="0" max="100" value="{{ g.manual_progress or 0 }}" style="max-width:80px"><span class="small">%</span>{% endif %}
+            <button class="btn sm">Update</button>
+          </form>
+          <form method="post" action="/goals/{{ g.id }}/delete" class="inline-form" style="margin-left:auto"><button class="btn sm ghost danger">Delete</button></form>
+        </div>
+      </div></section>
+    {% endfor %}
+  </div>
+
+  <div class="stack">
+    {% call card("New goal") %}
+      <form method="post" action="/goals/new" class="form-grid">
+        <input name="title" placeholder="Goal title" required>
+        <textarea name="description" rows="2" placeholder="Why it matters (optional)"></textarea>
+        <label class="field">Measure by<select name="metric">{% for k, v in goal_metrics.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
+        <label class="field">Target amount <span class="hint">for counted metrics</span><input name="metric_target" type="number" min="1" step="any"></label>
+        <label class="field">Skill <span class="hint">optional: only count this skill</span><select name="skill_id"><option value="">Any</option>{% for sid, name in skills %}<option value="{{ sid }}">{{ name }}</option>{% endfor %}</select></label>
+        {% if roadmap_projects %}<label class="field">Roadmap project <span class="hint">for "roadmap project steps"</span><select name="roadmap_item_id"><option value="">—</option>{% for rid, title in roadmap_projects %}<option value="{{ rid }}">{{ title }}</option>{% endfor %}</select></label>{% endif %}
+        <div class="grid g2">
+          <label class="field">Priority<select name="priority">{% for p in ["high", "medium", "low"] %}<option value="{{ p }}" {{ 'selected' if p == 'medium' }}>{{ p|label }}</option>{% endfor %}</select></label>
+          <label class="field">Target date<input type="date" name="target_date"></label>
+        </div>
+        <button class="btn primary">Add goal</button>
+      </form>
+    {% endcall %}
+  </div>
+</div>
+{% endblock %}

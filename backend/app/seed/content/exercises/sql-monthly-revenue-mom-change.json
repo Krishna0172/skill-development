@@ -1,0 +1,101 @@
+{
+  "slug": "sql-monthly-revenue-mom-change",
+  "title": "Month-over-month revenue change per channel (LAG)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "hard",
+  "skill": "sql-window-functions",
+  "concepts": [
+    "LAG",
+    "PARTITION BY",
+    "month bucketing",
+    "NULLIF for safe division",
+    "percentage change"
+  ],
+  "related_topics": [
+    "sql-window-functions",
+    "sql-ctes",
+    "sql-null-handling"
+  ],
+  "problem_md": "Leadership wants **month-over-month (MoM) revenue growth per channel**. Cancelled orders are excluded. Note that\npromotions sometimes produce a month where a channel's revenue is exactly `0` (free-sample orders with\n`total_amount = 0`).\n\n```sql\nCREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  channel      TEXT NOT NULL,\n  order_date   TEXT NOT NULL,\n  status       TEXT NOT NULL,\n  total_amount REAL NOT NULL\n);\n```\n\n> Money columns are `REAL` in this sandbox (they would be `NUMERIC(12,2)` in production PostgreSQL). Dates are ISO `'YYYY-MM-DD'` text.\n\n**Task.** Return one row per channel per month that has at least one non-cancelled order:\n\n| column | meaning |\n|---|---|\n| `channel` | |\n| `month` | `'YYYY-MM'` (use `substr(order_date, 1, 7)`) |\n| `revenue` | sum of `total_amount` in that month |\n| `prev_revenue` | revenue of the channel's **previous row** (previous month present in the data); `NULL` for its first month |\n| `pct_change` | `100 * (revenue - prev_revenue) / prev_revenue`, rounded to 2 decimals; `NULL` when there is no previous month **or** `prev_revenue` is 0 |\n\nOrder by `channel`, `month`.",
+  "examples": [
+    {
+      "input": "Myntra: Jan 1500, Feb 1800 (a cancelled 999 is ignored), Mar 1200",
+      "output": "channel | month   | revenue | prev_revenue | pct_change\nMyntra  | 2024-01 | 1500    | NULL         | NULL\nMyntra  | 2024-02 | 1800    | 1500         | 20\nMyntra  | 2024-03 | 1200    | 1800         | -33.33",
+      "explanation": "Nykaa's March row has prev_revenue 0 (the free-sample month), so pct_change is NULL instead of a division-by-zero error."
+    }
+  ],
+  "hints": [
+    "Step 1 (CTE): aggregate revenue per (channel, month). Step 2: look at the previous row within each channel.",
+    "`LAG(revenue) OVER (PARTITION BY channel ORDER BY month)` returns the previous month's revenue (NULL for the first).",
+    "`ROUND(100.0 * (revenue - prev_revenue) / NULLIF(prev_revenue, 0), 2)` - NULL propagates for both the first month and a zero base."
+  ],
+  "starter_code": "-- Write your query here\nWITH monthly AS (\n  SELECT channel, substr(order_date, 1, 7) AS month, ...\n)\nSELECT ...\n",
+  "solution_code": "WITH monthly AS (\n  SELECT channel,\n         substr(order_date, 1, 7) AS month,\n         SUM(total_amount)        AS revenue\n  FROM orders\n  WHERE status <> 'CANCELLED'\n  GROUP BY channel, substr(order_date, 1, 7)\n),\nwith_prev AS (\n  SELECT channel, month, revenue,\n         LAG(revenue) OVER (PARTITION BY channel ORDER BY month) AS prev_revenue\n  FROM monthly\n)\nSELECT channel,\n       month,\n       revenue,\n       prev_revenue,\n       ROUND(100.0 * (revenue - prev_revenue) / NULLIF(prev_revenue, 0), 2) AS pct_change\nFROM with_prev\nORDER BY channel, month;",
+  "solution_md": "**`LAG(expr, offset = 1, default = NULL)`** reads a value from an earlier row of the same partition, in window\norder. `PARTITION BY channel` keeps Myntra's February from being compared with Blinkit's March.\n\n**Why two CTEs?** `LAG` must run over *monthly* rows, so the aggregation has to finish first. The second CTE names\n`prev_revenue` so the final expression stays readable (you could inline `LAG(...)` twice instead).\n\n**NULL handling.**\n\n- First month per channel: `LAG` returns NULL, so `prev_revenue` and `pct_change` are NULL.\n- Zero base (Nykaa February = 0): `NULLIF(prev_revenue, 0)` turns the divisor into NULL, avoiding a\n  division-by-zero error in PostgreSQL. Growth from 0 is mathematically undefined; showing NULL (\"n/a\") is honest.\n- `100.0 * ...` avoids integer division when amounts are integers.\n\n**Gaps.** `LAG` compares with the previous *row*, not the previous *calendar month*. If a channel had sales in\nJanuary and March only, March would be compared with January. To compare strictly with the prior calendar month,\nbuild a month spine and left join it, so missing months appear with revenue 0 (or NULL).\n\n**In PostgreSQL** with a real `DATE` column you would bucket with `date_trunc` and could build the spine with\n`generate_series`:\n\n```sql\nWITH months AS (\n  SELECT generate_series(date '2024-01-01', date '2024-03-01', interval '1 month')::date AS month\n),\nmonthly AS (\n  SELECT channel, date_trunc('month', order_date)::date AS month, SUM(total_amount) AS revenue\n  FROM orders WHERE status <> 'CANCELLED'\n  GROUP BY 1, 2\n)\nSELECT ch.channel, m.month,\n       COALESCE(r.revenue, 0) AS revenue,\n       LAG(COALESCE(r.revenue, 0)) OVER (PARTITION BY ch.channel ORDER BY m.month) AS prev_revenue\nFROM months m\nCROSS JOIN (SELECT DISTINCT channel FROM orders) ch\nLEFT JOIN monthly r ON r.channel = ch.channel AND r.month = m.month\nORDER BY 1, 2;\n```\n\n**Performance.** Index `orders (channel, order_date)`; for long histories, pre-aggregate into a monthly summary\ntable refreshed by the ingestion job, then window over a few hundred rows.",
+  "tests": {
+    "schema_sql": "CREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  channel      TEXT NOT NULL,\n  order_date   TEXT NOT NULL,\n  status       TEXT NOT NULL,\n  total_amount REAL NOT NULL\n);\n\nINSERT INTO orders VALUES\n (1, 'Myntra', '2024-01-05','DELIVERED',1000.00),\n (2, 'Myntra', '2024-01-20','DELIVERED', 500.00),\n (3, 'Myntra', '2024-02-03','DELIVERED',1800.00),\n (4, 'Myntra', '2024-02-10','CANCELLED', 999.00),\n (5, 'Myntra', '2024-03-15','SHIPPED',  1200.00),\n (6, 'Nykaa',  '2024-01-11','DELIVERED', 400.00),\n (7, 'Nykaa',  '2024-02-14','DELIVERED',   0.00),\n (8, 'Nykaa',  '2024-03-02','DELIVERED', 650.00),\n (9, 'Nykaa',  '2024-03-28','DELIVERED', 350.00),\n (10,'Blinkit','2024-03-09','DELIVERED', 225.50);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "channel",
+        "month",
+        "revenue",
+        "prev_revenue",
+        "pct_change"
+      ],
+      "rows": [
+        [
+          "Blinkit",
+          "2024-03",
+          225.5,
+          null,
+          null
+        ],
+        [
+          "Myntra",
+          "2024-01",
+          1500,
+          null,
+          null
+        ],
+        [
+          "Myntra",
+          "2024-02",
+          1800,
+          1500,
+          20
+        ],
+        [
+          "Myntra",
+          "2024-03",
+          1200,
+          1800,
+          -33.33
+        ],
+        [
+          "Nykaa",
+          "2024-01",
+          400,
+          null,
+          null
+        ],
+        [
+          "Nykaa",
+          "2024-02",
+          0,
+          400,
+          -100
+        ],
+        [
+          "Nykaa",
+          "2024-03",
+          1000,
+          0,
+          null
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

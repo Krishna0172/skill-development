@@ -1,0 +1,73 @@
+{
+  "slug": "s3-presigned-urls",
+  "why_md": "- Presigned URLs let clients upload/download files directly to S3 without streaming large files through your API.\n- They're the standard way to share reports and accept marketplace file uploads securely and cheaply.\n- Understanding SigV4 signing explains most 'SignatureDoesNotMatch' / 'Request has expired' errors.\n- AI apps use them for document uploads that feed ingestion/RAG pipelines; it's a common design question.",
+  "revision_notes_md": "- A presigned URL embeds a SigV4 signature from the signer's credentials; anyone holding the URL can use it until it expires.\n- `generate_presigned_url('get_object' | 'put_object', Params=..., ExpiresIn=seconds)`; max 7 days with IAM user keys.\n- URL validity is also limited by the signing credentials: role/STS credentials expire earlier (e.g. Lambda role session).\n- S3 checks at use time: signature, expiry, AND the signer's current IAM permissions.\n- Presigned PUT can't enforce size limits; use `generate_presigned_post` with `content-length-range` conditions.\n- Signed headers (e.g. Content-Type) must match exactly when the client sends the request.\n- Keep buckets private (Block Public Access); short expiries; object keys scoped per tenant.\n- Process uploads via S3 event notifications → queue/Lambda.",
+  "exercises_md": "1. Build a small upload flow: an endpoint that returns a presigned POST (max 20 MB, key prefixed with the org id), upload a file with `requests`, and process it from an S3 event.\n2. Generate a presigned GET with a 60-second expiry, wait for it to expire, and capture the exact S3 error; repeat after removing the signer's `s3:GetObject` permission.",
+  "my_context_md": "boto3 S3 is used in `python-postgres`, and `ECSAmazonBankStatementPostgres/AwsSignature.py` contains a hand-written AWS SigV4 implementation (hmac/hashlib) — the same algorithm that produces a presigned URL's `X-Amz-Signature`, so you already understand the mechanics underneath `generate_presigned_url`.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "In boto3, `s3.generate_presigned_url('get_object', Params={...}, ____=3600)` makes the URL valid for one hour.",
+      "answers": [
+        "expiresin"
+      ],
+      "explanation": "ExpiresIn sets the URL lifetime in seconds."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To enforce a maximum upload size from a browser, use a presigned ____ with a `content-length-range` condition instead of a presigned PUT.",
+      "answers": [
+        "post",
+        "post policy",
+        "presigned post"
+      ],
+      "explanation": "generate_presigned_post supports policy conditions such as content-length-range."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which statement about presigned URLs is TRUE?",
+      "options": [
+        "Creating one makes the object public until it expires",
+        "S3 stores a record of each presigned URL you generate",
+        "They can be generated offline without calling S3, using only the credentials",
+        "They bypass the bucket's IAM permissions"
+      ],
+      "answer_index": 2,
+      "explanation": "Presigning is a local SigV4 computation; S3 validates the signature, expiry and the signer's permissions when the URL is used."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A client uploads with a presigned PUT and gets SignatureDoesNotMatch. The URL was signed with `ContentType='text/csv'`. Most likely cause?",
+      "options": [
+        "The bucket has versioning enabled",
+        "The client sent a different Content-Type header (or none)",
+        "The object key is too long",
+        "The URL was used before it was created"
+      ],
+      "answer_index": 1,
+      "explanation": "Signed headers must match exactly; a mismatching Content-Type changes the canonical request and breaks the signature."
+    },
+    {
+      "type": "debug",
+      "prompt": "Users report download links 'expire' after an hour or so, even though they're generated with ExpiresIn of 7 days. Why?",
+      "code": "# runs inside an ECS task using its task IAM role\ns3 = boto3.client(\"s3\")\nurl = s3.generate_presigned_url(\n    \"get_object\",\n    Params={\"Bucket\": \"reports\", \"Key\": f\"{org_id}/monthly.xlsx\"},\n    ExpiresIn=7 * 24 * 3600,\n)\nsend_email(user, url)",
+      "answer": "The URL is signed with the task role's **temporary** STS credentials. A presigned URL can never outlive the credentials that signed it — when that session token expires (typically within hours), the URL stops working regardless of `ExpiresIn`.\n\nOptions:\n- Use short expiries and generate links on demand (an authenticated endpoint that returns a fresh URL / redirects).\n- If week-long links are truly required, sign with long-term credentials of a narrowly scoped IAM user (stored in Secrets Manager) — weigh the security cost.\n- Or deliver via CloudFront signed URLs.",
+      "rubric": [
+        "Signed with temporary role credentials",
+        "URL validity limited by credential expiry, not just ExpiresIn",
+        "Generate on demand / short expiry, or long-term scoped credentials / CloudFront"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Design a file-upload flow for marketplace reports that doesn't pass file bytes through your API servers.",
+      "answer": "1. Client calls `POST /uploads` (authenticated). The API validates the user, creates an `uploads` row (`pending`), and returns a **presigned POST** for key `org/{orgid}/{upload_id}.csv` with conditions: `content-length-range`, content type, short expiry (e.g. 15 minutes).\n2. Client uploads directly to S3 (private bucket, Block Public Access on, SSE enabled).\n3. S3 `ObjectCreated` event → SQS → worker (Lambda or ECS). The worker derives org and upload id from the key (never trusting client metadata), validates the file and processes it idempotently (upload id as the dedupe key).\n4. Worker updates `uploads.status` (`processing` → `done`/`failed`) for the UI to poll.\n\nBenefits: API servers stay small, uploads scale with S3, and permissions are enforced by signature + key prefix.",
+      "rubric": [
+        "API issues presigned POST with size/type conditions and short expiry",
+        "Direct client → S3 upload into a private, tenant-prefixed key",
+        "S3 event → queue → idempotent worker",
+        "Status tracking for the client"
+      ]
+    }
+  ]
+}

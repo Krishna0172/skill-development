@@ -1,0 +1,122 @@
+{
+  "slug": "sql-window-functions",
+  "title": "Window Functions: ROW_NUMBER, RANK, LAG and Running Totals",
+  "skill": "sql-window-functions",
+  "extra_skills": [
+    "sql",
+    "sql-aggregations"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "sql",
+    "window-functions",
+    "row_number",
+    "lag",
+    "running-total",
+    "dedup"
+  ],
+  "summary": "A window function computes a value for each row using a set of related rows (its \"window\") without collapsing them like GROUP BY does. You define the window with OVER (PARTITION BY ... ORDER BY ...). They are the go-to tool for rankings, deduplication, running totals and comparing a row with the previous one.",
+  "details_md": "### Anatomy\n```sql\nfunc(args) OVER (\n  PARTITION BY a        -- split rows into independent groups\n  ORDER BY b            -- order within each partition\n  ROWS BETWEEN ...      -- optional frame: which rows relative to the current one\n)\n```\nGROUP BY returns one row per group. A window function returns **every input row**, each with an extra computed column.\n\n### Families\n- **Ranking**: `ROW_NUMBER()` (1,2,3 with no ties), `RANK()` (1,1,3: gaps after ties), `DENSE_RANK()` (1,1,2), `NTILE(n)` (buckets), `PERCENT_RANK()`, `CUME_DIST()`.\n- **Offset**: `LAG(col, n, default)`, `LEAD(...)`, `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`.\n- **Aggregates as windows**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX` with `OVER (...)`.\n\n### Frames: the subtle part\nWhen a window has `ORDER BY` but no explicit frame, the default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Two consequences:\n1. `SUM(x) OVER (ORDER BY d)` is a running total, but **rows with the same `d` (peers) are summed together**, so ties jump at once. Use `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` for a strict row-by-row running total.\n2. `LAST_VALUE(x) OVER (ORDER BY d)` returns the *current* row's value (the frame ends at the current row). Use `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`, or simply `FIRST_VALUE` with a descending order.\n\nFrame units: `ROWS` (physical rows), `RANGE` (value distance, e.g. `RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW`), `GROUPS` (peer groups). `EXCLUDE CURRENT ROW` is also supported.\n\n### Where they can be used\nWindow functions are evaluated after `WHERE`, `GROUP BY` and `HAVING`, but before `ORDER BY` and `LIMIT`. So you **cannot filter on them in WHERE**; wrap the query in a subquery/CTE and filter outside (`WHERE rn = 1`). You can, however, apply a window over an aggregate: `SUM(SUM(total)) OVER ()` for the share of a grand total.\n\n### Named windows\n`WINDOW w AS (PARTITION BY customer_id ORDER BY order_date)` and then `OVER w` avoids repeating the same definition.\n\n### Performance\nPostgreSQL implements windows with a `WindowAgg` node over input sorted by `PARTITION BY` + `ORDER BY`. An index matching those columns can avoid the sort. Several windows with different orderings mean several sorts. Since PG 15, a filter like `WHERE rn <= 10` on `ROW_NUMBER`/`RANK`/`COUNT` in an outer query lets the WindowAgg stop early (\"run condition\").\n\n### Deduplication pattern\n\"Keep the latest row per key\" is the classic: `ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC)`, then keep `rn = 1`. Add a tiebreaker column to the ORDER BY so the result is deterministic. PostgreSQL's `DISTINCT ON (id) ... ORDER BY id, updated_at DESC` is a shorter alternative for this specific case.",
+  "code_md": "```sql\n-- orders(id, customer_id, order_date, total, updated_at)\n\n-- 1) Rank functions side by side\nSELECT customer_id, total,\n       ROW_NUMBER() OVER w AS row_num,   -- 1,2,3,4\n       RANK()       OVER w AS rnk,       -- 1,2,2,4\n       DENSE_RANK() OVER w AS dense      -- 1,2,2,3\nFROM orders\nWINDOW w AS (PARTITION BY customer_id ORDER BY total DESC);\n```\n\n```sql\n-- 2) Deduplicate: keep the latest version of each order\nWITH ranked AS (\n    SELECT o.*,\n           ROW_NUMBER() OVER (PARTITION BY id ORDER BY updated_at DESC, ctid DESC) AS rn\n    FROM orders_staging o\n)\nSELECT * FROM ranked WHERE rn = 1;     -- filter outside: can't use rn in WHERE directly\n\n-- PostgreSQL shortcut for the same thing\nSELECT DISTINCT ON (id) *\nFROM orders_staging\nORDER BY id, updated_at DESC;\n```\n\n```sql\n-- 3) Running total and day-over-day change\nSELECT order_date::date AS day,\n       SUM(total) AS revenue,\n       SUM(SUM(total)) OVER (ORDER BY order_date::date\n                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_revenue,\n       SUM(total) - LAG(SUM(total)) OVER (ORDER BY order_date::date) AS change_vs_prev_day,\n       ROUND(100.0 * SUM(total) / SUM(SUM(total)) OVER (), 2) AS pct_of_total\nFROM orders\nGROUP BY order_date::date\nORDER BY day;\n```\n\n```sql\n-- 4) Inventory ledger: running stock per SKU and a 7-day moving average of sales\n-- inventory_ledger(sku, moved_at, qty_change)\nSELECT sku, moved_at, qty_change,\n       SUM(qty_change) OVER (PARTITION BY sku ORDER BY moved_at\n                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS stock_after,\n       AVG(-qty_change) FILTER (WHERE qty_change < 0)\n           OVER (PARTITION BY sku ORDER BY moved_at\n                 RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW) AS avg_sale_7d\nFROM inventory_ledger;\n```",
+  "use_cases_md": "- Deduplicating staging data: latest row per `(id, orgid)` before an upsert.\n- Running balances: inventory ledger stock levels, cumulative settlement amounts.\n- Period-over-period comparisons with `LAG` (day-over-day revenue, status transitions).\n- Top-N per group (top 5 SKUs per channel per month).\n- Sessionisation / gap detection: `LAG(event_time)` to find gaps longer than N minutes.\n- Percent of total without a self-join: `x / SUM(x) OVER ()`.",
+  "mistakes_md": "- **Filtering a window result in WHERE**: invalid because windows run after WHERE. Wrap in a CTE/subquery.\n- **Relying on the default RANGE frame for running totals**: tied ORDER BY values are summed together. Specify `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.\n- **LAST_VALUE returning the current row**: default frame ends at the current row. Extend the frame to `UNBOUNDED FOLLOWING`.\n- **Non-deterministic ROW_NUMBER**: ties in ORDER BY make \"which row is 1\" random between runs. Add a unique tiebreaker.\n- **Using RANK for dedup**: ties produce multiple rows with rank 1. Use ROW_NUMBER.\n- **Forgetting PARTITION BY**: the window spans the whole result, e.g. a running total across all SKUs instead of per SKU.",
+  "best_practices_md": "- Use a named `WINDOW` clause when several functions share a definition.\n- Always state the frame explicitly for running/moving aggregates.\n- Make ORDER BY inside windows deterministic.\n- Consider an index on `(partition_cols, order_cols)` for large window queries.\n- Prefer `DISTINCT ON` for simple \"latest row per key\" in PostgreSQL; use `ROW_NUMBER` when you need portability or more than one row per key.\n- Dedup in SQL before pulling into pandas when the dataset is large.",
+  "my_context_md": "Inventory ledger reconciliation maps directly onto window functions: `SUM(qty_change) OVER (PARTITION BY sku ORDER BY moved_at ROWS ...)` gives the running stock, which you can compare against the stock reported by a marketplace. Deduplication matters too: Postgres raises \"ON CONFLICT DO UPDATE command cannot affect row a second time\" if one batch contains the same `(id, orgid)` twice, so de-duplicating with `ROW_NUMBER()`/`DISTINCT ON` in SQL (or `drop_duplicates` in pandas) before your upserts prevents that error.",
+  "related": [
+    "sql-group-by",
+    "sql-ctes",
+    "sql-subqueries",
+    "postgres-upsert",
+    "explain-analyze"
+  ],
+  "flashcards": [
+    {
+      "front": "Main difference between GROUP BY and a window function?",
+      "back": "GROUP BY collapses rows into one per group; a window function keeps every row and adds a computed value."
+    },
+    {
+      "front": "ROW_NUMBER vs RANK vs DENSE_RANK on ties (100,90,90,80)?",
+      "back": "ROW_NUMBER 1,2,3,4; RANK 1,2,2,4; DENSE_RANK 1,2,2,3."
+    },
+    {
+      "front": "Default frame when ORDER BY is present?",
+      "back": "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW (peers with equal ORDER BY values are included together)."
+    },
+    {
+      "front": "Get the previous row's value per customer?",
+      "back": "`LAG(total) OVER (PARTITION BY customer_id ORDER BY order_date)`"
+    },
+    {
+      "front": "Why can't you write WHERE ROW_NUMBER() OVER (...) = 1?",
+      "back": "Window functions are evaluated after WHERE. Compute in a CTE/subquery and filter outside."
+    },
+    {
+      "front": "PostgreSQL shortcut for latest row per key?",
+      "back": "`SELECT DISTINCT ON (id) * FROM t ORDER BY id, updated_at DESC;`"
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which function guarantees exactly one row with value 1 per partition, even with ties?",
+      "options": [
+        "ROW_NUMBER()",
+        "DENSE_RANK()",
+        "RANK()",
+        "NTILE(1)"
+      ],
+      "answer_index": 0,
+      "explanation": "ROW_NUMBER assigns unique sequential numbers; RANK and DENSE_RANK give ties the same rank."
+    },
+    {
+      "question": "`LAST_VALUE(total) OVER (ORDER BY order_date)` returns the current row's total. Why?",
+      "options": [
+        "LAST_VALUE is buggy",
+        "PARTITION BY is missing",
+        "The default frame ends at the current row (and its peers)",
+        "It needs DISTINCT"
+      ],
+      "answer_index": 2,
+      "explanation": "Extend the frame with ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING."
+    },
+    {
+      "question": "What does `SUM(SUM(total)) OVER ()` compute in a query grouped by day?",
+      "options": [
+        "Running total",
+        "Grand total across all days, repeated on every row",
+        "Sum per day",
+        "An error"
+      ],
+      "answer_index": 1,
+      "explanation": "The inner SUM is the group aggregate; the outer SUM is a window over all groups with an empty window."
+    },
+    {
+      "question": "A running total jumps by two days' worth of revenue at once on rows with the same date. Fix?",
+      "options": [
+        "Remove ORDER BY",
+        "Add DISTINCT",
+        "Use DENSE_RANK",
+        "Use ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+      ],
+      "answer_index": 3,
+      "explanation": "The default RANGE frame includes all peers; ROWS makes it strictly row-by-row (ideally with a tiebreaker)."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you remove duplicate rows from a staging table, keeping the most recent per business key?",
+      "difficulty": "medium",
+      "answer_md": "Rank rows per key with `ROW_NUMBER()` ordered by recency, then keep or delete by rank.\n\nSelecting the survivors:\n```sql\nWITH r AS (\n  SELECT *, ROW_NUMBER() OVER (PARTITION BY id, orgid\n                               ORDER BY updated_at DESC, ingest_id DESC) AS rn\n  FROM orders_staging)\nSELECT * FROM r WHERE rn = 1;\n```\n\nDeleting the losers in place:\n```sql\nDELETE FROM orders_staging s\nUSING (\n  SELECT ctid, ROW_NUMBER() OVER (PARTITION BY id, orgid ORDER BY updated_at DESC) rn\n  FROM orders_staging) d\nWHERE s.ctid = d.ctid AND d.rn > 1;\n```\n\nKey points: use `ROW_NUMBER`, not `RANK` (ties would keep multiple rows); add a tiebreaker for determinism; `ctid` is the physical row id, fine within one statement but not a stable identifier. In PostgreSQL, `DISTINCT ON (id, orgid) ... ORDER BY id, orgid, updated_at DESC` is a concise alternative. Deduping before an upsert prevents the \"ON CONFLICT DO UPDATE command cannot affect row a second time\" error."
+    },
+    {
+      "question": "Explain window frames: ROWS vs RANGE vs GROUPS, and the default frame.",
+      "difficulty": "hard",
+      "answer_md": "The **frame** is the subset of the partition that an aggregate window function sees for the current row.\n\n- **ROWS**: physical offsets. `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` is the current row plus the six before it, regardless of values.\n- **RANGE**: logical offsets on the ORDER BY value. `RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW` includes all rows whose date is within 7 days, however many rows that is. Rows with equal ORDER BY values (peers) are always included together.\n- **GROUPS**: offsets counted in peer groups. `GROUPS 1 PRECEDING` includes the previous distinct value's rows.\n\n**Defaults:** without ORDER BY the frame is the whole partition. With ORDER BY it is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which is why running totals step over ties and `LAST_VALUE` looks broken.\n\n```sql\n-- 7-day moving average by calendar, not by row count\nAVG(revenue) OVER (ORDER BY day RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW)\n```\n\nUse ROWS when rows are evenly spaced (one per day, guaranteed), and RANGE with an interval when dates may have gaps."
+    },
+    {
+      "question": "Compute each customer's days since their previous order.",
+      "difficulty": "easy",
+      "answer_md": "Use `LAG` partitioned by customer and ordered by date:\n\n```sql\nSELECT customer_id, id AS order_id, order_date,\n       order_date - LAG(order_date) OVER (PARTITION BY customer_id ORDER BY order_date, id)\n         AS days_since_prev\nFROM orders\nORDER BY customer_id, order_date;\n```\n\n- `PARTITION BY customer_id` restarts the comparison for each customer.\n- `ORDER BY order_date, id` defines \"previous\"; `id` breaks ties for same-day orders.\n- The first order per customer gets NULL, since there is no previous row. Use `LAG(order_date, 1, order_date)` to default to 0 instead.\n- If `order_date` is a `date`, subtraction gives an integer number of days; for `timestamptz` you get an `interval` (use `EXTRACT(EPOCH FROM ...)/86400` for numbers).\n\nYou can then aggregate, e.g. the average repurchase gap per customer, by wrapping this in a CTE and grouping."
+    }
+  ]
+}

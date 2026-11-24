@@ -1,0 +1,189 @@
+{
+  "slug": "pg-plpgsql-triggers",
+  "title": "PL/pgSQL: functions, procedures and triggers",
+  "skill": "postgresql",
+  "extra_skills": [
+    "database-design",
+    "transactions-locking"
+  ],
+  "category": "Database",
+  "difficulty": "advanced",
+  "tags": [
+    "plpgsql",
+    "functions",
+    "procedures",
+    "triggers",
+    "audit"
+  ],
+  "summary": "PL/pgSQL is PostgreSQL's built-in procedural language: variables, control flow, loops and exception handling inside the database. You use it to write functions, procedures and triggers that run automatically on INSERT/UPDATE/DELETE. Powerful for invariants and auditing, but hidden logic and performance costs need discipline.",
+  "why_md": "- Triggers keep derived data and audit trails consistent regardless of which service writes.\n- Functions and procedures encapsulate multi-step logic with transaction control close to the data.\n- It is the usual answer to 'how would you maintain updated_at / an audit table automatically?'.\n- Misused triggers cause slow bulk loads and surprising behaviour; knowing the trade-offs is a senior skill.",
+  "details_md": "### Functions\n```\nCREATE FUNCTION add_tax(price numeric, rate numeric DEFAULT 0.18) RETURNS numeric\nLANGUAGE plpgsql IMMUTABLE AS $$ BEGIN RETURN price * (1 + rate); END; $$;\n```\nThe body is a string delimited by dollar quoting `$$ ... $$`. A block has `DECLARE` (variables), `BEGIN ... END`. Key features: `IF/ELSIF/ELSE`, `LOOP/FOR/WHILE`, `FOR rec IN SELECT ... LOOP`, `RETURN`, `RETURN NEXT` / `RETURN QUERY` for set-returning functions, `SELECT ... INTO var`, `GET DIAGNOSTICS n = ROW_COUNT`, `RAISE NOTICE/EXCEPTION`, `FOUND`.\nVolatility labels guide the planner: `IMMUTABLE` (same inputs always same output, usable in indexes), `STABLE` (consistent within a statement), `VOLATILE` (default, may have side effects). Wrong labels cause wrong results. Plain `LANGUAGE sql` functions are often faster and can be inlined.\n\n### Procedures\n`CREATE PROCEDURE ... LANGUAGE plpgsql AS $$ ... $$;` is invoked with `CALL`. Unlike functions, procedures may `COMMIT` and `ROLLBACK` inside the body (when not called from within an outer transaction block), which suits batch jobs that process data in chunks.\n\n### Exception handling\n`BEGIN ... EXCEPTION WHEN unique_violation THEN ... END;` creates a subtransaction: on error the block's effects roll back and the handler runs. Subtransactions are not free; avoid entering them in tight loops.\n\n### Triggers\nA trigger = trigger function + `CREATE TRIGGER`. The function returns `trigger` and reads special variables: `NEW`, `OLD`, `TG_OP` (INSERT/UPDATE/DELETE), `TG_TABLE_NAME`.\n- **BEFORE** row triggers can modify `NEW` (set `updated_at`, normalise values) or return NULL to skip the row.\n- **AFTER** row triggers see the final row; use for audit logs and propagating changes. Their return value is ignored.\n- `FOR EACH ROW` vs `FOR EACH STATEMENT`; statement triggers can use transition tables (`REFERENCING NEW TABLE AS new_rows`) to process all affected rows at once, much faster for bulk operations.\n- `WHEN (OLD.* IS DISTINCT FROM NEW.*)` and `UPDATE OF col` limit when the trigger fires.\n- `INSTEAD OF` triggers make complex views writable. Event triggers react to DDL.\nTriggers run in the same transaction as the statement: if the trigger raises an error, the whole statement fails. They fire for every writer, including psql and bulk loads; `ALTER TABLE ... DISABLE TRIGGER` or `session_replication_role` can skip them.\n\n### Trade-offs\nPros: enforced centrally, cannot be bypassed by an app bug. Cons: hidden behaviour, harder testing and debugging, cost per row on bulk loads, version control and migration needs, logic split between code and database. Prefer constraints for validation, and use triggers for audit/timestamps/derived data.",
+  "code_md": "```sql\n-- Function: set-returning, with a loop and an exception handler\nCREATE OR REPLACE FUNCTION claim_next_job(p_queue text)\nRETURNS bigint LANGUAGE plpgsql AS $$\nDECLARE\n    v_id bigint;\nBEGIN\n    SELECT id INTO v_id\n    FROM jobs\n    WHERE queue = p_queue AND status = 'pending'\n    ORDER BY id\n    FOR UPDATE SKIP LOCKED\n    LIMIT 1;\n\n    IF NOT FOUND THEN\n        RETURN NULL;\n    END IF;\n    UPDATE jobs SET status = 'running', started_at = now() WHERE id = v_id;\n    RETURN v_id;\nEND;\n$$;\n```\n```sql\n-- Trigger: maintain updated_at (BEFORE ROW) only when something changed\nCREATE FUNCTION set_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n    NEW.updated_at := now();\n    RETURN NEW;\nEND;\n$$;\n\nCREATE TRIGGER products_set_updated_at\nBEFORE UPDATE ON products\nFOR EACH ROW\nWHEN (OLD.* IS DISTINCT FROM NEW.*)\nEXECUTE FUNCTION set_updated_at();\n```\n```sql\n-- Audit trigger (AFTER ROW) writing old/new as jsonb\nCREATE FUNCTION audit_row() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n    INSERT INTO audit_log (table_name, op, old_row, new_row, changed_at)\n    VALUES (TG_TABLE_NAME, TG_OP,\n            CASE WHEN TG_OP <> 'INSERT' THEN to_jsonb(OLD) END,\n            CASE WHEN TG_OP <> 'DELETE' THEN to_jsonb(NEW) END,\n            now());\n    RETURN NULL;     -- ignored for AFTER triggers\nEND;\n$$;\nCREATE TRIGGER orders_audit AFTER INSERT OR UPDATE OR DELETE ON orders\nFOR EACH ROW EXECUTE FUNCTION audit_row();\n```\n```sql\n-- Procedure with intermediate commits (batch purge)\nCREATE PROCEDURE purge_old_events(p_days int) LANGUAGE plpgsql AS $$\nDECLARE n int;\nBEGIN\n    LOOP\n        DELETE FROM events WHERE id IN (\n            SELECT id FROM events WHERE created_at < now() - make_interval(days => p_days) LIMIT 10000);\n        GET DIAGNOSTICS n = ROW_COUNT;\n        COMMIT;\n        EXIT WHEN n = 0;\n    END LOOP;\nEND;\n$$;\nCALL purge_old_events(90);\n```",
+  "use_cases_md": "- Automatic `updated_at` maintenance on every table.\n- Audit trail of price or status changes.\n- Maintaining denormalised summary counters (with care about concurrency).\n- Batch maintenance procedures that commit in chunks.\n- Encapsulating job-claiming logic with `FOR UPDATE SKIP LOCKED` in one function.",
+  "mistakes_md": "- **Business logic hidden in triggers**: surprises teammates; document and keep triggers small.\n- **Row triggers on bulk loads**: millions of function calls. Use statement-level triggers with transition tables, or disable triggers for controlled bulk loads.\n- **Recursive trigger chains** (trigger updates a table that fires another trigger): hard to debug, may loop.\n- **Wrong volatility label**: marking a non-pure function IMMUTABLE yields stale or wrong results.\n- **Exception blocks in tight loops**: each creates a subtransaction, which is expensive.\n- **Returning NULL from a BEFORE row trigger by accident**: silently skips the row.",
+  "best_practices_md": "- Use constraints for validation; triggers for audit/derived data only.\n- Keep trigger functions short, with a `WHEN` clause to avoid needless firing.\n- Use statement-level triggers with transition tables for set-based work.\n- Choose volatility labels honestly; prefer SQL functions where possible.\n- Version functions/triggers in migrations and test them.\n- Use `SECURITY DEFINER` sparingly and set `search_path` explicitly.",
+  "my_context_md": "The learner's job runner uses `SELECT ... FOR UPDATE SKIP LOCKED` from Python (ForcesightJobSchedulerAndRunner, src/lock.py, job_repo.py). The `claim_next_job` function above is the same claim pattern moved into the database, which is useful for comparison but not required; consider where a trigger-based `updated_at` or audit log could replace repeated manual updates in his services.",
+  "revision_notes_md": "- Function: `CREATE FUNCTION ... RETURNS ... LANGUAGE plpgsql AS $$ ... $$`.\n- Block: DECLARE, BEGIN, EXCEPTION, END; `FOUND`, `GET DIAGNOSTICS`, `RAISE`.\n- Volatility: IMMUTABLE / STABLE / VOLATILE (default).\n- Procedure: `CALL`; can COMMIT/ROLLBACK inside.\n- Trigger = function RETURNS trigger + CREATE TRIGGER.\n- `NEW`, `OLD`, `TG_OP`, `TG_TABLE_NAME`.\n- BEFORE can change NEW or return NULL to skip; AFTER return ignored.\n- Row vs statement triggers; transition tables for bulk.\n- `WHEN (OLD.* IS DISTINCT FROM NEW.*)` reduces firing.\n- EXCEPTION blocks = subtransactions (costly).",
+  "exercises_md": "1. Add a `set_updated_at` trigger to a table and verify it fires only when a row actually changes.\n2. Build an `audit_log` with an AFTER trigger and test INSERT, UPDATE and DELETE.\n3. Create a procedure that deletes old rows in batches of 5,000 with a COMMIT after each batch.\n4. Measure inserting 200k rows with and without a row-level audit trigger and discuss a statement-level alternative.",
+  "related": [
+    "be-postgres-locking-deadlocks",
+    "postgres-upsert",
+    "transactions-isolation",
+    "pg-jsonb-deep",
+    "psycopg2-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "BEFORE vs AFTER row trigger?",
+      "back": "BEFORE can modify NEW or skip the row (return NULL); AFTER sees the final row and its return value is ignored."
+    },
+    {
+      "front": "What are NEW and OLD?",
+      "back": "Row variables in triggers: NEW is the new row (INSERT/UPDATE), OLD the old row (UPDATE/DELETE)."
+    },
+    {
+      "front": "Function vs procedure?",
+      "back": "Function returns a value and runs inside the caller's transaction; procedure is invoked with CALL and may COMMIT/ROLLBACK."
+    },
+    {
+      "front": "Volatility categories?",
+      "back": "IMMUTABLE, STABLE, VOLATILE (default); they let the planner cache or index results."
+    },
+    {
+      "front": "Why can EXCEPTION blocks be slow?",
+      "back": "Each block with a handler starts a subtransaction."
+    },
+    {
+      "front": "Fast bulk trigger design?",
+      "back": "FOR EACH STATEMENT with transition tables (REFERENCING NEW TABLE AS ...)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which trigger timing lets you change the row being inserted?",
+      "options": [
+        "AFTER STATEMENT",
+        "INSTEAD OF on a table",
+        "AFTER ROW",
+        "BEFORE ROW"
+      ],
+      "answer_index": 3,
+      "explanation": "BEFORE ROW triggers can modify NEW."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A BEFORE ROW trigger function returns NULL. What happens to that row?",
+      "options": [
+        "It is inserted unchanged",
+        "It is skipped silently",
+        "The transaction aborts",
+        "It is queued"
+      ],
+      "answer_index": 1,
+      "explanation": "Returning NULL cancels the operation for that row."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which can COMMIT inside its body?",
+      "options": [
+        "A function",
+        "A trigger function",
+        "A procedure called outside an explicit transaction block",
+        "A view"
+      ],
+      "answer_index": 2,
+      "explanation": "Procedures support transaction control."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which volatility is allowed for a function used in an index expression?",
+      "options": [
+        "IMMUTABLE",
+        "Any",
+        "VOLATILE",
+        "STABLE"
+      ],
+      "answer_index": 0,
+      "explanation": "Index expressions must be immutable."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Trigger special variable holding the new row: ____.",
+      "answers": [
+        "new"
+      ],
+      "explanation": "NEW."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Invoke a procedure with the ____ statement.",
+      "answers": [
+        "call"
+      ],
+      "explanation": "CALL proc(args)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Statement-level triggers can access all changed rows through transition ____.",
+      "answers": [
+        "tables",
+        "table"
+      ],
+      "explanation": "REFERENCING NEW TABLE AS ..."
+    },
+    {
+      "type": "debug",
+      "prompt": "After adding this trigger, every INSERT on `orders` fails with: control reached end of trigger procedure without RETURN. What is wrong?",
+      "code": "CREATE FUNCTION normalise_order() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n    NEW.status := lower(NEW.status);\nEND;\n$$;\nCREATE TRIGGER orders_norm BEFORE INSERT ON orders\nFOR EACH ROW EXECUTE FUNCTION normalise_order();",
+      "answer": "A trigger function must end with a RETURN. A BEFORE ROW trigger must `RETURN NEW` (returning NULL would silently skip the row). Add `RETURN NEW;`.\n```sql\nBEGIN\n    NEW.status := lower(NEW.status);\n    RETURN NEW;\nEND;\n```",
+      "rubric": [
+        "BEFORE ROW must return NEW",
+        "Returning NULL skips the row",
+        "Fixed function shown"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between row-level and statement-level triggers and when to prefer each.",
+      "answer": "Row-level triggers fire once per affected row and see OLD/NEW, which suits per-row logic like updated_at or auditing. Statement-level triggers fire once per statement and, with transition tables, can process all affected rows in one set-based query, which is far faster for bulk operations.",
+      "rubric": [
+        "Per row vs per statement",
+        "OLD/NEW vs transition tables",
+        "Bulk performance"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What are the main trade-offs of putting business logic in triggers?",
+      "answer": "Benefits: enforced for every writer, close to the data, atomic with the statement. Costs: hidden side effects, harder debugging and testing, per-row overhead on bulk loads, risk of recursive chains, logic split between app and database. Use triggers for audit, timestamps and derived data; prefer constraints for validation and the app for business workflows.",
+      "rubric": [
+        "Central enforcement vs hidden behaviour",
+        "Performance on bulk operations",
+        "Prefer constraints / app code for most logic"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you automatically maintain an updated_at column?",
+      "difficulty": "easy",
+      "answer_md": "Create a trigger function that sets `NEW.updated_at := now()` and returns NEW, then a BEFORE UPDATE FOR EACH ROW trigger, optionally with `WHEN (OLD.* IS DISTINCT FROM NEW.*)` so no-op updates do not change it. Alternatively set it in application code, but the trigger works for every writer."
+    },
+    {
+      "question": "Function vs procedure in PostgreSQL?",
+      "difficulty": "medium",
+      "answer_md": "Functions return values and can be used in queries; they run within the caller's transaction and cannot commit. Procedures (PG11+) are called with CALL, return nothing (except OUT params) and can COMMIT/ROLLBACK, enabling chunked batch work."
+    },
+    {
+      "question": "What does IMMUTABLE promise and what happens if you lie?",
+      "difficulty": "hard",
+      "answer_md": "IMMUTABLE promises the function's result depends only on its arguments, forever. The planner may constant-fold it and allows its use in indexes. If it actually reads tables or settings, indexes and cached plans can hold stale or inconsistent results."
+    },
+    {
+      "question": "How can triggers hurt bulk loading and what are the options?",
+      "difficulty": "hard",
+      "answer_md": "A row trigger runs a function for every row, which multiplies load time. Options: temporarily disable the trigger (`ALTER TABLE ... DISABLE TRIGGER` or `session_replication_role = replica`) and reconcile afterwards, use statement-level triggers with transition tables, or batch the derived work in SQL after the load."
+    }
+  ]
+}

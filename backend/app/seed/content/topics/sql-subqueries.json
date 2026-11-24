@@ -1,0 +1,121 @@
+{
+  "slug": "sql-subqueries",
+  "title": "Subqueries: Scalar, IN, EXISTS and Correlated",
+  "skill": "sql-subqueries",
+  "extra_skills": [
+    "sql",
+    "query-optimization"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "sql",
+    "subquery",
+    "exists",
+    "correlated-subquery",
+    "anti-join"
+  ],
+  "summary": "A subquery is a SELECT nested inside another query. It can return one value (scalar), a list (for IN / ANY), a yes/no answer (EXISTS), or a whole table (in FROM). A correlated subquery references the outer row, so it logically runs once per row, although PostgreSQL often rewrites it into a join.",
+  "details_md": "### Kinds of subqueries\n| Kind | Where | Returns |\n|---|---|---|\n| Scalar | `SELECT`, `WHERE`, anywhere a value fits | Exactly one row, one column (or NULL if none; error if more than one) |\n| Row / list | `WHERE x IN (...)`, `= ANY (...)` | One column, many rows |\n| Existence | `WHERE EXISTS (...)` | true/false, stops at the first row found |\n| Derived table | `FROM (SELECT ...) AS t` | A full result set, must be aliased |\n\n### Correlated subqueries\nA subquery is **correlated** when it references a column from the outer query:\n```sql\nSELECT * FROM orders o\nWHERE total > (SELECT AVG(total) FROM orders i WHERE i.customer_id = o.customer_id);\n```\nLogically it is evaluated per outer row. PostgreSQL may execute it as a **SubPlan** (really once per row; fine for small outer sets, painful for millions), or the planner may pull it up into a join. `EXISTS`/`NOT EXISTS` and `IN` subqueries are routinely converted into **semi-joins and anti-joins** (`Hash Semi Join`, `Hash Anti Join`), which are efficient. Scalar subqueries in the SELECT list are not flattened, so each one is a SubPlan.\n\n### IN vs EXISTS vs JOIN\n- `IN (subquery)` and `EXISTS` usually produce the same semi-join plan in modern PostgreSQL; pick whichever reads better.\n- A JOIN is *not* equivalent when the inner side has duplicates: it multiplies rows, whereas `EXISTS`/`IN` never do.\n- `NOT IN` is the dangerous one. If the subquery returns any NULL, `x NOT IN (...)` is never true, so you get zero rows. It also cannot be turned into an efficient hashed anti-join in general. Always prefer `NOT EXISTS`.\n\n### ANY / ALL\n`x = ANY (subquery or array)` is the same as `IN`. `x > ALL (subquery)` means greater than every value. With psycopg2 you typically pass a Python list as an array: `WHERE id = ANY(%s)`.\n\n### Derived tables vs CTEs\nA subquery in `FROM` and a non-recursive CTE referenced once are planned the same way (inlined) since PostgreSQL 12. Use a CTE for readability when the logic has several steps; use a derived table for short one-off cases.\n\n### Scalar subquery pitfalls\nIf a scalar subquery returns two rows you get `ERROR: more than one row returned by a subquery used as an expression`. Guard with an aggregate (`MAX`), `LIMIT 1` plus a deterministic `ORDER BY`, or fix the data model. If it returns no rows, the value is NULL, which can quietly break comparisons.\n\n### When to rewrite\nIf `EXPLAIN` shows `SubPlan` executed `loops=500000`, rewrite it as a join to a pre-aggregated derived table or use a window function, e.g. `AVG(total) OVER (PARTITION BY customer_id)` instead of the per-row average above.",
+  "code_md": "```sql\n-- 1) Scalar subquery: compare each order to the global average\nSELECT id, total,\n       total - (SELECT AVG(total) FROM orders) AS diff_from_avg\nFROM orders;\n```\n\n```sql\n-- 2) EXISTS / NOT EXISTS (semi-join / anti-join)\n-- Customers who ordered in the last 30 days\nSELECT c.id, c.name\nFROM customers c\nWHERE EXISTS (\n    SELECT 1 FROM orders o\n    WHERE o.customer_id = c.id\n      AND o.order_date >= now() - interval '30 days'\n);\n\n-- SKUs in the catalogue with no inventory row (safe with NULLs)\nSELECT p.sku\nFROM products p\nWHERE NOT EXISTS (SELECT 1 FROM inventory i WHERE i.sku = p.sku);\n```\n\n```sql\n-- 3) Correlated subquery vs window-function rewrite\n-- Orders above their customer's average (SubPlan may run per row)\nSELECT o.id, o.customer_id, o.total\nFROM orders o\nWHERE o.total > (SELECT AVG(i.total) FROM orders i WHERE i.customer_id = o.customer_id);\n\n-- Same result, one pass over orders\nSELECT id, customer_id, total\nFROM (\n    SELECT o.*, AVG(total) OVER (PARTITION BY customer_id) AS cust_avg\n    FROM orders o\n) t\nWHERE total > cust_avg;\n```\n\n```python\n# 4) Passing a list from Python with psycopg2: use = ANY(array)\norder_ids = [101, 102, 103]\ncur.execute(\n    \"SELECT id, status FROM orders WHERE id = ANY(%s)\",  # list adapts to a PostgreSQL array\n    (order_ids,),\n)\nrows = cur.fetchall()\n```",
+  "use_cases_md": "- Existence checks: \"orders with at least one failed payment\" (`EXISTS`).\n- Orphan / gap detection: rows present in one table and missing in another (`NOT EXISTS`).\n- Comparing a row to a group statistic (above-average orders, latest record per key).\n- Filtering by a dynamic list computed from another table (`WHERE sku IN (SELECT sku FROM blocked_skus)`).\n- Derived tables to pre-aggregate before a join, avoiding fan-out.",
+  "mistakes_md": "- **`NOT IN` with a nullable subquery**: returns no rows if any NULL exists. Use `NOT EXISTS`.\n- **Scalar subquery returning multiple rows**: runtime error in production when data changes. Aggregate, constrain, or use a join.\n- **Replacing EXISTS with a JOIN** for \"has any\": duplicates the outer rows. Keep `EXISTS` or add `DISTINCT` (EXISTS is cheaper).\n- **Heavy correlated subqueries in SELECT** over large tables: executed per row. Rewrite with a join to an aggregated derived table, a window function, or LATERAL.\n- **Forgetting the alias on a derived table**: `FROM (SELECT ...)` needed an alias before PostgreSQL 16; add one anyway for clarity.\n- **Selecting columns inside EXISTS** thinking they matter: `EXISTS (SELECT 1 ...)` and `EXISTS (SELECT * ...)` are identical; the select list is ignored.",
+  "best_practices_md": "- Default to `EXISTS` / `NOT EXISTS` for presence checks.\n- Use `= ANY(%s)` with a Python list instead of building `IN (...)` strings by hand.\n- Check `EXPLAIN` for `SubPlan` nodes with large loop counts; those are rewrite candidates.\n- Make scalar subqueries provably single-row (filter on a unique key or aggregate).\n- When a subquery grows past a few lines, move it into a named CTE for readability.",
+  "my_context_md": "Reconciliation work often comes down to anti-joins: settlement rows from PayU, Easebuzz, Shiprocket or Shippigo that have no matching order, or orders with no settlement. `NOT EXISTS` is the safe way to express that; `NOT IN` will silently return nothing if any order ID in the subquery is NULL, which is easy to get from messy marketplace CSV/XLSX files parsed by `read_and_validate()`. When filtering by a batch of IDs from pandas, pass a list to psycopg2 as `= ANY(%s)`.",
+  "related": [
+    "sql-joins",
+    "sql-ctes",
+    "sql-window-functions",
+    "sql-null-handling",
+    "explain-analyze"
+  ],
+  "flashcards": [
+    {
+      "front": "What is a correlated subquery?",
+      "back": "A subquery that references a column of the outer query, so it is logically evaluated once per outer row."
+    },
+    {
+      "front": "Why avoid NOT IN (subquery)?",
+      "back": "If the subquery yields any NULL, the predicate is never true, so zero rows come back. Use NOT EXISTS."
+    },
+    {
+      "front": "What happens if a scalar subquery returns 2 rows? 0 rows?",
+      "back": "2 rows: runtime error. 0 rows: the value is NULL."
+    },
+    {
+      "front": "Does `EXISTS (SELECT * ...)` cost more than `EXISTS (SELECT 1 ...)`?",
+      "back": "No, the select list is ignored; only whether a row exists matters."
+    },
+    {
+      "front": "How do you pass a Python list into WHERE with psycopg2?",
+      "back": "`WHERE id = ANY(%s)` with `(my_list,)` as params; the list becomes an array."
+    },
+    {
+      "front": "Which plan nodes show EXISTS/NOT EXISTS were flattened?",
+      "back": "Semi Join / Anti Join (e.g. Hash Semi Join, Hash Anti Join)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which predicate is NULL-safe for finding customers with no orders?",
+      "options": [
+        "c.id NOT IN (SELECT customer_id FROM orders)",
+        "NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)",
+        "c.id <> ALL (SELECT customer_id FROM orders)",
+        "c.id != ANY (SELECT customer_id FROM orders)"
+      ],
+      "answer_index": 1,
+      "explanation": "NOT IN and <> ALL both return unknown when the list contains NULL; NOT EXISTS does not care about NULLs."
+    },
+    {
+      "question": "`SELECT (SELECT id FROM orders WHERE customer_id = 7)` fails. Most likely error?",
+      "options": [
+        "Subquery must be aliased",
+        "Column ambiguity",
+        "Division by zero",
+        "More than one row returned by a subquery used as an expression"
+      ],
+      "answer_index": 3,
+      "explanation": "Customer 7 has several orders; a scalar subquery must return at most one row."
+    },
+    {
+      "question": "In EXPLAIN, a `SubPlan` with loops=1000000 typically suggests...",
+      "options": [
+        "A correlated subquery is running per row and may need rewriting",
+        "The query was parallelised",
+        "An index-only scan was used",
+        "The CTE was materialized"
+      ],
+      "answer_index": 0,
+      "explanation": "Rewrite with a join to a pre-aggregated set, a window function, or LATERAL."
+    },
+    {
+      "question": "Replacing `WHERE EXISTS (SELECT 1 FROM shipments s WHERE s.order_id = o.id)` with `JOIN shipments s ON s.order_id = o.id` may...",
+      "options": [
+        "Fail to compile",
+        "Return fewer rows",
+        "Return duplicate order rows",
+        "Change nothing ever"
+      ],
+      "answer_index": 2,
+      "explanation": "A join emits one row per matching shipment; EXISTS emits each order once."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Compare IN, EXISTS and JOIN for filtering rows based on another table.",
+      "difficulty": "medium",
+      "answer_md": "All three can express \"orders whose customer is in segment X\", but they differ in semantics:\n\n- **`IN (subquery)`**: semantic membership; duplicates in the subquery do not duplicate outer rows. PostgreSQL usually plans it as a semi-join.\n- **`EXISTS (correlated subquery)`**: also a semi-join; it stops at the first match. It's the most explicit way to say \"has any\".\n- **`JOIN`**: produces one output row per match, so if the inner side is not unique on the key, outer rows are duplicated. You only want a join when you need columns from the other table.\n\n```sql\n-- semi-join, no duplicates\nSELECT o.* FROM orders o\nWHERE EXISTS (SELECT 1 FROM vip_customers v WHERE v.customer_id = o.customer_id);\n```\n\nFor the negative case, use `NOT EXISTS`, not `NOT IN`: `NOT IN` returns nothing if the subquery contains a NULL and is harder for the planner to turn into a hashed anti-join. Performance between IN and EXISTS is typically identical in modern PostgreSQL; verify with `EXPLAIN` and look for `Semi Join` / `Anti Join` nodes."
+    },
+    {
+      "question": "Explain why `WHERE id NOT IN (SELECT ref_id FROM t)` can return zero rows even when there are clearly unmatched ids.",
+      "difficulty": "easy",
+      "answer_md": "SQL uses three-valued logic: TRUE, FALSE and UNKNOWN (NULL). `x NOT IN (a, b, NULL)` expands to `x <> a AND x <> b AND x <> NULL`. The last comparison is UNKNOWN, so the whole `AND` chain can be FALSE or UNKNOWN, but never TRUE. `WHERE` keeps only TRUE rows, so nothing comes back.\n\n```sql\nSELECT 5 NOT IN (1, 2, NULL);   -- NULL, not true\n```\n\nFixes:\n```sql\n-- Preferred\nSELECT o.id FROM orders o\nWHERE NOT EXISTS (SELECT 1 FROM refunds r WHERE r.order_id = o.id);\n\n-- Or exclude NULLs explicitly\nWHERE id NOT IN (SELECT ref_id FROM t WHERE ref_id IS NOT NULL)\n```\n\n`NOT EXISTS` is preferred because it is correct by construction and is planned as an efficient anti-join."
+    },
+    {
+      "question": "You find a slow report with three correlated scalar subqueries in the SELECT list. How do you optimise it?",
+      "difficulty": "hard",
+      "answer_md": "Each scalar subquery in the SELECT list becomes a **SubPlan** that executes once per output row. With 200k rows and three subqueries, that's 600k small queries inside one statement.\n\n```sql\n-- Before\nSELECT c.id,\n  (SELECT COUNT(*)   FROM orders o WHERE o.customer_id = c.id) AS n,\n  (SELECT SUM(total) FROM orders o WHERE o.customer_id = c.id) AS revenue,\n  (SELECT MAX(order_date) FROM orders o WHERE o.customer_id = c.id) AS last_order\nFROM customers c;\n```\n\nRewrite so `orders` is scanned and aggregated once, then joined:\n\n```sql\nWITH agg AS (\n  SELECT customer_id, COUNT(*) AS n, SUM(total) AS revenue, MAX(order_date) AS last_order\n  FROM orders GROUP BY customer_id\n)\nSELECT c.id, COALESCE(a.n, 0), COALESCE(a.revenue, 0), a.last_order\nFROM customers c LEFT JOIN agg a ON a.customer_id = c.id;\n```\n\nUse LEFT JOIN and `COALESCE` to keep the same semantics for customers without orders (COUNT was 0, SUM was NULL). Alternatively use `LEFT JOIN LATERAL` with one subquery computing all three values if only a few customers are selected and `orders(customer_id)` is indexed. Confirm with `EXPLAIN ANALYZE` that SubPlans are gone and compare timings."
+    }
+  ]
+}

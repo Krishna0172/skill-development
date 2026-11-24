@@ -1,0 +1,71 @@
+{
+  "slug": "python-functions-args",
+  "why_md": "Function signatures are the API of your code. Keyword-only args, `*args/**kwargs` forwarding and sensible defaults decide whether a 100-line processor is callable safely by others. The mutable-default-argument bug is a classic interview question and a real production bug source, and closures/first-class functions are the base for decorators, callbacks and dispatch tables used in every backend and agent framework.",
+  "revision_notes_md": "- Order: positional, `*args`, keyword-only, `**kwargs`; `/` marks positional-only.\n- Parameters after `*` are keyword-only: `def run(df, *, dry_run=False)`.\n- Defaults are evaluated ONCE at def time - never use `[]`/`{}` as defaults; use `None`.\n- `*args` is a tuple, `**kwargs` a dict; forward with `f(*args, **kwargs)`.\n- Functions are objects: store in dicts, pass as callbacks, return from functions.\n- Closures capture variables by reference (late binding) - bind loop vars via default `i=i` or `functools.partial`.\n- `nonlocal` rebinds an enclosing-function variable; `global` rebinds module state (avoid).\n- `functools.partial` pre-fills args and is picklable, unlike lambdas.",
+  "exercises_md": "1. Pick a long function from one of your services and refactor its signature: make flags keyword-only, replace mutable defaults with `None`, and add type hints.\n2. Write `make_processor(column_map)` that returns a closure renaming dict keys per the map; build three processors for three fake marketplaces and store them in a dispatch dict.",
+  "my_context_md": "The spec scan of your work repo found 85 mutable default args and 342 `global` statements - both are signature/scope habits this topic fixes directly (`None` defaults, passing state as parameters instead of rebinding globals). The ECSMarketplaceDataUpload registry dispatcher that maps report types to processors relies on functions being first-class objects.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "In `def upload(df, *, dry_run=False)`, the `*` makes `dry_run` a ____ argument.",
+      "answers": [
+        "keyword-only",
+        "keyword only",
+        "kw-only",
+        "keyword"
+      ],
+      "explanation": "Parameters after a bare `*` can only be passed by name."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Default argument values are evaluated once, at function ____ time.",
+      "answers": [
+        "definition",
+        "def",
+        "define"
+      ],
+      "explanation": "That's why a mutable default is shared across calls."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def add(item, bucket=[]):\n    bucket.append(item)\n    return bucket\n\nadd(\"a\")\nadd(\"b\")\nprint(add(\"c\"))\nprint(add(\"x\", []))",
+      "answers": [
+        "['a', 'b', 'c']\n['x']"
+      ],
+      "explanation": "The default list is created once and shared across calls; passing an explicit list uses a fresh one."
+    },
+    {
+      "type": "debug",
+      "prompt": "These callbacks should print 0, 1, 2 but print 2, 2, 2. Fix it.",
+      "code": "callbacks = [lambda: print(i) for i in range(3)]\nfor cb in callbacks:\n    cb()",
+      "answer": "Closures use **late binding**: each lambda looks up `i` when called, after the loop finished with `i == 2`.\n\n```python\ncallbacks = [lambda i=i: print(i) for i in range(3)]\n# or: functools.partial(print, i)\n```",
+      "rubric": [
+        "Closures look up variables at call time (late binding)",
+        "Bind the current value via default arg or functools.partial"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain `*args` and `**kwargs` and when forwarding them is appropriate.",
+      "answer": "`*args` collects extra positional arguments into a tuple and `**kwargs` collects extra keyword arguments into a dict. At a call site, `*` and `**` unpack sequences/mappings into arguments. Forwarding (`return fn(*args, **kwargs)`) is right for wrappers - decorators, retry helpers, `executor.submit(fn, *args)` - where you don't care about the signature. In normal business functions prefer explicit parameters: they document the API, enable type checking and catch typos that `**kwargs` would swallow.",
+      "rubric": [
+        "*args -> tuple of positionals, **kwargs -> dict of keywords",
+        "* / ** at call site unpack",
+        "Forward in wrappers/decorators; prefer explicit params elsewhere"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does `def f(a, b, /, c)` mean?",
+      "options": [
+        "a and b are keyword-only",
+        "a and b are positional-only",
+        "c is positional-only",
+        "It's a syntax error"
+      ],
+      "answer_index": 1,
+      "explanation": "Parameters before `/` are positional-only (PEP 570)."
+    }
+  ]
+}

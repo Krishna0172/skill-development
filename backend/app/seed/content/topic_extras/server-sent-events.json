@@ -1,0 +1,56 @@
+{
+  "slug": "server-sent-events",
+  "why_md": "SSE is the simplest way to push a stream of events from server to browser over plain HTTP - and it's how most LLM APIs and chat UIs stream tokens. Knowing the wire format, reconnection, proxy buffering and disconnect handling lets you build streaming AI features and answer 'SSE vs WebSockets vs polling' in interviews.",
+  "revision_notes_md": "- One long HTTP response with `Content-Type: text/event-stream`.\n- Each event: lines `event: name`, `id: 42`, `data: ...`, terminated by a blank line (`\\n\\n`).\n- Multi-line data -> multiple `data:` lines; send JSON on one line.\n- Browser `EventSource` auto-reconnects and sends `Last-Event-ID`.\n- `retry: 5000` sets reconnection delay; `: comment` lines as heartbeats.\n- Disable proxy buffering (`X-Accel-Buffering: no` for nginx), `Cache-Control: no-cache`.\n- Server -> client only; use WebSockets for bidirectional low-latency.\n- Stop the generator when the client disconnects (`await request.is_disconnected()`).",
+  "exercises_md": "1. Write a generator `sse(event, data, id=None)` that formats events correctly (including multi-line data) and test it against expected strings.\n2. Build an endpoint (FastAPI `StreamingResponse` or Flask streaming) that emits progress events for a fake 10-step job, with heartbeats and disconnect detection.",
+  "my_context_md": "The LLM chat product backend (`GetLlmData` + `ECSLlmQueryProcess`, Flask) stores chat sessions and message history; streaming assistant replies or text-to-SQL progress to the UI is where SSE would apply. That repo makes no direct LLM API calls, so streaming model output would be new work rather than something already built.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "An SSE response must use the Content-Type text/____.",
+      "answers": [
+        "event-stream"
+      ],
+      "explanation": "text/event-stream"
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Each SSE event is terminated by a ____ line.",
+      "answers": [
+        "blank",
+        "empty"
+      ],
+      "explanation": "i.e. two newlines in a row."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import json\n\ndef sse(data, event=None, id=None):\n    lines = []\n    if event:\n        lines.append(f\"event: {event}\")\n    if id is not None:\n        lines.append(f\"id: {id}\")\n    for part in str(data).split(\"\\n\"):\n        lines.append(f\"data: {part}\")\n    return \"\\n\".join(lines) + \"\\n\\n\"\n\nmsg = sse(json.dumps({\"pct\": 50}), event=\"progress\", id=3) + sse(\"line1\\nline2\")\nprint(msg.count(\"\\n\\n\"))\nprint(msg.strip())",
+      "answers": [
+        "2\nevent: progress\nid: 3\ndata: {\"pct\": 50}\n\ndata: line1\ndata: line2"
+      ],
+      "explanation": "Two events -> two blank-line terminators; multi-line data becomes multiple data: lines."
+    },
+    {
+      "type": "debug",
+      "prompt": "In production behind nginx, the client gets all events at once when the job ends. Fix it.",
+      "code": "@app.get(\"/jobs/{job_id}/events\")\nasync def events(job_id: str):\n    async def gen():\n        while not done(job_id):\n            yield f\"data: {progress(job_id)}\\n\\n\"\n            await asyncio.sleep(1)\n    return StreamingResponse(gen(), media_type=\"text/event-stream\")",
+      "answer": "nginx buffers proxied responses by default, so chunks are held until the response ends. Disable buffering and caching; also stop on client disconnect:\n\n```python\n@app.get(\"/jobs/{job_id}/events\")\nasync def events(job_id: str, request: Request):\n    async def gen():\n        while not done(job_id):\n            if await request.is_disconnected():\n                break\n            yield f\"data: {progress(job_id)}\\n\\n\"\n            await asyncio.sleep(1)\n    return StreamingResponse(gen(), media_type=\"text/event-stream\",\n        headers={\"Cache-Control\": \"no-cache\", \"X-Accel-Buffering\": \"no\"})\n```\n(or `proxy_buffering off;` in the nginx location).",
+      "rubric": [
+        "Reverse proxy buffering delays the stream",
+        "Set X-Accel-Buffering: no / proxy_buffering off and Cache-Control: no-cache",
+        "Check for client disconnect"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Compare SSE, WebSockets and polling for streaming LLM tokens to a chat UI.",
+      "answer": "Polling is simple but adds latency and wasted requests. SSE is a one-way server->client stream over normal HTTP: works with existing auth, proxies and HTTP/2, has built-in reconnection, and fits token streaming perfectly - the user's next message is just a normal POST. WebSockets are full-duplex and better for high-frequency bidirectional traffic (collaborative editing, games) but need connection upgrade handling, their own auth and reconnection logic. For LLM chat, SSE is the common choice (most LLM APIs stream via SSE).",
+      "rubric": [
+        "Polling: simple but laggy/wasteful",
+        "SSE: one-way over HTTP, auto-reconnect, ideal for token streams",
+        "WebSockets: bidirectional, more complex"
+      ]
+    }
+  ]
+}

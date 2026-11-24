@@ -1,0 +1,164 @@
+{
+  "slug": "ai-agents-tool-calling",
+  "title": "Agents & tool calling: the reason-act-observe loop",
+  "skill": "ai-agents",
+  "extra_skills": [
+    "llm-applications",
+    "web-security"
+  ],
+  "category": "AI",
+  "difficulty": "advanced",
+  "tags": [
+    "agents",
+    "tool-calling",
+    "react",
+    "text-to-sql",
+    "max-steps",
+    "safety"
+  ],
+  "summary": "An agent is a loop: the model decides on an action (a tool call), your code executes it, and the result is fed back until the model produces a final answer or a limit is hit. The engineering lives in tool design, stopping conditions and safety boundaries — especially for tools that touch a database.",
+  "why_md": "- 'Build an agent' is the most common GenAI interview/system-design prompt; you must be able to write the loop without a framework.\n- The model never executes anything — **your code does**. That makes tool permissions, validation and limits a backend engineering problem.\n- A text-to-SQL agent (schema lookup -> write query -> run -> fix errors) is a natural extension of what GetLlmData stores.",
+  "details_md": "### The loop\n1. Send messages + tool definitions (name, description, JSON-schema parameters) to the model.\n2. The model replies either with **text** (final answer) or a **tool call** `{name, arguments}`.\n3. Your code validates the arguments, executes the tool, and appends the result as an *observation* message.\n4. Repeat. This is the ReAct pattern: reason -> act -> observe.\n\n### Tool design\n- Few, well-named tools with sharp descriptions; the description is the model's only documentation.\n- Narrow inputs (`get_order_status(order_id: int)`) beat generic ones (`run_python(code)`).\n- Return compact, structured results; truncate big result sets (row limits) — observations cost tokens.\n- Return errors as observations (`{\"error\": \"column ordr_id does not exist\"}`) so the model can self-correct, instead of crashing the loop.\n\n### Stopping conditions\n- Model returns a final answer (no tool call).\n- **max_steps** reached (e.g. 6-10) — prevents infinite loops and runaway cost.\n- Token/cost budget or wall-clock timeout exceeded.\n- Repeated identical tool calls (loop detection).\nAlways return something useful on a forced stop: partial result + reason.\n\n### Text-to-SQL agent\nTools: `list_tables()`, `describe_table(name)`, `run_readonly_sql(sql)`. The model inspects schema, drafts SQL, runs it, reads errors, fixes. Safety comes from **where the SQL runs**, not from asking the model nicely: a read-only Postgres role, `statement_timeout`, enforced `LIMIT`, single-statement check, and org/tenant scoping.\n\n### Tools that write\nFor DB-writing tools (refund, update price): require structured arguments validated server-side, enforce the caller's permissions in code, make them idempotent (idempotency key), cap amounts, and often require **human confirmation** before execution. Log every call with arguments and result for audit.",
+  "code_md": "```python\n# Framework-free agent loop with a tool registry, validation and max_steps.\nimport json\n\nTOOLS = {}\n\ndef tool(fn):\n    TOOLS[fn.__name__] = fn\n    return fn\n\n@tool\ndef describe_table(name: str) -> dict:\n    allowed = {\"orders\": [\"id\", \"org_id\", \"total\", \"created_at\"]}\n    if name not in allowed:\n        return {\"error\": f\"unknown table {name}\"}\n    return {\"columns\": allowed[name]}\n\ndef run_agent(call_model, user_msg: str, max_steps: int = 8) -> str:\n    messages = [{\"role\": \"user\", \"content\": user_msg}]\n    for step in range(max_steps):\n        reply = call_model(messages, tools=list(TOOLS))     # provider SDK call\n        if reply.get(\"tool_call\") is None:\n            return reply[\"content\"]                         # final answer\n        call = reply[\"tool_call\"]\n        fn = TOOLS.get(call[\"name\"])\n        try:\n            result = fn(**call[\"arguments\"]) if fn else {\"error\": \"unknown tool\"}\n        except Exception as exc:                            # tool errors become observations\n            result = {\"error\": str(exc)}\n        messages.append({\"role\": \"assistant\", \"tool_call\": call})\n        messages.append({\"role\": \"tool\", \"name\": call[\"name\"], \"content\": json.dumps(result)[:4000]})\n    return \"Stopped: step limit reached without a final answer.\"\n```\n\n```sql\n-- Make the SQL tool safe at the database level, not in the prompt.\nCREATE ROLE llm_reader NOLOGIN;\nGRANT USAGE ON SCHEMA reporting TO llm_reader;\nGRANT SELECT ON ALL TABLES IN SCHEMA reporting TO llm_reader;   -- views scoped per org\nALTER ROLE llm_reader SET statement_timeout = '5s';\nALTER ROLE llm_reader SET default_transaction_read_only = on;\n-- In the tool: SET LOCAL ROLE llm_reader; run inside a transaction; wrap as\n-- SELECT * FROM (<model sql>) q LIMIT 200;  and always ROLLBACK afterwards.\n```",
+  "use_cases_md": "- **Analytics assistant**: text-to-SQL agent over per-org reporting views (sales, returns, ad spend).\n- **Order support agent**: `get_order`, `get_shipment`, `create_refund_request` (write tool behind human approval).\n- **Ops assistant**: query job-runner status tables and summarise failed jobs.\n- **Catalog enrichment**: agent calls a product lookup tool and a category classifier before writing a suggestion row (not the live catalog).",
+  "mistakes_md": "- **No step limit** – a confused model loops forever and burns money. Always cap steps and tokens.\n- **Executing tool calls without validation** – arguments are model output, i.e. untrusted input. Validate types/ranges and permissions.\n- **Safety by prompt** ('only write SELECT queries') – prompts are not access control. Use a read-only role, timeouts, LIMIT.\n- **Crashing on tool errors** – return the error as an observation so the model can retry with a fix.\n- **Huge observations** – dumping 10k rows into context. Truncate and summarise.\n- **Generic 'execute anything' tools** – maximal blast radius.",
+  "best_practices_md": "- Start with a deterministic workflow; add agent autonomy only where the path genuinely varies.\n- Small, typed tools with clear descriptions; validate arguments with Pydantic.\n- Hard limits: max_steps, token budget, timeout, loop detection.\n- Least privilege per tool (DB roles, scoped API keys, org_id injected by server, never by the model).\n- Human-in-the-loop for irreversible actions; idempotency keys on write tools.\n- Trace every step: prompt, tool call, arguments, result, tokens, latency.",
+  "my_context_md": "`GetLlmData` / `ECSLlmQueryProcess` already persist the original and dynamic SQL the model produced, plus sessions, history, votes and per-org cost — exactly the artefacts an agent trace needs. An agentic version would add steps (describe table -> draft -> run -> fix) per message; each step's SQL and error could go to the same storage. Your psycopg2 experience matters for the safety layer: running the model's SQL under a read-only role with `statement_timeout`, inside a transaction you always roll back, and using `psycopg2.sql` composition (not f-strings, a habit flagged in your repo) for any identifiers your code injects.",
+  "revision_notes_md": "- Agent = loop: model -> tool call -> your code executes -> observation -> repeat.\n- Model never runs tools; your code does (validate everything).\n- Tool = name + description + JSON schema params; keep tools narrow.\n- Stop on: final answer, max_steps, token/cost budget, timeout, repeated calls.\n- Tool errors -> observations, enabling self-correction.\n- Text-to-SQL safety: read-only role, statement_timeout, LIMIT, single statement, org-scoped views, rollback.\n- Write tools: server-side validation, permissions, idempotency key, human approval, audit log.\n- Truncate observations to control tokens.",
+  "exercises_md": "1. Implement the loop above with a scripted fake model (list of canned replies) and pytest tests for: final answer, unknown tool, tool exception, max_steps hit.\n2. Create a `llm_reader` Postgres role locally and a `run_readonly_sql` tool that enforces single statement, LIMIT wrapping and rollback; prove an `UPDATE` fails.\n3. Add loop detection: stop if the same tool+arguments is called 3 times.\n4. Design a `create_refund_request` write tool with an idempotency key and a pending-approval status instead of direct execution.",
+  "related": [
+    "ai-function-calling",
+    "ai-multistep-workflows",
+    "ai-guardrails",
+    "ai-security",
+    "ai-structured-outputs",
+    "ai-frameworks-langchain-llamaindex"
+  ],
+  "flashcards": [
+    {
+      "front": "The agent loop in one line?",
+      "back": "Model proposes a tool call -> your code validates & executes -> result appended as observation -> repeat until final answer or limit."
+    },
+    {
+      "front": "Four stopping conditions for an agent?",
+      "back": "Final answer, max_steps, token/cost budget or timeout, loop detection (repeated identical calls)."
+    },
+    {
+      "front": "Why return tool errors as observations?",
+      "back": "So the model can read the error (e.g. bad column) and self-correct instead of the loop crashing."
+    },
+    {
+      "front": "Where does text-to-SQL safety belong?",
+      "back": "In the database/execution layer: read-only role, statement_timeout, LIMIT, single statement, scoped views, rollback — not in the prompt."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "In tool calling, who actually executes the tool?",
+      "options": [
+        "The model provider's servers",
+        "The model itself, inside its weights",
+        "Your application code, after receiving the tool call",
+        "The vector database"
+      ],
+      "answer_index": 2,
+      "explanation": "The model only emits a structured request; your code decides whether and how to run it."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the most robust way to stop a text-to-SQL agent from modifying data?",
+      "options": [
+        "Run its SQL as a read-only DB role with statement_timeout and enforced LIMIT",
+        "Add 'never write UPDATE' to the system prompt",
+        "Lower the temperature to 0",
+        "Use a bigger model"
+      ],
+      "answer_index": 0,
+      "explanation": "Access control must be enforced by the execution environment, not by instructions the model may ignore or be injected around."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To prevent infinite loops and runaway cost, every agent loop needs a ____ limit on iterations.",
+      "answers": [
+        "max_steps",
+        "max steps",
+        "step",
+        "max-steps",
+        "maximum steps",
+        "iteration"
+      ],
+      "explanation": "A hard cap on steps (plus token/time budgets) is mandatory."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The reason -> act -> observe agent pattern is commonly called ____.",
+      "answers": [
+        "react",
+        "re-act",
+        "reason+act"
+      ],
+      "explanation": "ReAct interleaves reasoning and tool actions with observations."
+    },
+    {
+      "type": "output",
+      "prompt": "This toy agent loop uses a scripted 'model'. What does it print?",
+      "code": "TOOLS = {\"add\": lambda a, b: a + b, \"double\": lambda x: x * 2}\nscript = [\n    {\"tool\": \"add\", \"args\": {\"a\": 2, \"b\": 3}},\n    {\"tool\": \"mul\", \"args\": {}},\n    {\"tool\": \"double\", \"args\": {\"x\": 5}},\n    {\"final\": \"answer is 10\"},\n]\nobs = []\nfor step, reply in enumerate(script[:3], 1):\n    if \"final\" in reply:\n        print(\"final:\", reply[\"final\"])\n        break\n    fn = TOOLS.get(reply[\"tool\"])\n    result = fn(**reply[\"args\"]) if fn else \"error: unknown tool\"\n    obs.append(result)\n    print(step, reply[\"tool\"], \"->\", result)\nelse:\n    print(\"stopped: max_steps\")\nprint(obs)\n",
+      "answers": [
+        "1 add -> 5\n2 mul -> error: unknown tool\n3 double -> 10\nstopped: max_steps\n[5, 'error: unknown tool', 10]"
+      ],
+      "explanation": "Only 3 steps are allowed (script[:3]); the unknown tool becomes an error observation, and the for-else prints the max_steps message because no break happened."
+    },
+    {
+      "type": "debug",
+      "prompt": "This SQL tool is exposed to an agent. What's wrong and how do you fix it?",
+      "code": "def run_sql(sql: str, org_id: int):\n    with conn.cursor() as cur:\n        cur.execute(f\"{sql} AND org_id = {org_id}\")\n        conn.commit()\n        return cur.fetchall()\n",
+      "answer": "Problems: the model's SQL runs with the app's (write-capable) connection and is **committed**, so `DELETE`/`UPDATE` would persist; tenant scoping by string-appending `AND org_id = ...` is fragile (breaks with GROUP BY/ORDER BY, can be bypassed with `OR 1=1`); no row limit or timeout; multiple statements possible.\n\nFix:\n```python\ndef run_sql(sql: str, org_id: int):\n    if \";\" in sql.strip().rstrip(\";\"):\n        return {\"error\": \"single statement only\"}\n    with conn.cursor() as cur:\n        try:\n            cur.execute(\"SET LOCAL ROLE llm_reader\")          # read-only, org-scoped views\n            cur.execute(\"SET LOCAL statement_timeout = '5s'\")\n            cur.execute(\"SELECT set_config('app.org_id', %s, true)\", (str(org_id),))  # used by RLS/views\n            cur.execute(f\"SELECT * FROM ({sql.rstrip(';')}) q LIMIT 200\")\n            return {\"rows\": cur.fetchall()}\n        except Exception as exc:\n            return {\"error\": str(exc)}\n        finally:\n            conn.rollback()                                     # never commit model SQL\n```",
+      "rubric": [
+        "Commits model SQL with a write-capable connection",
+        "String-appended tenant filter is fragile/bypassable",
+        "Use read-only role + timeout + LIMIT + rollback",
+        "Enforce org scoping via views/RLS set by the server"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would design the tools for a text-to-SQL agent and keep it safe.",
+      "answer": "Tools: `list_tables()`, `describe_table(name)` returning columns and short descriptions, and `run_readonly_sql(sql)`. Optional `sample_rows(table)`. Loop: the model inspects schema, writes SQL, runs it, reads errors, fixes, then answers. Safety in the execution layer: read-only role on org-scoped views or RLS with `org_id` set by the server, `statement_timeout`, single statement, `LIMIT` wrapping, always rollback. Limits: max_steps, token budget. Observability: store each generated SQL, error, row count, latency and token cost per org.",
+      "rubric": [
+        "Names narrow schema + execution tools",
+        "Describes the self-correcting loop",
+        "Enforces safety in DB layer (role, timeout, LIMIT, scoping)",
+        "Mentions limits and logging/tracing"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "An agent should be able to issue refunds. What controls do you put around that write tool?",
+      "answer": "- Typed, validated arguments (order_id, amount, reason); amount capped and checked against the order total.\n- `org_id`/user identity injected by the server from the authenticated session, never taken from the model.\n- Permission check in code for that user.\n- Idempotency key so retries don't double-refund.\n- Create a **pending** refund requiring human approval above a threshold (or always).\n- Audit log of the call, arguments, approver and result.\n- Rate limit refunds per session.",
+      "rubric": [
+        "Server-side validation and caps",
+        "Identity/permissions from server, not model",
+        "Idempotency",
+        "Human approval and audit logging"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Write (or describe) an agent loop without using a framework.",
+      "difficulty": "medium",
+      "answer_md": "```python\ndef run(call_model, messages, tools, max_steps=8):\n    for _ in range(max_steps):\n        reply = call_model(messages, tools=tools.schemas())\n        if not reply.tool_calls:\n            return reply.text\n        messages.append(reply.as_message())\n        for call in reply.tool_calls:\n            try:\n                args = tools.validate(call.name, call.arguments)   # Pydantic\n                result = tools.run(call.name, args)\n            except Exception as e:\n                result = {\"error\": str(e)}\n            messages.append({\"role\": \"tool\", \"id\": call.id, \"content\": truncate(result)})\n    return \"stopped: step limit\"\n```\nKey points: the model only proposes; code validates and executes; errors become observations; hard limits on steps/tokens/time; each step traced (prompt, call, result, tokens, latency)."
+    },
+    {
+      "question": "Agent vs fixed workflow: how do you choose?",
+      "difficulty": "hard",
+      "answer_md": "Use a **fixed workflow** when the steps are known in advance (classify -> retrieve -> answer; validate -> generate SQL -> execute). It's cheaper, faster, testable and predictable. Use an **agent** when the path depends on intermediate results and can't be enumerated — e.g. exploring an unknown schema, multi-hop research, debugging a failed query. Many production systems are workflows with one bounded agentic step. Cost of agents: variable latency and token cost, harder evaluation, larger attack surface for prompt injection. I'd start with a workflow, measure failure cases, and add autonomy only where it measurably improves success rate, always with step limits and least-privilege tools."
+    },
+    {
+      "question": "How do you prevent an agent from leaking another tenant's data?",
+      "difficulty": "hard",
+      "answer_md": "Never let the model choose the tenant. The server derives `org_id` from the authenticated request and injects it into every tool call. For SQL tools, enforce it in the database: org-scoped views or Row-Level Security policies keyed on a session setting (`set_config('app.org_id', ..., true)`) under a read-only role, so even a malicious query can only see that org's rows. For retrieval tools, apply a mandatory metadata filter on `org_id` in the vector search. Log tool calls with org_id for audit, and include cross-tenant probes in the eval/security test suite."
+    }
+  ]
+}

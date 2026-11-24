@@ -1,0 +1,129 @@
+{
+  "slug": "timer-context-manager-class",
+  "title": "A timing context manager class with an injected clock",
+  "category": "advanced-python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "python-advanced",
+  "concepts": [
+    "context manager protocol",
+    "__enter__/__exit__",
+    "dependency injection",
+    "exception propagation"
+  ],
+  "related_topics": [
+    "python-context-managers",
+    "py-profiling-debugging",
+    "py-logging"
+  ],
+  "problem_md": "You want to time each stage of a report ingestion (download, parse, insert) and record a structured record even when the stage fails. Write a class-based context manager:\n\n```python\nclass Timer:\n    def __init__(self, label: str, clock=time.perf_counter): ...\n```\n\n- `__enter__` reads `clock()` once and returns **the Timer itself**.\n- `__exit__` reads `clock()` once more and sets `self.elapsed = round(end - start, 6)`, `self.error` = the exception class name or `None`, and appends `{\"label\": label, \"elapsed\": elapsed, \"ok\": error is None}` to `self.records` (a list created in `__init__`).\n- It must **not** swallow exceptions - the exception must still propagate to the caller.\n- Before entering, `elapsed` and `error` are `None`.\n\nThe clock is injected so tests are deterministic. The starter's `run_timed(ticks, fail)` harness is what the tests call.",
+  "examples": [
+    {
+      "input": "run_timed([10.0, 12.5])",
+      "output": "{'elapsed': 2.5, 'error': None, 'propagated': None, 'records': [{'label': 'report', 'elapsed': 2.5, 'ok': True}]}"
+    },
+    {
+      "input": "run_timed([1.0, 1.25], fail=True)",
+      "output": "{'elapsed': 0.25, 'error': 'RuntimeError', 'propagated': 'RuntimeError', 'records': [...ok: False]}"
+    }
+  ],
+  "hints": [
+    "`__exit__(self, exc_type, exc, tb)` receives `None, None, None` on success; `exc_type.__name__` gives the class name.",
+    "Whatever `__exit__` returns decides suppression: a truthy value swallows the exception. Return `False` (or nothing)."
+  ],
+  "starter_code": "import time\n\n\nclass Timer:\n    def __init__(self, label, clock=time.perf_counter):\n        self.label = label\n        self.clock = clock\n        self.elapsed = None\n        self.error = None\n        self.records = []\n\n    def __enter__(self):\n        # TODO\n        return self\n\n    def __exit__(self, exc_type, exc, tb):\n        # TODO: compute elapsed, record error, append a record\n        return True\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). `ticks` are the successive values the fake clock returns.\n# ---------------------------------------------------------------------------\ndef run_timed(ticks, fail=False):\n    clock = iter(ticks).__next__\n    timer = Timer(label=\"report\", clock=clock)\n    propagated = None\n    try:\n        with timer as t:\n            if t is not timer:\n                return {\"bug\": \"__enter__ must return self\"}\n            if fail:\n                raise RuntimeError(\"boom\")\n    except RuntimeError as e:\n        propagated = type(e).__name__\n    return {\"elapsed\": timer.elapsed, \"error\": timer.error, \"propagated\": propagated,\n            \"records\": timer.records}\n",
+  "solution_code": "import time\n\n\nclass Timer:\n    def __init__(self, label, clock=time.perf_counter):\n        self.label = label\n        self.clock = clock\n        self.elapsed = None\n        self.error = None\n        self.records = []\n        self._start = None\n\n    def __enter__(self):\n        self._start = self.clock()\n        return self\n\n    def __exit__(self, exc_type, exc, tb):\n        self.elapsed = round(self.clock() - self._start, 6)\n        self.error = exc_type.__name__ if exc_type else None\n        self.records.append({'label': self.label, 'elapsed': self.elapsed, 'ok': self.error is None})\n        return False  # never suppress\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). `ticks` are the successive values the fake clock returns.\n# ---------------------------------------------------------------------------\ndef run_timed(ticks, fail=False):\n    clock = iter(ticks).__next__\n    timer = Timer(label=\"report\", clock=clock)\n    propagated = None\n    try:\n        with timer as t:\n            if t is not timer:\n                return {\"bug\": \"__enter__ must return self\"}\n            if fail:\n                raise RuntimeError(\"boom\")\n    except RuntimeError as e:\n        propagated = type(e).__name__\n    return {\"elapsed\": timer.elapsed, \"error\": timer.error, \"propagated\": propagated,\n            \"records\": timer.records}\n",
+  "solution_md": "`with` calls `__enter__` and binds its return value to the `as` target, then always calls `__exit__` - with the exception details if the block raised. Returning a truthy value from `__exit__` suppresses the exception, which is exactly the `except: pass` habit in disguise; the starter's `return True` hides the failure.\n\nInjecting `clock` (default `time.perf_counter`, which is monotonic - never use `time.time()` for durations) makes the class testable without sleeping or mocking.\n\nAlternative: `@contextlib.contextmanager` with `start = clock(); try: yield ... finally: ...` - shorter, but the class form is needed when you want the object (with `.elapsed`) after the block, or reuse across blocks. In production you'd emit the record via `logging` with `extra=` instead of a list.",
+  "tests": {
+    "function": "run_timed",
+    "cases": [
+      {
+        "args": [
+          [
+            10.0,
+            12.5
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "elapsed": 2.5,
+          "error": null,
+          "propagated": null,
+          "records": [
+            {
+              "label": "report",
+              "elapsed": 2.5,
+              "ok": true
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            1.0,
+            1.25
+          ],
+          true
+        ],
+        "kwargs": {},
+        "expected": {
+          "elapsed": 0.25,
+          "error": "RuntimeError",
+          "propagated": "RuntimeError",
+          "records": [
+            {
+              "label": "report",
+              "elapsed": 0.25,
+              "ok": false
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            0.1,
+            0.4
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "elapsed": 0.3,
+          "error": null,
+          "propagated": null,
+          "records": [
+            {
+              "label": "report",
+              "elapsed": 0.3,
+              "ok": true
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            100,
+            100
+          ]
+        ],
+        "kwargs": {
+          "fail": true
+        },
+        "expected": {
+          "elapsed": 0,
+          "error": "RuntimeError",
+          "propagated": "RuntimeError",
+          "records": [
+            {
+              "label": "report",
+              "elapsed": 0,
+              "ok": false
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

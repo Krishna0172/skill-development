@@ -1,0 +1,151 @@
+{
+  "slug": "ai-unsupervised-learning",
+  "title": "Unsupervised learning: clustering, PCA, anomaly detection",
+  "skill": "ml-fundamentals",
+  "extra_skills": [
+    "ml-math-stats"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "k-means",
+    "hierarchical-clustering",
+    "dbscan",
+    "pca",
+    "anomaly-detection",
+    "segmentation"
+  ],
+  "summary": "Finding structure in data without labels: grouping similar customers or SKUs with k-means, hierarchical clustering and DBSCAN; compressing features with PCA; and flagging unusual records such as suspicious settlements with anomaly detection.",
+  "why_md": "- Most business data has no labels; clustering and anomaly detection give value without an annotation project.\n- Clustering embeddings is how you group similar product titles, support tickets or LLM queries.\n- PCA is used to visualise and compress high-dimensional data, including embeddings.\n- Anomaly detection is a direct fit for reconciliation and finance data.",
+  "details_md": "### k-means\nPick k; randomly place k centroids; assign each point to the nearest centroid; move each centroid to the mean of its points; repeat until stable. It minimises within-cluster squared distance (**inertia**). Fast and simple, but assumes roughly spherical, similar-size clusters, needs **scaled** features, and you must choose k (elbow plot of inertia, or **silhouette score**). Use `n_init` > 1 to avoid bad random starts.\n\n### Hierarchical (agglomerative) clustering\nStart with each point as its own cluster and repeatedly merge the two closest (linkage: ward, average, complete). The result is a tree (dendrogram) you can cut at any level — useful when you want nested segments (category → sub-category style). O(n²) memory, so suited to thousands, not millions, of rows.\n\n### DBSCAN\nDensity-based: a point with at least `min_samples` neighbours within radius `eps` is a core point; clusters grow through connected core points; points in sparse regions are labelled **noise (−1)**. Finds arbitrarily-shaped clusters, doesn't need k, and gives outliers for free. Sensitive to `eps` and struggles when densities vary (HDBSCAN handles that better).\n\n### PCA\nPrincipal Component Analysis finds orthogonal directions of maximum variance and projects data onto the top few. Uses: 2-D visualisation of clusters, compressing correlated features, denoising, shrinking 768-d embeddings before clustering. Scale features first; check `explained_variance_ratio_` to decide how many components to keep.\n\n### Anomaly detection\n- **Statistical**: robust z-score using median and MAD per group (e.g. per marketplace).\n- **Isolation Forest**: random splits isolate anomalies in fewer steps; good default for multi-feature tabular data.\n- **DBSCAN noise** or distance to nearest cluster centroid.\nThere are no labels, so validate by having a domain expert review the top-N flagged records and tune the contamination/threshold.\n\n### Evaluating clusters\nNo ground truth, so combine silhouette score with **business sense**: profile each cluster (mean order value, return rate, category mix) and name it. A clustering nobody can describe is not useful.",
+  "code_md": "```python\n# SKU segmentation with k-means (scaled features, choose k by silhouette)\nimport pandas as pd\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.cluster import KMeans\nfrom sklearn.metrics import silhouette_score\n\nfeats = sku_df[[\"avg_weekly_units\", \"avg_price\", \"return_rate\", \"price_volatility\"]]\nX = StandardScaler().fit_transform(feats)\nfor k in range(2, 9):\n    km = KMeans(n_clusters=k, n_init=10, random_state=42).fit(X)\n    print(k, round(silhouette_score(X, km.labels_), 3))\n\nsku_df[\"segment\"] = KMeans(n_clusters=4, n_init=10, random_state=42).fit_predict(X)\nprint(sku_df.groupby(\"segment\")[feats.columns].median())   # profile & name segments\n```\n\n```python\n# Anomalous settlements: Isolation Forest + robust z-score per marketplace\nfrom sklearn.ensemble import IsolationForest\n\ncols = [\"amount\", \"fee_ratio\", \"days_to_settle\"]\niso = IsolationForest(contamination=0.01, random_state=42)\nsettle[\"iso_flag\"] = iso.fit_predict(settle[cols]) == -1        # -1 = anomaly\n\ng = settle.groupby(\"marketplace\")[\"amount\"]\nmed = g.transform(\"median\")\nmad = g.transform(lambda s: (s - s.median()).abs().median())\nsettle[\"robust_z\"] = 0.6745 * (settle[\"amount\"] - med) / mad\nreview = settle[settle.iso_flag | (settle.robust_z.abs() > 3.5)]\n```",
+  "use_cases_md": "- **Customer/seller segmentation** by order frequency, value and return rate.\n- **SKU segmentation**: fast movers, seasonal, long-tail, high-return.\n- **Anomaly detection on settlements**: unusual fees, amounts or delays per marketplace.\n- **Clustering embeddings** of support tickets or LLM chat queries to discover common intents.\n- **PCA** to visualise embedding clusters in 2-D.",
+  "mistakes_md": "- **Not scaling before k-means/PCA** — the rupee column dominates the distance.\n- **Picking k arbitrarily** and never profiling the clusters.\n- **Using k-means on non-spherical or noisy data** — consider DBSCAN/HDBSCAN.\n- **Treating every flagged anomaly as fraud** — anomalies need human review; many are legit edge cases.\n- **Global thresholds across groups** with different scales (marketplaces) — compute per group.\n- **Hierarchical clustering on 1M rows** — memory blow-up.",
+  "best_practices_md": "- Scale (or log-transform) features; remove obvious errors first.\n- Use silhouette + elbow + business interpretability to choose k.\n- Set `random_state` and `n_init` for reproducible k-means.\n- Profile clusters with median feature values and give them names.\n- For anomalies, start with robust statistics per group, then Isolation Forest; rank and review top-N.\n- Re-run segmentation periodically; segments drift.",
+  "my_context_md": "`AmazonVendorBankRecon` reconciles vendor bank settlements — a direct candidate for robust z-scores or Isolation Forest per marketplace to surface settlements worth a human look before or after the matching logic. The marketplace data from `ECSMarketplaceDataUpload` (sales, returns, prices) can be aggregated per SKU with SQL `GROUP BY` into the feature table for SKU segmentation.",
+  "revision_notes_md": "- k-means: assign → recompute means; needs k, scaling, n_init; spherical clusters.\n- Choose k: elbow (inertia) + silhouette + business sense.\n- Hierarchical: merge closest; dendrogram; O(n²).\n- DBSCAN: eps + min_samples; noise = −1; arbitrary shapes.\n- PCA: max-variance orthogonal directions; scale first; explained_variance_ratio_.\n- Robust z = 0.6745·(x − median)/MAD; |z| > 3.5 flag.\n- Isolation Forest: anomalies isolate in few splits; fit_predict −1.\n- Validate unsupervised output with domain review.",
+  "exercises_md": "1. Write a SQL query producing one row per SKU (avg weekly units, avg price, return rate, price std) and segment it with k-means; name each segment.\n2. Implement k-means (assign/update loop) in pure Python for 2-D points and compare with scikit-learn.\n3. Flag anomalous settlement amounts per marketplace with a robust z-score; review the top 20 by hand.\n4. Run PCA on 384-d product-title embeddings and plot the first two components coloured by category.",
+  "related": [
+    "ai-supervised-learning",
+    "ai-ml-fundamentals",
+    "ai-embeddings",
+    "ai-statistics-probability",
+    "ai-data-preprocessing"
+  ],
+  "flashcards": [
+    {
+      "front": "The two alternating steps of k-means?",
+      "back": "Assign each point to the nearest centroid; move each centroid to the mean of its assigned points. Repeat until assignments stop changing."
+    },
+    {
+      "front": "How does DBSCAN label outliers?",
+      "back": "Points that are not within eps of enough core points get label −1 (noise)."
+    },
+    {
+      "front": "What does PCA's explained_variance_ratio_ tell you?",
+      "back": "The fraction of total variance captured by each principal component — used to choose how many to keep."
+    },
+    {
+      "front": "Robust z-score formula?",
+      "back": "0.6745 · (x − median) / MAD, where MAD = median(|x − median|). |z| > 3.5 is a common anomaly flag."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You want clusters of arbitrary shape and you also want outliers labelled automatically, without choosing the number of clusters. Which algorithm fits best?",
+      "options": [
+        "k-means",
+        "PCA",
+        "Agglomerative clustering with ward linkage",
+        "DBSCAN"
+      ],
+      "answer_index": 3,
+      "explanation": "DBSCAN is density-based, needs no k, finds arbitrary shapes and labels noise as −1."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You run k-means on [monthly_revenue_inr, return_rate] without scaling. What happens?",
+      "options": [
+        "Clusters are driven almost entirely by revenue",
+        "Clusters are driven almost entirely by return rate",
+        "Scaling doesn't matter for k-means",
+        "k-means raises an error"
+      ],
+      "answer_index": 0,
+      "explanation": "Euclidean distance is dominated by the feature with the largest numeric range."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In scikit-learn, IsolationForest.fit_predict returns ____ for points it considers anomalies.",
+      "answers": [
+        "-1",
+        "−1",
+        "minus one",
+        "minus 1"
+      ],
+      "explanation": "1 = inlier, −1 = outlier."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The k-means objective — sum of squared distances of points to their cluster centroid — is exposed in scikit-learn as the ____ attribute.",
+      "answers": [
+        "inertia_",
+        "inertia"
+      ],
+      "explanation": "Plotting inertia_ against k gives the elbow plot."
+    },
+    {
+      "type": "output",
+      "prompt": "One k-means iteration in 1-D. What does this print?",
+      "code": "points = [1, 2, 3, 10, 11, 12]\ncentroids = [2.0, 4.0]\nclusters = {0: [], 1: []}\nfor p in points:\n    nearest = min(range(len(centroids)), key=lambda i: abs(p - centroids[i]))\n    clusters[nearest].append(p)\ncentroids = [sum(c) / len(c) for c in clusters.values()]\nprint(clusters)\nprint(centroids)",
+      "answers": [
+        "{0: [1, 2, 3], 1: [10, 11, 12]}\n[2.0, 11.0]"
+      ],
+      "explanation": "1 and 2 are nearer 2.0; 3 is a tie (distance 1 to both) and min() returns the first index, 0; 10-12 are nearer 4.0. The update step moves the centroids to the cluster means: 2.0 and 11.0."
+    },
+    {
+      "type": "output",
+      "prompt": "Robust z-scores for settlement amounts. What does this print?",
+      "code": "import statistics as st\namounts = [100, 102, 98, 101, 99, 500]\nmed = st.median(amounts)\nmad = st.median([abs(a - med) for a in amounts])\nz = [round(0.6745 * (a - med) / mad, 1) for a in amounts]\nprint(med, mad, z[-1], [a for a, s in zip(amounts, z) if abs(s) > 3.5])",
+      "answers": [
+        "100.5 1.5 179.6 [500]"
+      ],
+      "explanation": "Median 100.5; abs deviations [0.5,1.5,2.5,0.5,1.5,399.5] → median 1.5. z(500) = 0.6745·399.5/1.5 ≈ 179.6. Only 500 exceeds 3.5. The median/MAD aren't distorted by the outlier, unlike mean/sd."
+    },
+    {
+      "type": "debug",
+      "prompt": "The analyst says the 4 k-means segments change every run and look meaningless. What's wrong?",
+      "code": "from sklearn.cluster import KMeans\nX = sku_df[[\"avg_price_inr\", \"return_rate\", \"weekly_units\"]].to_numpy()\nsku_df[\"segment\"] = KMeans(n_clusters=4, n_init=1).fit_predict(X)",
+      "answer": "(1) Features are unscaled, so `avg_price_inr` dominates the Euclidean distance. (2) `n_init=1` with no `random_state` gives a single random initialisation → unstable, often poor solutions. (3) k=4 was never validated. Fix:\n\n```python\nfrom sklearn.preprocessing import StandardScaler\nfeats = sku_df[[\"avg_price_inr\", \"return_rate\", \"weekly_units\"]].copy()\nlong_tail = [\"avg_price_inr\", \"weekly_units\"]\nfeats[long_tail] = np.log1p(feats[long_tail])   # tame long tails\nX = StandardScaler().fit_transform(feats)\nkm = KMeans(n_clusters=4, n_init=10, random_state=42)\nsku_df[\"segment\"] = km.fit_predict(X)\n```\nThen check silhouette for several k and profile each segment.",
+      "rubric": [
+        "Scale (and possibly log-transform) features before k-means",
+        "Use n_init > 1 and random_state for stability",
+        "Validate k (silhouette/elbow) and profile clusters"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd build an anomaly detector for marketplace settlements when you have no labelled fraud/error examples.",
+      "answer": "1. Define the unit (one settlement line) and features: amount, fee ratio, days to settle, deviation from the expected amount computed from orders.\n2. Start with **robust statistics per group** (marketplace, fee type): median/MAD robust z-scores, because scales differ and outliers distort mean/sd.\n3. Add a multivariate model such as **Isolation Forest** on scaled features to catch unusual combinations.\n4. Rank by score and send the top-N to the finance team; their verdicts become **labels** that let you tune thresholds and later train a supervised model.\n5. Monitor flag volume over time; keep reviewers' capacity in mind when setting the threshold.",
+      "rubric": [
+        "Per-group robust statistics (median/MAD)",
+        "Multivariate unsupervised model like Isolation Forest",
+        "Human review loop to validate and create labels",
+        "Threshold tied to review capacity / monitoring"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you choose k in k-means, and what are k-means' limitations?",
+      "difficulty": "medium",
+      "answer_md": "**Choosing k**: run k = 2..10 and look at (a) the **elbow** of inertia (within-cluster sum of squares) — where adding clusters stops helping much; (b) the **silhouette score** (−1..1, higher = tighter, better-separated clusters); (c) **business usefulness** — can you describe each segment and act on it? Often a slightly lower silhouette with interpretable segments wins.\n\n**Limitations**: assumes spherical, similar-sized clusters; sensitive to scale (standardise first) and outliers (means get pulled); random init (use k-means++ and `n_init`); must choose k; every point is forced into a cluster (no noise concept). Alternatives: DBSCAN/HDBSCAN for arbitrary shapes and noise, Gaussian mixtures for soft assignments, agglomerative for hierarchies."
+    },
+    {
+      "question": "What is PCA and when would you use it in an AI engineering context?",
+      "difficulty": "easy",
+      "answer_md": "PCA finds orthogonal directions (principal components) along which the data varies most, and projects the data onto the top few. Mathematically, it's the eigen-decomposition of the covariance matrix (computed via SVD in practice).\n\nUses:\n- **Visualise embeddings**: project 768-d sentence embeddings to 2-D to eyeball clusters of product titles or user queries.\n- **Compress** correlated features or embeddings before clustering/indexing, trading a little accuracy for memory and speed.\n- **Denoise** by dropping low-variance components.\n\nCaveats: scale features first; components are linear combinations and hard to interpret; for visualisation of non-linear structure, UMAP/t-SNE often look better (but distort distances)."
+    }
+  ]
+}

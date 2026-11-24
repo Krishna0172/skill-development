@@ -1,0 +1,118 @@
+{
+  "slug": "python-functions-args",
+  "title": "Functions & Arguments",
+  "skill": "python",
+  "extra_skills": [],
+  "category": "Python",
+  "difficulty": "beginner",
+  "tags": [
+    "python",
+    "functions",
+    "args",
+    "kwargs",
+    "closures",
+    "scope"
+  ],
+  "summary": "Python functions can take positional arguments, keyword arguments, defaults, `*args` (extra positionals as a tuple) and `**kwargs` (extra keywords as a dict). You can force arguments to be keyword-only with `*` or positional-only with `/`. Functions are objects, so you can pass them around, store them in dicts and return them from other functions (closures).",
+  "details_md": "### Parameter kinds\nThe full signature order is:\n```\ndef f(pos_only, /, normal, *args, kw_only, **kwargs)\n```\n- **Positional-only** (before `/`, 3.8+): callers can't use the name. Lets you rename params later without breaking callers.\n- **Positional-or-keyword**: the default kind.\n- **`*args`**: collects extra positional arguments into a tuple.\n- **Keyword-only** (after `*` or `*args`): must be passed by name - great for boolean flags (`upload(df, dry_run=True)`) and readability.\n- **`**kwargs`**: collects extra keyword arguments into a dict.\n\nAt the call site, `*seq` unpacks an iterable into positional args and `**mapping` unpacks a dict into keyword args.\n\n### Defaults are evaluated once\nDefault values are evaluated **when the `def` statement runs**, not per call. A mutable default (`def f(x, acc=[])`) is shared across calls. Use `None` as a sentinel and create the object inside the function.\n\n### Scope: LEGB\nName lookup goes Local -> Enclosing function -> Global (module) -> Built-ins. Assigning to a name makes it local for the whole function body, which is why `count += 1` on a global raises `UnboundLocalError`. Use `global` (rarely) or `nonlocal` (to rebind a variable in an enclosing function).\n\n### First-class functions and closures\nFunctions are objects with attributes (`__name__`, `__doc__`, `__defaults__`). You can store them in dicts (dispatch tables), pass them as callbacks (`sorted(key=...)`, `executor.submit(fn, ...)`) and return them. A **closure** is an inner function that captures variables from its enclosing scope; the captured variables live in \"cells\" and survive after the outer function returns. Closures capture **variables, not values**, so lambdas created in a loop all see the loop variable's final value unless you bind it via a default arg or `functools.partial`.\n\n### Lambdas and partial\n`lambda x: x[\"qty\"]` is an expression-only anonymous function - fine for short `key=` functions. `functools.partial(fn, a=1)` pre-fills arguments and is picklable, unlike lambdas, which matters for multiprocessing.\n\n### Return values\nFunctions without `return` return `None`. Returning `a, b` returns a tuple, which callers unpack. Keep return types consistent - a function returning either a DataFrame or `False` forces every caller to type-check.\n\n### Docstrings and annotations\nAnnotations (`def f(x: int) -> str`) are not enforced at runtime but drive type checkers, IDEs and frameworks like FastAPI. Use `inspect.signature(fn)` to introspect parameters - this is exactly how FastAPI decides what is a path param, query param or body.",
+  "code_md": "```python\n# All parameter kinds in one signature\ndef load_report(path, /, report_type, *extra_cols, org_id: int, dry_run: bool = False, **options):\n    print(path, report_type, extra_cols, org_id, dry_run, options)\n\nload_report(\"s3://b/k.csv\", \"orders\", \"sku\", \"qty\", org_id=7, sheet=\"Sheet1\")\n# s3://b/k.csv orders ('sku', 'qty') 7 False {'sheet': 'Sheet1'}\n\n# load_report(path=\"x\", ...)  -> TypeError: path is positional-only\n# load_report(\"x\", \"orders\", 7) -> 7 lands in *extra_cols; org_id is still missing -> TypeError\n```\n\n```python\n# Mutable default bug and the fix\ndef add_bad(item, bucket=[]):\n    bucket.append(item)\n    return bucket\n\nprint(add_bad(1), add_bad(2))     # [1, 2] [1, 2]  <- shared list!\n\ndef add_good(item, bucket=None):\n    if bucket is None:\n        bucket = []\n    bucket.append(item)\n    return bucket\n```\n\n```python\n# Closures and nonlocal: a simple counter factory\ndef make_counter():\n    count = 0\n    def inc():\n        nonlocal count      # rebind the enclosing variable\n        count += 1\n        return count\n    return inc\n\nc = make_counter()\nc(); c()\nprint(c())   # 3\n\n# Late binding gotcha with lambdas in a loop\nfns = [lambda: i for i in range(3)]\nprint([f() for f in fns])            # [2, 2, 2]\nfns = [lambda i=i: i for i in range(3)]\nprint([f() for f in fns])            # [0, 1, 2]\n```\n\n```python\n# Unpacking at the call site + partial\nfrom functools import partial\n\ndef connect(host, port, *, timeout=10):\n    return f\"{host}:{port} t={timeout}\"\n\nargs = (\"db.local\", 5432)\nkwargs = {\"timeout\": 3}\nprint(connect(*args, **kwargs))\n\nconnect_local = partial(connect, \"localhost\", timeout=1)\nprint(connect_local(5432))\n```",
+  "use_cases_md": "- **Keyword-only flags** (`*, dry_run=False`) for functions with booleans so call sites stay readable.\n- **`**kwargs` passthrough** in wrappers and decorators that forward arguments to another function.\n- **Dispatch tables**: dicts mapping strings to functions instead of long if/elif chains.\n- **Callbacks**: `sorted(key=...)`, `executor.submit(fn, *args)`, `asyncio.to_thread(fn, *args)`.\n- **Closures / factories** for configured functions (retry wrappers, counters, per-client handlers).",
+  "mistakes_md": "- **Mutable default arguments** - shared across calls. Fix: default to `None` and create inside.\n- **Late-binding closures in loops** - every lambda sees the final loop value. Fix: `lambda x=x: ...` or `functools.partial`.\n- **Swallowing unknown kwargs silently** - `**kwargs` hides typos like `tiemout=5`. Fix: only use `**kwargs` when forwarding; otherwise declare explicit params.\n- **Positional boolean parameters** - `process(df, True, False)` is unreadable. Fix: keyword-only parameters.\n- **`UnboundLocalError` when assigning to a global** - assignment makes the name local. Fix: pass values in and return results instead of mutating globals.\n- **Inconsistent return types** (`DataFrame` or `False`). Fix: return one type, raise exceptions for failure.",
+  "best_practices_md": "- Keep functions small and single-purpose; pass dependencies in as arguments.\n- Use keyword-only parameters for options and flags; positional-only for low-level helpers whose param names aren't API.\n- Annotate parameters and return types; FastAPI and type checkers rely on them.\n- Prefer returning values over mutating inputs; if you mutate, say so in the name/docstring.\n- Use `functools.partial` over lambdas when the callable must be pickled (multiprocessing, executors).\n- Raise exceptions for errors rather than returning sentinel values like `None`/`False`.",
+  "my_context_md": "- Your `MODULE_DISPATCH` in ECSMarketplaceDataUpload is a dict of report types to processors - a direct use of functions as first-class objects.\n- In your FastAPI downloader apps, `asyncio.to_thread(fn, *args)` and `loop.run_in_executor(None, fn, *args)` take a callable plus its arguments, which is why `functools.partial` is handy when you need to pass keyword arguments to the executor (`run_in_executor` doesn't accept kwargs).\n- `read_and_validate()` is a good candidate for keyword-only options (e.g. required columns, rename map) so call sites across 150+ processors stay readable.",
+  "related": [
+    "python-decorators",
+    "python-data-structures",
+    "python-typing",
+    "registry-dispatcher-pattern"
+  ],
+  "flashcards": [
+    {
+      "front": "What do `/` and `*` mean in `def f(a, /, b, *, c)`?",
+      "back": "`a` is positional-only, `b` can be positional or keyword, `c` is keyword-only."
+    },
+    {
+      "front": "When are default argument values evaluated?",
+      "back": "Once, when the `def` statement executes - so mutable defaults are shared between calls."
+    },
+    {
+      "front": "What does `nonlocal` do?",
+      "back": "Lets an inner function rebind a variable in the nearest enclosing function scope."
+    },
+    {
+      "front": "LEGB stands for?",
+      "back": "Local, Enclosing, Global, Built-in - Python's name lookup order."
+    },
+    {
+      "front": "Why does `[lambda: i for i in range(3)]` return 2 for each call?",
+      "back": "Closures capture the variable, not its value; all lambdas read `i` after the loop ends. Bind with `lambda i=i: i`."
+    },
+    {
+      "front": "How do you pass kwargs to `loop.run_in_executor`?",
+      "back": "It only accepts positional args: wrap with `functools.partial(fn, key=value)`."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Given `def f(a, *args, b=1, **kw)`, what is `args` in `f(1, 2, 3, b=4, c=5)`?",
+      "options": [
+        "[2, 3]",
+        "(2, 3)",
+        "(2, 3, 5)",
+        "{'c': 5}"
+      ],
+      "answer_index": 1,
+      "explanation": "Extra positional arguments are collected into a tuple; `c=5` goes into `kw`."
+    },
+    {
+      "question": "What is the output of calling `def f(x, acc=[]): acc.append(x); return acc` as `f(1); f(2)`?",
+      "options": [
+        "[2]",
+        "[1]",
+        "[1, 2]",
+        "TypeError"
+      ],
+      "answer_index": 2,
+      "explanation": "The default list is created once and shared, so the second call sees the first append."
+    },
+    {
+      "question": "Which signature forces `dry_run` to be passed by name?",
+      "options": [
+        "def run(df, dry_run=False)",
+        "def run(df, /, dry_run=False)",
+        "def run(df, dry_run=False, /)",
+        "def run(df, *, dry_run=False)"
+      ],
+      "answer_index": 3,
+      "explanation": "Parameters after a bare `*` are keyword-only. Parameters before `/` are positional-only, the opposite."
+    },
+    {
+      "question": "Why might you prefer `functools.partial` over a lambda?",
+      "options": [
+        "partial objects are picklable and expose `.func/.args/.keywords`",
+        "lambdas can't take arguments",
+        "partial runs faster in all cases",
+        "lambdas can't be passed to sorted()"
+      ],
+      "answer_index": 0,
+      "explanation": "Partials pickle (needed for multiprocessing) and are introspectable; lambdas can't be pickled by the standard pickle module."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain *args and **kwargs and give a real use case.",
+      "difficulty": "easy",
+      "answer_md": "In a **definition**, `*args` collects extra positional arguments into a tuple and `**kwargs` collects extra keyword arguments into a dict. In a **call**, `*iterable` and `**mapping` do the reverse - unpack into separate arguments.\n\nThe classic real use case is a **wrapper that forwards arguments** without knowing the wrapped function's signature, such as a decorator or a retry helper:\n```python\nimport time\n\ndef with_retry(fn, *args, attempts=3, **kwargs):\n    for i in range(attempts):\n        try:\n            return fn(*args, **kwargs)\n        except ConnectionError:\n            if i == attempts - 1:\n                raise\n            time.sleep(2 ** i)\n\nwith_retry(fetch_orders, \"org-7\", attempts=5, page=2)\n```\nNote `attempts` is keyword-only because it comes after `*args`, so it can't collide with the wrapped function's positionals. Avoid `**kwargs` in ordinary functions: it hides typos and makes signatures undiscoverable - declare explicit parameters unless you're truly forwarding."
+    },
+    {
+      "question": "What is a closure in Python and what is the late-binding gotcha?",
+      "difficulty": "medium",
+      "answer_md": "A **closure** is a nested function that references variables from an enclosing function's scope. Python stores those variables in cell objects (`fn.__closure__`), so they survive after the outer function returns:\n```python\ndef make_multiplier(n):\n    def mul(x):\n        return x * n\n    return mul\n\ndouble = make_multiplier(2)\ndouble(5)  # 10\n```\nClosures are the foundation of decorators, factories and callbacks that carry configuration.\n\n**Late binding**: a closure captures the *variable*, not its value at creation time. The value is looked up when the inner function runs:\n```python\nhandlers = [lambda: print(i) for i in range(3)]\nfor h in handlers: h()   # 2 2 2\n```\nFixes: bind the value as a default (`lambda i=i: print(i)`), use `functools.partial(print, i)`, or create the closure through a factory function call. To *rebind* (not just read) an enclosing variable, the inner function needs `nonlocal`."
+    },
+    {
+      "question": "Why is `def f(items=[])` a bug, and how does Python evaluate defaults?",
+      "difficulty": "easy",
+      "answer_md": "Default values are evaluated **once, when the `def` statement executes** (normally at import time), and stored on the function object in `f.__defaults__`. Every call that doesn't pass `items` gets the *same* list object, so mutations leak between calls:\n```python\ndef add(x, items=[]):\n    items.append(x)\n    return items\nadd(1)  # [1]\nadd(2)  # [1, 2]  -- surprise\n```\nThe fix is a sentinel:\n```python\ndef add(x, items=None):\n    if items is None:\n        items = []\n    items.append(x)\n    return items\n```\nThe same \"evaluated once\" rule causes `def log(ts=datetime.now())` to freeze the timestamp at import time. Immutable defaults (ints, strings, tuples, `None`) are safe. Linters like Ruff (`B006`) flag mutable defaults automatically. Pydantic and dataclasses solve the same problem with `default_factory=list`."
+    }
+  ]
+}

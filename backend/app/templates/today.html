@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, stat, empty %}
+{% block title %}Today{% endblock %}
+{% block content %}
+{% set hour = now_hour if now_hour is defined else 9 %}
+<div class="page-head">
+  <div>
+    <h1>Today · {{ t.date|date("long") }}</h1>
+    <p>🔥 {{ t.streak.current }}-day streak{% if t.streak.longest %} (best {{ t.streak.longest }}){% endif %} · everything below is calculated from what you've recorded.</p>
+  </div>
+  <div class="actions"><a class="btn {{ 'primary' if not t.has_log_today }}" href="/tracker?day={{ t.date }}#log">{{ "Edit today's log" if t.has_log_today else "End-of-day log" }}</a></div>
+</div>
+
+{% if t.unassessed_skills %}
+<div class="alert info between"><span><strong>{{ t.unassessed_skills }} skills</strong> have no self-rated proficiency yet. The app never guesses — rate them once (1 Unfamiliar … 6 Expert) to set your baseline.</span><a class="btn sm primary" href="/skills/assess">Rate skills</a></div>
+{% endif %}
+
+<div class="grid g3">
+  {% call card("1 · What should I learn today?") %}
+    {% if not t.learn.in_progress and not t.learn.next_steps %}{{ empty("Nothing in progress", "Open a learning track and start a module.") }}{% endif %}
+    <ul class="list compact">
+      {% for x in t.learn.in_progress %}<li>{{ badge(x.status) }} <a href="/topics/{{ x.id }}">{{ x.title }}</a></li>{% endfor %}
+    </ul>
+    {% for s in t.learn.next_steps %}
+      <div class="q" style="padding:10px"><div class="tiny faint">{{ s.roadmap }}</div>
+        {% if s.topic_id %}<a href="/topics/{{ s.topic_id }}"><strong>{{ s.step }}</strong></a> {{ badge(s.topic_status) }}{% else %}<strong>{{ s.step }}</strong>{% endif %}</div>
+    {% endfor %}
+  {% endcall %}
+
+  {% call card("2 · What should I revise today?") %}
+    <div class="row"><span style="font-size:28px;font-weight:600" class="num">{{ t.revision.due_count }}</span><span class="muted">due{% if t.revision.overdue_count %} · {{ t.revision.overdue_count }} overdue{% endif %}</span></div>
+    <ul class="list compact">{% for r in t.revision["items"] %}<li class="between"><span>{{ badge(r.item_type) }} {{ r.title[:70] }}</span><span class="tiny faint">{{ r.due_date|rel }}</span></li>{% endfor %}</ul>
+    {% if not t.revision["items"] %}<p class="small muted">Nothing due. Topics enter the 1 → 3 → 7 → 14 → 30-day cycle once you pass their assessment; missed questions come back here too.</p>{% endif %}
+    {% if t.revision.attention_topics %}<p class="small">Struggling with: {% for x in t.revision.attention_topics %}<a class="warn" href="/topics/{{ x.id }}">{{ x.title }}</a>{{ ", " if not loop.last }}{% endfor %}</p>{% endif %}
+    <a class="btn {{ 'primary' if t.revision.due_count }}" href="/revision/session">Start revision</a>
+  {% endcall %}
+
+  {% call card("3 · Which challenges should I attempt?") %}
+    {% for e in t.practice %}
+      <a class="q" style="display:block;padding:10px;color:inherit" href="/practice/{{ e.id }}">
+        <div class="between"><strong>{{ e.title }}</strong>{{ badge(e.difficulty) }}</div>
+        <div class="tiny faint">{{ EXERCISE_CATEGORY_LABELS.get(e.category, e.category) }} · {{ e.reason }}</div></a>
+    {% endfor %}
+  {% endcall %}
+
+  {% call card("Targets") %}
+    {% for tg in targets %}
+      <div class="between small"><span>{{ tg.period|label }} · {{ tg.label }}</span><span class="num">{{ tg.current|round|int }}/{{ tg.target|round|int }}</span></div>
+      {{ progress(tg.percent, "good" if tg.percent >= 100 else "", thin=True) }}<div style="height:8px"></div>
+    {% else %}<p class="small muted">No targets set. <a href="/targets">Set targets</a>.</p>{% endfor %}
+  {% endcall %}
+
+  {% call card("What did I learn yesterday?") %}
+    {% set y = t.yesterday %}
+    {% if y.total_minutes or y.reviews.total or y.exercises.attempted or y.log or y.quizzes %}
+      <div class="grid g3" style="gap:8px">
+        {{ stat("Studied", y.total_minutes|minutes) }}{{ stat("Recalled", y.reviews.remembered ~ "/" ~ y.reviews.total) }}{{ stat("Solved", y.exercises.completed ~ "/" ~ y.exercises.attempted) }}
+      </div>
+      {% if y.topics_studied %}<p class="small">Topics: {{ y.topics_studied|join(", ") }}</p>{% endif %}
+      {% for s in y.sessions if s.notes %}<p class="small muted">• {{ s.notes }}</p>{% endfor %}
+      {% if y.log and y.log.accomplished_md %}<div class="callout small">{{ y.log.accomplished_md|md }}</div>{% endif %}
+    {% else %}{{ empty("Nothing recorded yesterday", "Use “+ Log activity” or the timer to record study.") }}{% endif %}
+  {% endcall %}
+
+  {% call card("How am I progressing?") %}
+    {% for a in areas %}
+      <div class="between small"><a href="/dashboard">{{ a.label }}</a><span class="num">{{ a.passed }}/{{ a.topics }} demonstrated</span></div>
+      {{ progress(a.percent, thin=True) }}<div style="height:7px"></div>
+    {% endfor %}
+    <div class="tiny faint">Demonstrated = passed the topic's assessment. Reading alone doesn't count.</div>
+    {% if t.goals %}<hr>{% for g in t.goals %}<div class="between small"><span class="{{ 'bad' if g.progress.overdue }}">🎯 {{ g.title }}</span><span class="tiny">{{ "overdue" if g.progress.overdue else g.target_date|rel }}</span></div>{% endfor %}{% endif %}
+  {% endcall %}
+</div>
+
+<div class="grid g2 mt">
+  {% call card("This week") %}
+    <div class="grid g4" style="gap:8px">
+      {{ stat("Hours", t.week.this.hours) }}{{ stat("Revisions", t.week.this.reviews) }}{{ stat("Solved", t.week.this.exercises_solved) }}{{ stat("Topics passed", t.week.this.topics_learned) }}
+    </div>
+    <div class="mt">{{ charts.bars(t.week.days, "date", [("minutes", "Minutes")], height=120, fmt_x=charts.weekday) }}</div>
+  {% endcall %}
+  {% call card("Closest to job-ready") %}
+    {% for r in roles %}
+      <div class="between small"><a href="/interview?role={{ r.role }}">{{ r.label }}</a><span class="num">{{ r.score }}%</span></div>{{ progress(r.score, thin=True) }}<div style="height:7px"></div>
+    {% endfor %}
+    <a class="small" href="/dashboard#readiness">How readiness is calculated →</a>
+  {% endcall %}
+</div>
+
+{% if t.today_so_far.events %}
+<div class="mt">{% call card("Today so far") %}
+  <ul class="list compact">{% for e in t.today_so_far.events|reverse %}<li class="small"><span class="faint num">{{ e.at[11:16] }}</span> {{ e.summary }}</li>{% endfor %}</ul>
+{% endcall %}</div>
+{% endif %}
+{% endblock %}

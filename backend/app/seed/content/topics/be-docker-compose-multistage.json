@@ -1,0 +1,184 @@
+{
+  "slug": "be-docker-compose-multistage",
+  "title": "Docker Compose and multi-stage builds: small, secure images",
+  "skill": "docker",
+  "extra_skills": [
+    "ci-cd"
+  ],
+  "category": "Cloud & DevOps",
+  "difficulty": "advanced",
+  "tags": [
+    "docker",
+    "compose",
+    "multi-stage",
+    "security",
+    "image-size",
+    "buildkit"
+  ],
+  "summary": "Compose describes a multi-container local stack (API, Postgres, Redis, workers) in one YAML file; multi-stage builds separate build tools from the runtime image to shrink size and attack surface. This topic goes deep on healthchecks, dependencies, caching, non-root users and supply-chain hygiene.",
+  "why_md": "- Reproducible local environments with databases and queues in one command speed up development and CI integration tests.\n- Production images that are 10x smaller deploy faster and expose fewer vulnerabilities.\n- Container security (non-root, minimal base, no secrets in layers) is a standard senior interview topic.\n- The same Dockerfile skills carry into ECS, Kubernetes and CI pipelines.",
+  "details_md": "### Compose model\nA `compose.yaml` declares **services** (each a container from an image or build), **networks** (default: one project network where services resolve each other by service name) and **volumes**. `docker compose up -d` creates everything; `down` removes containers and networks (`-v` also removes volumes).\n\nKey fields: `build`, `image`, `ports`, `environment`/`env_file`, `volumes`, `depends_on`, `healthcheck`, `command`, `profiles`, `restart`, `deploy.resources` limits.\n\n### Startup order vs readiness\n`depends_on` alone only waits for the container to *start*, not for Postgres to accept connections. Combine a `healthcheck` (e.g. `pg_isready`) with `depends_on: {db: {condition: service_healthy}}`. The application should still retry connections, because dependencies can restart at any time.\n\n### Config and secrets\nUse `env_file` and variable interpolation (`${POSTGRES_PASSWORD:?required}`) for config. Compose `secrets` mount files under `/run/secrets/`; prefer reading secrets from files in production. Never put credentials in the image: `docker history` reveals every layer, including `ENV` and build args.\n\n### Dev vs prod overrides\n`compose.yaml` holds the base; `compose.override.yaml` is merged automatically (bind-mount source, reload flag). For other environments use `-f compose.yaml -f compose.prod.yaml` or **profiles** (`profiles: [debug]`) to start optional services only when requested. Compose is excellent for local/CI; production usually runs on ECS, Kubernetes or similar.\n\n### Multi-stage builds\nA Dockerfile can have several `FROM` stages. Early stages contain compilers and dev tools; the final stage copies only the results.\n```\nbuild stage: python + gcc + headers -> builds wheels\nfinal stage: python-slim + wheels + app code\n```\n`COPY --from=builder` moves artifacts between stages; anything not copied is discarded. Benefits: smaller image, fewer CVEs, build tools absent at runtime. You can also define a `test` or `dev` stage and select with `--target`.\n\n### Image size levers\n- Slim or distroless base (`python:3.12-slim`; distroless has no shell or package manager; alpine uses musl, which can cause wheel and performance issues for Python, so test before choosing).\n- Build wheels or a virtualenv in the builder and copy it.\n- `--no-cache-dir`, no apt caches (`apt-get install --no-install-recommends` and delete `/var/lib/apt/lists/*` in the same `RUN`).\n- `.dockerignore` to shrink context.\n- Combine commands that create and delete files in a single layer; a later `rm` cannot shrink an earlier layer.\n- BuildKit cache mounts: `RUN --mount=type=cache,target=/root/.cache/pip pip install ...` speeds rebuilds without bloating layers.\n\n### Security hardening\n- Run as a **non-root** user (`USER app`); use read-only root filesystem and drop capabilities where possible (`read_only: true`, `cap_drop: [ALL]`).\n- Pin base images by version, ideally by digest for reproducibility; rebuild regularly for patches.\n- Scan images (Trivy, Grype, Docker Scout) in CI; generate an SBOM; sign images.\n- Use BuildKit secret mounts (`RUN --mount=type=secret,id=pip_token ...`) for private package tokens so they never land in a layer.\n- Handle signals: use exec-form `CMD` and a proper init (`init: true` or tini) so the process receives SIGTERM and zombies are reaped.",
+  "code_md": "```dockerfile\n# syntax=docker/dockerfile:1\n# Multi-stage: build deps in one stage, ship a slim non-root runtime\nFROM python:3.12-slim AS builder\nENV PIP_DISABLE_PIP_VERSION_CHECK=1\nWORKDIR /build\nRUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev \\\n    && rm -rf /var/lib/apt/lists/*\nCOPY requirements.txt .\nRUN --mount=type=cache,target=/root/.cache/pip \\\n    pip wheel --wheel-dir /wheels -r requirements.txt\n\nFROM python:3.12-slim AS runtime\nRUN apt-get update && apt-get install -y --no-install-recommends libpq5 \\\n    && rm -rf /var/lib/apt/lists/* \\\n    && useradd --create-home --uid 10001 app\nWORKDIR /app\nCOPY --from=builder /wheels /wheels\nRUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*.whl && rm -rf /wheels\nCOPY --chown=app:app . .\nUSER app\nEXPOSE 8000\nCMD [\"python\", \"-m\", \"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]\n```\n\n```yaml\n# compose.yaml - API + Postgres with healthcheck, volume and secret-ish env\nservices:\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env}\n    volumes: [pgdata:/var/lib/postgresql/data]\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]\n      interval: 5s\n      timeout: 3s\n      retries: 10\n  api:\n    build: { context: ., target: runtime }\n    ports: [\"8000:8000\"]\n    environment:\n      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres\n    depends_on:\n      db: { condition: service_healthy }\n    read_only: true\n    cap_drop: [ALL]\n    init: true\n  worker:\n    build: { context: ., target: runtime }\n    command: [\"python\", \"worker.py\"]\n    profiles: [\"jobs\"]          # only with: docker compose --profile jobs up\n    depends_on:\n      db: { condition: service_healthy }\nvolumes:\n  pgdata:\n```\n\n```bash\ndocker compose up -d --build\ndocker compose ps && docker compose logs -f api\ndocker image ls shop-api                 # compare sizes of builder vs runtime targets\ndocker build --target builder -t shop-api:builder .\ndocker run --rm aquasec/trivy image shop-api:latest   # vulnerability scan\n```",
+  "use_cases_md": "- Local stack for an e-commerce API: API + Postgres + Redis + a background worker, started with one command.\n- CI integration tests that bring up dependencies with `docker compose up --wait`.\n- Shrinking a data-processing image with pandas/numpy dependencies from 1.5 GB to under 400 MB.\n- Passing a security review by running as non-root with a scanned, pinned base image.\n- A `test` stage in the Dockerfile that CI builds with `--target test`.",
+  "mistakes_md": "- **Assuming `depends_on` waits for readiness**: use healthchecks and retry logic in the app.\n- **Leaving compilers in the final image**: use multi-stage.\n- **`RUN rm` in a later layer** expecting size reduction: files stay in earlier layers.\n- **Secrets in `ENV`/`ARG`/COPY**: visible via `docker history`; use runtime env, secret mounts or a secrets manager.\n- **Running as root and mounting the Docker socket**: container escape risk.\n- **Using `latest` and never rebuilding**: unreproducible and unpatched.\n- **Alpine by default** for Python with many wheels: slow builds, compatibility issues.\n- **Shell-form CMD** (`CMD python app.py`): signals go to `/bin/sh`, so graceful shutdown breaks.",
+  "best_practices_md": "- Multi-stage builds, slim/distroless runtime, non-root user, `.dockerignore`.\n- Order layers for cache; use BuildKit cache and secret mounts.\n- Healthchecks plus `service_healthy`; apps retry connections.\n- Pin versions/digests, scan with Trivy or Scout in CI, rebuild for patches.\n- Read-only filesystem, dropped capabilities, resource limits.\n- Exec-form CMD with init for correct signal handling.\n- Keep compose for dev/CI; use an orchestrator for production.",
+  "my_context_md": "The learner's services (for example `ECSInventoryPriceTracking`, `ECSMarketplaceDataUpload`, and the ECS-named services generally) run on AWS ECS per the repo naming and use boto3 and pandas. Inspect the Dockerfiles of one such service: check whether it runs as root, whether build tools stay in the final image, and whether secrets are read at runtime from AWS Secrets Manager (as `AmazonVendorBankRecon/db.py` does) rather than baked in.",
+  "revision_notes_md": "- Compose: services, networks, volumes; services resolve each other by name.\n- `depends_on` = start order only; add healthcheck + `condition: service_healthy`; app still retries.\n- Override files and profiles for dev vs optional services.\n- Multi-stage: build in fat stage, `COPY --from` into slim runtime; `--target` selects a stage.\n- Size: slim/distroless, no apt caches in same layer, cache mounts, `.dockerignore`.\n- Deleting files in a later layer does not shrink the image.\n- Security: non-root, read-only fs, cap_drop, pinned digest, scan, SBOM, secret mounts.\n- Exec-form CMD + init for SIGTERM and zombie reaping.",
+  "exercises_md": "1. Take a Dockerfile for a pandas-based service, convert it to multi-stage and compare `docker image ls` sizes before and after.\n2. Write a compose file with API, Postgres (healthcheck) and Redis; prove the API waits for Postgres by adding `sleep` to the DB start.\n3. Add a non-root user and `read_only: true` to the API; fix whatever breaks (temp directories via `tmpfs`).\n4. Scan your image with Trivy and upgrade the base image or packages until HIGH/CRITICAL findings are explained or removed.",
+  "related": [
+    "be-docker-basics",
+    "docker-essentials",
+    "ecs-fargate",
+    "github-actions-ci",
+    "be-kubernetes-essentials",
+    "web-security-owasp"
+  ],
+  "flashcards": [
+    {
+      "front": "What does depends_on do by default?",
+      "back": "Only orders container start; it does not wait for readiness unless combined with healthcheck and condition: service_healthy."
+    },
+    {
+      "front": "Why multi-stage builds?",
+      "back": "Build tools stay in early stages; only needed artifacts are copied to a small, safer final image."
+    },
+    {
+      "front": "Does `RUN rm` in a later layer shrink the image?",
+      "back": "No; earlier layers still contain the files. Delete in the same RUN."
+    },
+    {
+      "front": "Safe way to pass a private pip token at build time?",
+      "back": "BuildKit secret mount (`--mount=type=secret`), not ARG/ENV."
+    },
+    {
+      "front": "Why exec-form CMD?",
+      "back": "The app is PID 1 and receives SIGTERM directly for graceful shutdown; shell form wraps it in /bin/sh."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is the main purpose of a multi-stage build?",
+      "options": [
+        "Run containers in parallel",
+        "Keep build tools out of the final image",
+        "Encrypt layers",
+        "Share volumes"
+      ],
+      "answer_index": 1,
+      "explanation": "Only artifacts are copied to the runtime stage."
+    },
+    {
+      "type": "mcq",
+      "prompt": "How do you make an api service wait until Postgres accepts connections in Compose?",
+      "options": [
+        "depends_on alone",
+        "healthcheck on db + depends_on condition service_healthy",
+        "sleep 60 in the Dockerfile",
+        "ports mapping"
+      ],
+      "answer_index": 1,
+      "explanation": "depends_on defaults only wait for start."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which practice most reduces blast radius if the app is compromised?",
+      "options": [
+        "Run as root for simplicity",
+        "Non-root user, read-only fs, dropped capabilities",
+        "Use latest tag",
+        "Mount the docker socket"
+      ],
+      "answer_index": 1,
+      "explanation": "Least privilege hardening."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why can deleting a big file with a later RUN fail to reduce image size?",
+      "options": [
+        "Docker ignores rm",
+        "Layers are additive; the earlier layer still stores it",
+        "Compose caches it",
+        "The file is in a volume"
+      ],
+      "answer_index": 1,
+      "explanation": "Layers are immutable and additive."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Where should a private package token needed only at build time be provided?",
+      "options": [
+        "ENV in the Dockerfile",
+        "ARG in the Dockerfile",
+        "BuildKit secret mount",
+        "COPY .env"
+      ],
+      "answer_index": 2,
+      "explanation": "Secret mounts are not stored in layers."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To build only a particular stage use docker build --____ builder.",
+      "answers": [
+        "target"
+      ],
+      "explanation": "--target selects a stage."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In a Dockerfile, copy files from an earlier stage with COPY --____=builder.",
+      "answers": [
+        "from"
+      ],
+      "explanation": "COPY --from."
+    },
+    {
+      "type": "debug",
+      "prompt": "The API crashes at startup with 'connection refused' even though Postgres is in the same compose file. Fix the compose file.",
+      "code": "services:\n  db:\n    image: postgres:16\n  api:\n    build: .\n    depends_on:\n      - db",
+      "answer": "depends_on only waits for the db container to start, not for Postgres to accept connections. Add a healthcheck (`pg_isready`) to db and use `depends_on: db: condition: service_healthy`; also make the app retry its first connection.",
+      "rubric": [
+        "depends_on does not wait for readiness",
+        "Add healthcheck and service_healthy",
+        "App-level retry"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain multi-stage builds and the benefits for a Python service with compiled dependencies.",
+      "answer": "Use one stage with compilers and headers to build wheels, and a second slim stage that installs those wheels and copies the app. The final image lacks gcc and apt caches, so it is smaller, pulls faster and has fewer vulnerabilities. COPY --from moves artifacts, and --target lets CI build a test stage.",
+      "rubric": [
+        "Separate build and runtime stages",
+        "COPY --from artifacts",
+        "Smaller/safer final image"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "List concrete steps to harden a container image and runtime.",
+      "answer": "Use a minimal pinned base (slim or distroless, ideally digest), multi-stage to drop build tools, a non-root USER, read-only root filesystem with tmpfs where needed, cap_drop ALL, no secrets in layers (runtime env, secret mounts or a secrets manager), scan with Trivy/Scout and generate an SBOM in CI, set resource limits, and rebuild regularly for patches.",
+      "rubric": [
+        "Minimal pinned base + multi-stage",
+        "Non-root/read-only/cap_drop",
+        "No secrets in layers + scanning"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you reduce a Docker image from 1.2 GB to a few hundred MB?",
+      "difficulty": "medium",
+      "answer_md": "Start from a slim base, use multi-stage builds so compilers and dev headers are not shipped, install with `--no-cache-dir`, remove apt lists in the same RUN, add a `.dockerignore`, and avoid copying datasets or `.git`. Measure with `docker history` or `dive` to find fat layers. For heavy ML libraries consider CPU-only wheels."
+    },
+    {
+      "question": "Compose vs Kubernetes: when is each appropriate?",
+      "difficulty": "medium",
+      "answer_md": "Compose is simple and ideal for local development, CI and small single-host setups: one YAML, one command. Kubernetes (or ECS) provides multi-node scheduling, self-healing, rolling updates, autoscaling, service discovery and secrets management for production. Teams often develop with Compose and deploy the same images to an orchestrator."
+    },
+    {
+      "question": "Why do containers need an init process and exec-form CMD?",
+      "difficulty": "hard",
+      "answer_md": "The first process in a container is PID 1, which has special signal and zombie-reaping duties. With shell-form CMD, `/bin/sh` becomes PID 1 and may not forward SIGTERM, so `docker stop` waits 10 seconds and kills the app without graceful shutdown. Use exec-form CMD so the app receives signals, and `init: true`/tini to reap child processes."
+    }
+  ]
+}

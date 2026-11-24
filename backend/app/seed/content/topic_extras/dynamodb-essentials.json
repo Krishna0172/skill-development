@@ -1,0 +1,69 @@
+{
+  "slug": "dynamodb-essentials",
+  "why_md": "- DynamoDB gives single-digit-millisecond key-value access at any scale, with no connections to manage — a good fit for Lambda and job metadata.\n- Its access-pattern-first design is very different from PostgreSQL; getting keys wrong means expensive Scans or a redesign.\n- Used for AI apps too: chat sessions, conversation memory, rate limits and idempotency records.\n- 'DynamoDB vs PostgreSQL' and key design are common interview questions for AWS-heavy roles.",
+  "revision_notes_md": "- Primary key: partition key (hash) or partition + sort key; items with the same PK are stored together, sorted by SK.\n- Query = by partition key (+ SK conditions: =, <, between, begins_with) — efficient; Scan reads the whole table — avoid.\n- GSIs give alternative keys (eventually consistent only); LSIs share the PK, must be created with the table.\n- boto3 resource API uses `Decimal` for numbers — floats raise TypeError.\n- Conditional writes (`ConditionExpression`) give idempotency and optimistic locking.\n- Results are paginated by 1 MB: loop on `LastEvaluatedKey`.\n- Hot partitions throttle even with spare total capacity — spread keys.\n- TTL attribute auto-deletes expired items (asynchronously).",
+  "exercises_md": "1. Design a DynamoDB table for job runs with access patterns: get a run by id, list runs for an org in a date range, list currently failed runs. Write the key schema, a GSI, and example Query calls.\n2. Write a boto3 helper that pages through a Query with `LastEvaluatedKey`, and an idempotent `put_item` using `attribute_not_exists(pk)`; test against DynamoDB Local.",
+  "my_context_md": "boto3's `dynamodb` client is used in `python-postgres`, alongside the PostgreSQL-centric stack. Your `ForcesightJobSchedulerAndRunner` keeps job state in PostgreSQL; sketching the same job/run model in DynamoDB (org as partition key, run time as sort key) is a useful exercise for comparing the two.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To fetch all items with partition key `ORG#7` whose sort key starts with `JOB#2024-05`, use a Query with the key condition `____(sk, 'JOB#2024-05')`.",
+      "answers": [
+        "begins_with"
+      ],
+      "explanation": "begins_with is a supported sort-key condition in KeyConditionExpression."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To insert an item only if it doesn't already exist, add `ConditionExpression='____(pk)'`.",
+      "answers": [
+        "attribute_not_exists",
+        "attribute_not_exists(pk)"
+      ],
+      "explanation": "attribute_not_exists(pk) makes the put fail with ConditionalCheckFailedException if the item is already there."
+    },
+    {
+      "type": "output",
+      "prompt": "boto3's resource API requires `Decimal` instead of float. What does this print?",
+      "code": "import json\nfrom decimal import Decimal\nprice = 19.99\nitem = {\"sku\": \"A1\", \"price\": Decimal(str(price))}\nprint(item[\"price\"], Decimal(price) == Decimal(\"19.99\"))\nback = json.loads(json.dumps({\"p\": str(item[\"price\"])}), parse_float=Decimal)\nprint(type(back[\"p\"]).__name__)",
+      "answers": [
+        "19.99 False\nstr"
+      ],
+      "explanation": "Decimal(str(x)) keeps the intended value; Decimal(float) captures the binary float error so it differs from Decimal('19.99'). The value was serialized as a string, so it comes back as str."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A table with partition key `orgid` throttles during an import for one large org, although total consumed capacity is low. Best fix?",
+      "options": [
+        "Switch every read to strongly consistent",
+        "Add a local secondary index",
+        "Increase the item size",
+        "Spread writes with a higher-cardinality key (e.g. orgid#shard or orgid#date)"
+      ],
+      "answer_index": 3,
+      "explanation": "A single hot partition key concentrates traffic on one partition; write sharding spreads it."
+    },
+    {
+      "type": "debug",
+      "prompt": "This function returns only some of an org's jobs for large orgs, and it's slow and expensive. Fix it.",
+      "code": "def jobs_for_org(table, org_id):\n    resp = table.scan(\n        FilterExpression=Attr(\"orgid\").eq(org_id)\n    )\n    return resp[\"Items\"]",
+      "answer": "- `scan` reads the whole table (every item, all orgs) and filters afterwards — you pay for everything read.\n- Results are paginated at 1 MB; without following `LastEvaluatedKey` you only get the first page.\n\nModel the access pattern as a key (PK = `ORG#<id>` on the table or a GSI) and Query with pagination:\n```python\nfrom boto3.dynamodb.conditions import Key\n\ndef jobs_for_org(table, org_id):\n    items, kwargs = [], {\"KeyConditionExpression\": Key(\"pk\").eq(f\"ORG#{org_id}\")}\n    while True:\n        resp = table.query(**kwargs)\n        items.extend(resp[\"Items\"])\n        if \"LastEvaluatedKey\" not in resp:\n            return items\n        kwargs[\"ExclusiveStartKey\"] = resp[\"LastEvaluatedKey\"]\n```",
+      "rubric": [
+        "Scan reads the whole table; filter applies after reading",
+        "Missing pagination via LastEvaluatedKey",
+        "Use Query on a partition key (table or GSI)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "When would you choose DynamoDB over PostgreSQL for a feature, and when not?",
+      "answer": "**DynamoDB** when access patterns are known and key-based: get/put by id, list by owner + time range, idempotency keys, sessions/chat history, rate limits, job status. Pros: predictable low latency at any scale, no connection limits (good with Lambda), serverless operations, TTL.\n\n**PostgreSQL** when you need ad-hoc queries, joins, aggregations, reporting, multi-row transactions with complex constraints, or the access patterns aren't settled. Pros: flexible SQL, strong constraints, rich indexing, JSONB.\n\nTrade-offs: DynamoDB requires designing keys up front (adding a new query pattern may need a GSI or backfill), lacks joins, limits transactions (100 items) and makes analytics awkward (export to S3/Athena). Many systems use both: PostgreSQL for the relational core, DynamoDB for high-volume key-value state.",
+      "rubric": [
+        "DynamoDB for known key-based access patterns at scale",
+        "PostgreSQL for ad-hoc queries, joins, reporting, constraints",
+        "Key design up front; GSIs for new patterns",
+        "Using both is common"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,156 @@
+{
+  "slug": "be-background-tasks",
+  "title": "Background work: BackgroundTasks vs real job queues",
+  "skill": "message-queues",
+  "extra_skills": [
+    "fastapi",
+    "aws-ecs",
+    "aws-lambda"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "background-tasks",
+    "queues",
+    "sqs",
+    "ecs-run-task",
+    "lambda-async",
+    "job-status",
+    "celery"
+  ],
+  "summary": "FastAPI's `BackgroundTasks` runs a function in the same process after the response is sent — fine for small, best-effort work like sending an email, but jobs are lost on restart and compete with request handling. Durable or heavy work belongs in a queue or a separately launched worker (SQS + worker, Celery/RQ, ECS `run_task`, async Lambda invoke), with a job record the client can poll for status.",
+  "why_md": "- APIs must respond in milliseconds-to-seconds; report processing and LLM batch jobs take minutes.\n- Picking the wrong mechanism loses work silently (in-process tasks die with the container on deploy).\n- The '202 Accepted + job ID + status endpoint' pattern is standard in system design interviews.\n- Retries, idempotency and visibility of failures are what separate a job system from fire-and-forget.",
+  "details_md": "### FastAPI BackgroundTasks\nDeclare `background_tasks: BackgroundTasks` and call `background_tasks.add_task(fn, *args)`. After the response is sent, Starlette runs the tasks **in the same worker process** (sync functions in the threadpool, async on the loop), in order. Limits:\n- **Not durable**: a deploy, crash or scale-in loses queued/running tasks.\n- **No retries, no visibility**: failures only appear in logs.\n- **Shares resources** with request handling; CPU-heavy tasks slow the API.\n- Request-scoped resources (yield-dependency DB connections) are already cleaned up — open a fresh connection inside the task.\nGood for: audit log writes, cache warming, notification emails where loss is acceptable.\n\n### Real queues\nA **queue** (SQS, RabbitMQ, Redis Streams, or a Postgres jobs table) decouples producers from workers. Workers run as separate processes/containers, scale independently, retry with backoff and send poison messages to a **dead-letter queue**. Delivery is usually **at-least-once**, so handlers must be **idempotent** (upserts, dedupe keys). Celery/RQ/Dramatiq add a Python task API on top of a broker.\n\n### Launch-a-worker patterns on AWS\n- `ecs.run_task(...)` starts a Fargate task per job with overrides (env vars like `UPLOAD_ID`) — good for long, memory-heavy processing; no built-in retry, so track status yourself.\n- `lambda.invoke(InvocationType=\"Event\")` queues an async invocation (Lambda retries twice on error, supports a DLQ / on-failure destination); 15-minute max runtime.\n- SQS → Lambda event source mapping for many small jobs.\n\n### Job status tracking\nInsert a `jobs` row **before** enqueueing (`status='queued'`), return `202` with `job_id` and a `Location: /jobs/{id}` header. The worker moves it `queued → running → succeeded/failed`, recording attempts, error message, timestamps and progress. Clients poll (or get a webhook/SSE). A reaper marks `running` jobs with stale heartbeats as failed or re-queues them.",
+  "code_md": "```python\nfrom fastapi import BackgroundTasks, FastAPI, status\nimport boto3, json, uuid\n\napp = FastAPI()\necs = boto3.client(\"ecs\")\n\ndef write_audit(user_id: int, action: str):          # best-effort, OK to lose\n    with app.state.pool_conn() as conn:                # fresh connection, not the request's\n        conn.cursor().execute(\"INSERT INTO audit(user_id, action) VALUES (%s, %s)\", (user_id, action))\n\n@app.post(\"/settings\")\ndef update_settings(bg: BackgroundTasks):\n    ...\n    bg.add_task(write_audit, 42, \"settings.update\")   # runs after the response\n    return {\"ok\": True}\n\n@app.post(\"/uploads/{upload_id}/process\", status_code=status.HTTP_202_ACCEPTED)\ndef process_upload(upload_id: int):\n    job_id = str(uuid.uuid4())\n    with app.state.pool_conn() as conn:                # 1) durable record first\n        conn.cursor().execute(\n            \"INSERT INTO jobs(id, kind, payload, status) VALUES (%s, 'report', %s, 'queued')\",\n            (job_id, json.dumps({\"upload_id\": upload_id})))\n    ecs.run_task(                                      # 2) launch a worker container\n        cluster=\"etl\", taskDefinition=\"report-processor\", launchType=\"FARGATE\",\n        networkConfiguration={\"awsvpcConfiguration\": {\"subnets\": [\"subnet-x\"]}},\n        overrides={\"containerOverrides\": [{\"name\": \"worker\",\n                   \"environment\": [{\"name\": \"JOB_ID\", \"value\": job_id}]}]})\n    return {\"job_id\": job_id, \"status_url\": f\"/jobs/{job_id}\"}\n```\n\n```python\n# Worker side: idempotent, status-tracked\ndef run_job(conn, job_id):\n    cur = conn.cursor()\n    cur.execute('''UPDATE jobs SET status='running', attempts=attempts+1, started_at=now()\n                   WHERE id=%s AND status IN ('queued','failed') RETURNING payload''', (job_id,))\n    row = cur.fetchone()\n    conn.commit()\n    if row is None:\n        return                                         # already done or running elsewhere\n    try:\n        process(row[0])                                # must be safe to re-run (upserts)\n        cur.execute(\"UPDATE jobs SET status='succeeded', finished_at=now() WHERE id=%s\", (job_id,))\n    except Exception as e:\n        cur.execute(\"UPDATE jobs SET status='failed', error=%s WHERE id=%s\", (str(e)[:500], job_id))\n        raise\n    finally:\n        conn.commit()\n```",
+  "use_cases_md": "- Seller uploads a settlement report → API stores it in S3, creates a job row, launches an ECS task; the UI polls `/jobs/{id}`.\n- Sending a 'report ready' SES email via `BackgroundTasks` after the status update.\n- Nightly re-pricing for 1,000 sellers via SQS fan-out to workers with a DLQ.\n- Batch embedding generation for product reviews as queued jobs with progress counters.\n- Async Lambda invoke for a short enrichment step with an on-failure destination.",
+  "mistakes_md": "- **Heavy processing in BackgroundTasks**: lost on deploy, slows the API. Use a queue/worker.\n- **Enqueue before writing the job row**: worker may start before the row exists, or the row write fails after the job was launched. Write the row first (or use an outbox).\n- **Non-idempotent workers** with at-least-once delivery → duplicate inserts. Use upserts/dedupe keys.\n- **Passing the request's DB connection to a background task**: it's been returned to the pool.\n- **No DLQ / no 'failed' status**: failures disappear into logs.\n- **Fire-and-forget `ecs.run_task` without checking `failures` in the response**: capacity errors go unnoticed.",
+  "best_practices_md": "- Return `202 Accepted` with a job ID and status URL for long work.\n- Persist job state in Postgres: status, attempts, error, timestamps, progress.\n- Make handlers idempotent; assume every job can run twice.\n- Use retries with backoff and a DLQ; alert on DLQ depth.\n- Keep payloads small (IDs and S3 keys, not data).\n- Heartbeats + a reaper for stuck `running` jobs.\n- Use BackgroundTasks only for small, loss-tolerant side effects.",
+  "my_context_md": "You already use boto3 for `ecs` and `lambda`, and `ECSMarketplaceDataUpload` tracks upload status — that's the job-status pattern. `ForcesightJobSchedulerAndRunner` is effectively a Postgres-backed queue: jobs claimed with `SELECT … FOR UPDATE SKIP LOCKED` and executed by a `ThreadPoolExecutor` in `runner.py`. Compare its guarantees (retries, stuck-job recovery, idempotency) with SQS + DLQ when deciding where new background work should go.",
+  "revision_notes_md": "- BackgroundTasks: same process, after response, not durable, no retries.\n- Use for small loss-tolerant side effects; open fresh resources inside.\n- Durable work → queue (SQS/RabbitMQ/Redis Streams/Postgres SKIP LOCKED) + separate workers.\n- At-least-once delivery ⇒ idempotent handlers.\n- DLQ for poison messages; alert on it.\n- ECS run_task: long/heavy jobs, track status yourself; Lambda async invoke: ≤15 min, 2 retries, on-failure destination.\n- Pattern: insert job row → enqueue → 202 + job_id → worker updates status → client polls.\n- Reaper for stale `running` jobs.",
+  "exercises_md": "1. Add a `jobs` table (id, kind, payload JSONB, status, attempts, error, timestamps) and a `GET /jobs/{id}` endpoint in a toy FastAPI app.\n2. Write a worker loop that claims jobs with `FOR UPDATE SKIP LOCKED`, runs them, and records success/failure; kill it mid-job and implement a reaper.\n3. Make a report-processing job idempotent by switching its inserts to `ON CONFLICT DO UPDATE`, then run it twice and verify row counts.\n4. List three background operations in your services and classify each: BackgroundTasks, queue, or ECS task — with a one-line reason.",
+  "related": [
+    "message-queues",
+    "be-postgres-locking-deadlocks",
+    "retries-backoff-idempotency",
+    "ecs-fargate",
+    "aws-lambda-essentials",
+    "be-system-design-fundamentals"
+  ],
+  "flashcards": [
+    {
+      "front": "When do FastAPI BackgroundTasks run?",
+      "back": "In the same process, after the response has been sent."
+    },
+    {
+      "front": "Why must queue consumers be idempotent?",
+      "back": "Most queues deliver at-least-once; a message may be processed twice after a timeout or crash."
+    },
+    {
+      "front": "What does a dead-letter queue hold?",
+      "back": "Messages that failed processing more than the max receive/retry count, for inspection and replay."
+    },
+    {
+      "front": "HTTP response for 'job accepted, still processing'?",
+      "back": "202 Accepted with a job ID and a status URL (Location header)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A FastAPI endpoint uses `BackgroundTasks` to process a 300 MB seller report. What is the main risk?",
+      "options": [
+        "The response will wait until processing finishes",
+        "The task is lost if the container is restarted or deployed mid-processing, and it competes with request handling",
+        "BackgroundTasks can't call pandas",
+        "The task runs on a different server"
+      ],
+      "answer_index": 1,
+      "explanation": "BackgroundTasks run in-process with no persistence or retries; heavy work also starves the API worker."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In which order should an API create a durable job?",
+      "options": [
+        "Launch the worker, then insert the job row",
+        "Insert the job row only when the worker finishes",
+        "Return 200 and let the client retry",
+        "Insert the job row (queued), then enqueue/launch the worker, then return 202 with the job ID"
+      ],
+      "answer_index": 3,
+      "explanation": "The row must exist before a worker can look it up or update it, and the client needs the ID to poll."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To invoke a Lambda asynchronously with boto3, call `invoke` with `InvocationType=\"____\"`.",
+      "answers": [
+        "Event",
+        "event"
+      ],
+      "explanation": "`Event` queues the invocation and returns 202 immediately; `RequestResponse` is synchronous."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Messages that keep failing are moved to a ____ queue for inspection.",
+      "answers": [
+        "dead-letter",
+        "dead letter",
+        "dlq"
+      ],
+      "explanation": "A DLQ isolates poison messages so they don't block or loop forever."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib code mimics FastAPI running background tasks after the response. What does it print?",
+      "code": "class BackgroundTasks:\n    def __init__(self):\n        self.tasks = []\n    def add_task(self, fn, *args):\n        self.tasks.append((fn, args))\n\ndef send_email(to):\n    print(\"email ->\", to)\n\ndef endpoint(bg):\n    bg.add_task(send_email, \"seller@x.com\")\n    print(\"handler done\")\n    return {\"status\": \"queued\"}\n\nbg = BackgroundTasks()\nresponse = endpoint(bg)\nprint(\"response sent:\", response)\nfor fn, args in bg.tasks:\n    fn(*args)\n",
+      "answers": [
+        "handler done\nresponse sent: {'status': 'queued'}\nemail -> seller@x.com"
+      ],
+      "explanation": "Tasks are only collected during the handler; they execute after the response is sent — which is why they can't change the response and why they don't delay it."
+    },
+    {
+      "type": "debug",
+      "prompt": "Under SQS, some reports are inserted twice into `settlements`. What's wrong and how do you fix it?",
+      "code": "def handle_message(msg, conn):\n    rows = load_rows_from_s3(msg[\"s3_key\"])\n    with conn.cursor() as cur:\n        execute_values(cur,\n            \"INSERT INTO settlements(order_id, amount) VALUES %s\", rows)\n    conn.commit()\n    sqs.delete_message(QueueUrl=Q, ReceiptHandle=msg[\"receipt\"])\n",
+      "answer": "SQS is **at-least-once**: if processing exceeds the visibility timeout or the worker crashes after `commit()` but before `delete_message`, the message is redelivered and the plain INSERT duplicates rows. Make the handler idempotent:\n\n```python\nexecute_values(cur, \"\"\"\n    INSERT INTO settlements(order_id, amount) VALUES %s\n    ON CONFLICT (order_id) DO UPDATE SET amount = EXCLUDED.amount\"\"\", rows)\n```\nwith a unique constraint on the natural key (or record processed message IDs/job IDs in a table), and set the visibility timeout above the max processing time.",
+      "rubric": [
+        "At-least-once delivery / redelivery after timeout or crash",
+        "Plain INSERT is not idempotent",
+        "Fix with unique key + ON CONFLICT or dedupe table",
+        "Visibility timeout sized to processing time"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd design report processing so a seller can upload a file and see its progress, given processing takes 5-20 minutes.",
+      "answer": "Upload goes to S3 (presigned URL). `POST /uploads/{id}/process` inserts a `jobs` row with `status='queued'`, enqueues a small message (job ID + S3 key) to SQS or launches an ECS task, and returns **202** with `job_id`. A worker claims the job (status `running`, attempts+1, heartbeat), processes in chunks updating `progress`, writes rows idempotently (upserts), then sets `succeeded` or `failed` with an error message. The client polls `GET /jobs/{id}` (or receives SSE/webhook/email). Failures retry with backoff; after N attempts the message goes to a DLQ and the job stays `failed` with a visible reason. A reaper re-queues jobs whose heartbeat is stale.",
+      "rubric": [
+        "202 + job ID + status endpoint",
+        "Durable job record with status transitions",
+        "Separate worker via queue/ECS, idempotent writes",
+        "Retries/DLQ and stuck-job handling"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When is a Postgres table with `FOR UPDATE SKIP LOCKED` a better job queue than SQS, and when not?",
+      "answer": "Postgres is better when job volume is modest (hundreds/sec or less), you want jobs created **in the same transaction** as business data (no dual-write problem), and you want SQL visibility/querying of job state without new infrastructure. SQS is better at very high throughput, for cross-service/cross-account fan-out, when you want managed retries/DLQ/visibility timeouts, or when you don't want queue polling load on the primary database.",
+      "rubric": [
+        "Postgres: transactional enqueue, simplicity, queryable state",
+        "SQS: scale, managed retries/DLQ, decoupling",
+        "Polling load on primary DB as a cost"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Your API kicks off ECS tasks with `run_task` for each uploaded report. What can go wrong and how do you make it reliable?",
+      "difficulty": "hard",
+      "answer_md": "Failure modes: `run_task` can return `failures` (capacity, throttling) with no task started; the task can crash or be stopped (spot interruption, OOM) leaving the job `running` forever; the API might insert the job row but crash before calling `run_task` (or vice versa); and bursts of uploads can launch hundreds of tasks, overwhelming Postgres connections.\n\nFixes: insert the job row first and check `response[\"failures\"]`, marking the job `failed`/`queued` for retry; add heartbeats and a reaper that re-queues stale `running` jobs; make the worker idempotent so retries are safe. For bursts and robustness, put an SQS queue (or a Postgres jobs table) between the API and the workers, and run a bounded pool of worker tasks (ECS service autoscaled on queue depth) instead of one task per job. Track attempts and send exhausted jobs to a DLQ with alerts."
+    },
+    {
+      "question": "What's the difference between at-most-once, at-least-once and exactly-once processing?",
+      "difficulty": "medium",
+      "answer_md": "**At-most-once**: acknowledge/delete before processing; a crash loses the message, but it never runs twice (fine for metrics/notifications). **At-least-once**: acknowledge after processing; a crash or timeout causes redelivery, so the message may run twice — this is the default for SQS standard queues, Celery with `acks_late`, etc. **Exactly-once** end-to-end is generally not achievable across systems; in practice you get *effectively once* by combining at-least-once delivery with **idempotent processing**: dedupe keys, `INSERT … ON CONFLICT`, a processed-messages table updated in the same transaction as the side effect, or conditional updates (`WHERE status = 'queued'`). SQS FIFO offers deduplication within a 5-minute window, but your handler should still be idempotent."
+    }
+  ]
+}

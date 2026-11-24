@@ -1,0 +1,155 @@
+{
+  "slug": "be-api-error-handling",
+  "title": "API error handling: consistent, safe and retry-friendly",
+  "skill": "error-handling",
+  "extra_skills": [
+    "fastapi",
+    "api-design",
+    "python-exceptions-logging"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "errors",
+    "http-status",
+    "exception-handlers",
+    "problem-details",
+    "idempotency",
+    "logging"
+  ],
+  "summary": "Good APIs return one consistent error shape, use status codes that tell the client whether to fix the request (4xx) or retry (5xx), and never leak stack traces or SQL. In FastAPI that means domain exceptions raised from services, mapped to HTTP responses by exception handlers, with full details logged server-side under a request ID. Idempotency keys make retries of unsafe operations safe.",
+  "why_md": "- Clients (your UI, other services, LLM agents calling tools) can only react correctly to errors that are consistent and correctly classified.\n- Leaked internals (SQL, file paths, secrets in tracebacks) are a security finding.\n- Broad `except Exception: pass` hides incidents; structured handling makes them observable.\n- Retries + idempotency is a classic interview topic for payment-like or upload endpoints.",
+  "details_md": "### One error format\nPick a shape and use it everywhere, e.g. RFC 9457 *Problem Details* style:\n`{\"type\": \"...\", \"title\": \"Order not found\", \"status\": 404, \"detail\": \"...\", \"code\": \"ORDER_NOT_FOUND\", \"request_id\": \"...\"}`.\nA machine-readable `code` lets clients branch without parsing messages; `request_id` links the user's report to your logs.\n\n### Status codes\n- **400** malformed request, **401** not authenticated, **403** authenticated but not allowed, **404** not found (also used to hide resources from other tenants), **409** conflict (duplicate, state clash), **422** validation failed, **429** rate limited (send `Retry-After`).\n- **500** bug, **502/503/504** upstream/unavailable/timeout.\nRule: 4xx = client must change something, don't blindly retry; 5xx/429 = may retry with backoff.\n\n### Domain exceptions + handlers\nServices shouldn't import FastAPI. They raise domain errors: `class AppError(Exception)` with `status` and `code` attributes, subclasses `NotFound`, `Conflict`, `UpstreamUnavailable`. One `@app.exception_handler(AppError)` converts them to the standard body. `HTTPException` is fine in thin route code but couples services to HTTP if used deeper.\n\nAlso override the `RequestValidationError` handler to reshape 422s, and register a catch-all `Exception` handler that logs with `logger.exception` and returns a generic 500 with the request ID — no traceback in the body.\n\n### Logging without leaking\nLog the full exception (stack, SQL, params minus secrets) server-side, return a safe message. Log 5xx at ERROR, expected 4xx at INFO/WARNING to avoid alert noise. Catch specific exceptions (`psycopg2.errors.UniqueViolation` → 409), never `except: pass`.\n\n### Retries and idempotency keys\nClients retry on timeouts — but if the first request actually succeeded, a retried `POST /payments` charges twice. With an **Idempotency-Key** header, the server stores `(key, request hash) → response` and returns the stored response on retries; same key with a different body → 422/409. Store keys with a TTL (Postgres table with unique key, or Redis `SET NX`).",
+  "code_md": "```python\nimport logging\nfrom fastapi import FastAPI, Request\nfrom fastapi.exceptions import RequestValidationError\nfrom fastapi.responses import JSONResponse\n\nlog = logging.getLogger(__name__)\napp = FastAPI()\n\nclass AppError(Exception):\n    status = 500\n    code = \"INTERNAL\"\n    def __init__(self, detail: str = \"\"):\n        super().__init__(detail)\n        self.detail = detail\n\nclass NotFound(AppError):    status, code = 404, \"NOT_FOUND\"\nclass Conflict(AppError):    status, code = 409, \"CONFLICT\"\nclass UpstreamDown(AppError): status, code = 503, \"UPSTREAM_UNAVAILABLE\"\n\ndef problem(request: Request, status: int, code: str, detail: str):\n    rid = request.headers.get(\"x-request-id\", \"-\")\n    return JSONResponse(status_code=status,\n                        content={\"status\": status, \"code\": code, \"detail\": detail, \"request_id\": rid})\n\n@app.exception_handler(AppError)\nasync def app_error_handler(request: Request, exc: AppError):\n    level = logging.ERROR if exc.status >= 500 else logging.INFO\n    log.log(level, \"%s %s\", exc.code, exc.detail)\n    return problem(request, exc.status, exc.code, exc.detail)\n\n@app.exception_handler(RequestValidationError)\nasync def validation_handler(request: Request, exc: RequestValidationError):\n    fields = [{\"loc\": e[\"loc\"], \"msg\": e[\"msg\"]} for e in exc.errors()]\n    return JSONResponse(status_code=422, content={\"status\": 422, \"code\": \"VALIDATION_ERROR\", \"errors\": fields})\n\n@app.exception_handler(Exception)\nasync def unhandled(request: Request, exc: Exception):\n    log.exception(\"unhandled error\")                     # full traceback in logs only\n    return problem(request, 500, \"INTERNAL\", \"Something went wrong\")\n```\n\n```python\nimport psycopg2.errors\n\ndef create_listing(conn, sku: str, org_id: int):\n    try:\n        with conn.cursor() as cur:\n            cur.execute(\"INSERT INTO listings(org_id, sku) VALUES (%s, %s)\", (org_id, sku))\n    except psycopg2.errors.UniqueViolation:\n        conn.rollback()\n        raise Conflict(f\"SKU {sku} already exists\")   # specific, mapped to 409\n\n# Idempotency key table:\n# CREATE TABLE idempotency_keys(key text PRIMARY KEY, request_hash text, status int,\n#                               response jsonb, created_at timestamptz DEFAULT now());\n# 1) INSERT ... ON CONFLICT (key) DO NOTHING RETURNING key -> if no row, fetch stored response\n# 2) if stored request_hash differs -> 422; else return stored status/response\n```",
+  "use_cases_md": "- Marketplace connector API returns `503 UPSTREAM_UNAVAILABLE` when SP-API is down, so the UI shows 'try again later' instead of a generic failure.\n- Duplicate SKU creation maps `UniqueViolation` to 409 with code `DUPLICATE_SKU`.\n- Report upload `POST` with an `Idempotency-Key` so a mobile client retrying after a timeout doesn't create two uploads.\n- 422 responses listing every invalid field from a bulk-edit request.\n- LLM tool-calling agents use the `code` field to decide whether to retry or ask the user.",
+  "mistakes_md": "- **Returning 200 with `{\"error\": ...}`**: breaks clients, monitoring and retries. Use real status codes.\n- **Leaking `str(exc)`** from database errors — exposes SQL, table names, sometimes data.\n- **`except Exception: pass`** or returning `None` on failure: errors vanish. Catch specific exceptions and re-raise or map.\n- **500 for client mistakes** (missing field, bad ID) triggers false alerts and pointless retries.\n- **Retrying non-idempotent POSTs** without idempotency keys → duplicates.\n- **Raising `HTTPException` deep in service code**: couples business logic to the web framework.",
+  "best_practices_md": "- One error schema with a stable machine-readable `code` and `request_id`.\n- Domain exception hierarchy in the service layer; map once in handlers.\n- Catch-all handler: `logger.exception` + generic 500.\n- 4xx at INFO/WARN, 5xx at ERROR; alert on 5xx rate.\n- `Retry-After` on 429/503.\n- Idempotency keys for POSTs that create or charge; natural-key upserts for ingestion.\n- Document error codes in the OpenAPI `responses=`.",
+  "my_context_md": "Your audit found 88% of except blocks are broad and 432 `except: pass`. `DebitNotes` already defines custom exception classes — that's the start of a domain error hierarchy; the next step is mapping them to responses in one place instead of catching broadly. `ECSMarketplaceDataUpload`'s deadlock retry is an example of the right kind of targeted catch (retry on one specific error).",
+  "revision_notes_md": "- One error body: status, code, detail, request_id.\n- 400 bad request, 401 unauthenticated, 403 forbidden, 404, 409 conflict, 422 validation, 429 rate limit.\n- 5xx = server/upstream; retryable with backoff (plus 429).\n- Domain exceptions in services → `@app.exception_handler(AppError)`.\n- Override `RequestValidationError` for custom 422 shape.\n- Catch-all handler logs `logger.exception`, returns generic 500.\n- Never return tracebacks/SQL to clients.\n- Idempotency-Key: store key + request hash + response; replay on retry.",
+  "exercises_md": "1. Define an `AppError` hierarchy for one of your services (NotFound, Conflict, UpstreamUnavailable, ValidationFailed) and replace three broad `except` blocks with specific raises.\n2. Write FastAPI handlers so every error (including 422 and unhandled) returns the same JSON shape; test each with TestClient.\n3. Implement an `Idempotency-Key` table and make `POST /uploads` return the stored response for a repeated key.\n4. Grep one service for `except: pass` and, for each, decide: log+re-raise, map to a domain error, or genuinely ignore (with a comment).",
+  "related": [
+    "python-exceptions",
+    "py-logging",
+    "rest-api-design",
+    "retries-backoff-idempotency",
+    "be-fastapi-middleware",
+    "be-pydantic-validation"
+  ],
+  "flashcards": [
+    {
+      "front": "401 vs 403?",
+      "back": "401: not authenticated (missing/invalid credentials). 403: authenticated but not permitted."
+    },
+    {
+      "front": "Which errors should clients retry?",
+      "back": "5xx (esp. 502/503/504) and 429, with backoff — not 4xx validation/permission errors."
+    },
+    {
+      "front": "What does an Idempotency-Key store?",
+      "back": "Key → request fingerprint + response, so a retry returns the original result instead of re-executing."
+    },
+    {
+      "front": "Where should a domain exception become an HTTP response?",
+      "back": "In a registered exception handler, not inside the service code."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A user tries to create a listing with a SKU that already exists for their organization. Which status code fits best?",
+      "options": [
+        "500 Internal Server Error",
+        "404 Not Found",
+        "409 Conflict",
+        "401 Unauthorized"
+      ],
+      "answer_index": 2,
+      "explanation": "The request is valid but conflicts with current state (unique constraint) — 409."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What's the safest response body for an unhandled exception in production?",
+      "options": [
+        "A generic message plus a request ID, with the traceback logged server-side",
+        "The full traceback so the client can report it",
+        "`str(exc)` so the message is accurate",
+        "An empty 200 response"
+      ],
+      "answer_index": 0,
+      "explanation": "Clients get a correlation ID; details stay in logs to avoid leaking internals."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To make retries of `POST /payments` safe, clients send a unique ____ header that the server uses to return the original result.",
+      "answers": [
+        "Idempotency-Key",
+        "idempotency key",
+        "idempotency-key"
+      ],
+      "explanation": "The server stores the key with the response and replays it for duplicates."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "When rate limiting with 429, the server should send a `____` header telling the client when to try again.",
+      "answers": [
+        "Retry-After",
+        "retry after"
+      ],
+      "explanation": "`Retry-After` gives seconds or an HTTP date."
+    },
+    {
+      "type": "output",
+      "prompt": "Exception handlers are looked up by walking the exception's MRO. This stdlib code mimics that. What does it print?",
+      "code": "class AppError(Exception):\n    status = 500\nclass NotFound(AppError):\n    status = 404\nclass OrderNotFound(NotFound):\n    pass\nclass Conflict(AppError):\n    status = 409\n\nhandlers = {NotFound: \"not_found_handler\", AppError: \"app_error_handler\"}\n\ndef find_handler(exc):\n    for cls in type(exc).__mro__:\n        if cls in handlers:\n            return handlers[cls]\n    return \"500 default\"\n\nfor exc in [OrderNotFound(), Conflict(), KeyError()]:\n    print(type(exc).__name__, getattr(exc, \"status\", \"-\"), find_handler(exc))\n",
+      "answers": [
+        "OrderNotFound 404 not_found_handler\nConflict 409 app_error_handler\nKeyError - 500 default"
+      ],
+      "explanation": "OrderNotFound inherits status 404 and the closest registered handler is NotFound's. Conflict has no own handler so AppError's is used. KeyError matches nothing and falls to the default 500 — like Starlette's lookup through `type(exc).__mro__`."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong with this endpoint's error handling, and how would you fix it?",
+      "code": "@app.post(\"/listings\")\ndef create_listing(body: ListingIn, conn: Conn):\n    try:\n        cur = conn.cursor()\n        cur.execute(\"INSERT INTO listings(org_id, sku) VALUES (%s, %s)\", (body.org_id, body.sku))\n        conn.commit()\n        return {\"ok\": True}\n    except Exception as e:\n        return {\"ok\": False, \"error\": str(e)}\n",
+      "answer": "- Returns **200** on failure, so clients/monitoring think it worked.\n- `str(e)` leaks database internals (constraint names, SQL, values).\n- Catches everything: a bug, a lost connection and a duplicate SKU all look the same; nothing is logged; no rollback.\n\n```python\n@app.post(\"/listings\", status_code=201)\ndef create_listing(body: ListingIn, conn: Conn):\n    try:\n        with conn.cursor() as cur:\n            cur.execute(\"INSERT INTO listings(org_id, sku) VALUES (%s, %s)\", (body.org_id, body.sku))\n    except psycopg2.errors.UniqueViolation:\n        raise Conflict(f\"SKU {body.sku} already exists\")  # handler -> 409\n    return {\"ok\": True}\n```\nThe yield dependency rolls back on exceptions; other errors propagate to the catch-all handler which logs them and returns a generic 500.",
+      "rubric": [
+        "200 status on failure is wrong",
+        "str(e) leaks internals",
+        "Broad except hides bugs, no logging/rollback",
+        "Catch the specific UniqueViolation and map to 409; let others reach the handler"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how idempotency keys work and why 'just retry on timeout' is dangerous without them.",
+      "answer": "A timeout tells the client nothing about whether the server performed the action — the request may have committed and only the response was lost. Retrying a non-idempotent `POST` then creates a duplicate (two uploads, two charges). With idempotency keys, the client generates a unique key per logical operation and sends it on every retry. The server, in a transaction, inserts the key (unique constraint) with a request hash; if the key already exists it returns the stored response (or 409 if still in progress, 422 if the body differs). Keys expire after e.g. 24h. GET/PUT/DELETE are idempotent by design; POST needs the key.",
+      "rubric": [
+        "Timeout is ambiguous: action may have succeeded",
+        "Client-generated key per operation, reused on retries",
+        "Server stores key + request hash + response, returns stored result",
+        "Atomic insert/unique constraint and expiry"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Should your service layer raise `HTTPException`? Justify.",
+      "answer": "Preferably not. Services should raise domain exceptions (`OrderNotFound`, `Conflict`) so they're reusable from CLI jobs, queue workers and tests without HTTP concepts. The web layer maps them to status codes in exception handlers — one place to change the response format. `HTTPException` is acceptable in thin route functions or dependencies (e.g. auth returning 401).",
+      "rubric": [
+        "Domain exceptions keep services framework-agnostic",
+        "Mapping centralized in exception handlers",
+        "HTTPException acceptable at the route/dependency edge"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Design the error-handling strategy for a new FastAPI service used by a web UI and by other internal services.",
+      "difficulty": "medium",
+      "answer_md": "1. **Error contract**: every non-2xx returns `{status, code, detail, request_id, errors?}`; `code` values are documented and stable.\n2. **Domain exceptions** (`AppError` with `status`/`code`; subclasses NotFound, Conflict, Forbidden, UpstreamUnavailable) raised from services, mapped by one exception handler.\n3. **Validation**: custom `RequestValidationError` handler reshaping 422 into the same contract with per-field errors.\n4. **Unhandled**: catch-all handler → `logger.exception` with request ID, generic 500 body.\n5. **Status discipline**: 4xx for client issues (logged at INFO), 5xx for server/upstream (ERROR + alerts), 429/503 with `Retry-After`.\n6. **Retries**: internal clients retry 5xx/429 with exponential backoff and jitter; creates use `Idempotency-Key`; ingestion uses natural-key upserts.\n7. **Specific catches**: map `UniqueViolation` → 409, `httpx.TimeoutException` → 504/503; never `except: pass`."
+    },
+    {
+      "question": "A downstream marketplace API intermittently returns 500s and timeouts. How should your API behave toward its own clients?",
+      "difficulty": "hard",
+      "answer_md": "Inside the call: set explicit timeouts, retry a small number of times with exponential backoff + jitter only for retryable errors (timeouts, 502/503/504, 429 honoring `Retry-After`), and only for idempotent operations. Consider a circuit breaker so repeated failures fail fast instead of piling up waiting requests. Towards clients, don't pass the upstream's 500 through as your own 500 (which means *your* bug): map it to **502 Bad Gateway** (invalid upstream response) or **503/504** (unavailable/timeout) with a code like `UPSTREAM_UNAVAILABLE` and a `Retry-After`. Log the upstream status and body server-side with the request ID. If the operation is long-running or can be deferred, accept it with 202 and process via a queue so upstream flakiness becomes retries in the background rather than user-facing errors. Serve cached/stale data where acceptable."
+    }
+  ]
+}

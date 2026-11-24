@@ -1,0 +1,179 @@
+{
+  "slug": "be-git-advanced",
+  "title": "Advanced Git: rebase, cherry-pick, reflog, bisect",
+  "skill": "git",
+  "extra_skills": [],
+  "category": "Tools",
+  "difficulty": "intermediate",
+  "tags": [
+    "git",
+    "rebase",
+    "cherry-pick",
+    "reflog",
+    "bisect",
+    "conflicts"
+  ],
+  "summary": "Beyond add/commit/merge, Git has tools to keep history clean (rebase), move single changes (cherry-pick), recover lost work (reflog), find the commit that broke something (bisect) and resolve conflicts confidently. This topic explains how each works and when to use it.",
+  "why_md": "- Clean, reviewable history is a team expectation and a common interview topic.\n- `reflog` turns 'I destroyed my work' into a 30-second fix.\n- `bisect` finds a regression among hundreds of commits in about 8 steps.\n- Knowing what rebase rewrites tells you when it is safe and when it is dangerous.",
+  "details_md": "### Commits are immutable; branches move\nA commit's id is a hash of its content and its parent. 'Changing' a commit really creates a *new* commit. Branch names are pointers that can be moved. This explains everything below.\n\n### Rebase\n`git rebase main` (while on `feature`) takes the commits unique to `feature`, and *replays* them one by one on top of the latest `main`, creating new commits. Result: a linear history as if you started from the current `main`. Compare with `merge`, which keeps both lines and adds a merge commit.\n\n**Golden rule: never rebase commits that others have already pulled** (shared branches), because you rewrite history they have based work on. Rebasing your own unpublished branch is safe; pushing it afterwards needs `git push --force-with-lease` (refuses if someone else pushed meanwhile).\n\n**Interactive rebase**: `git rebase -i HEAD~4` opens a todo list: `pick`, `reword` (edit message), `squash`/`fixup` (merge into previous), `drop`, and reorder lines. Use it to tidy 'wip', 'typo' commits before a pull request. `git commit --fixup <sha>` plus `git rebase -i --autosquash` automates it.\n\n### Cherry-pick\n`git cherry-pick <sha>` copies one commit's changes onto the current branch as a new commit. Typical use: backport a hotfix from `main` to a `release/1.4` branch. For a range: `A^..B`. It duplicates the change (different hash), so overuse leads to confusing duplicates.\n\n### Conflicts\nBoth merge and rebase and cherry-pick can stop with conflicts. `git status` lists 'both modified' files. Markers show your side (`HEAD`) and incoming side. Edit to the correct result, `git add file`, then `git rebase --continue` (or `git merge --continue`, `git cherry-pick --continue`). `--abort` returns to the pre-operation state. Note: during a rebase 'ours' is the branch being rebased onto and 'theirs' is your commit being replayed (reverse of what intuition says). `git rerere` can remember resolutions. `git mergetool` or an IDE helps with 3-way diffs.\n\n### Reflog\nGit records every movement of HEAD locally in the **reflog** (kept ~90 days for reachable, ~30 for unreachable entries by default). After a bad rebase or `reset --hard`: `git reflog` lists states like `HEAD@{3}`; `git reset --hard HEAD@{3}` or `git branch rescue <sha>` restores it. It is local only; it is not pushed.\n\n### Bisect\nFinds the first bad commit with binary search. `git bisect start`, `git bisect bad` (current is broken), `git bisect good v1.2.0`. Git checks out the middle commit; test it and mark `good` or `bad`; repeat. 1,000 commits take about 10 steps. Automate with `git bisect run pytest tests/test_checkout.py` (exit code 0 = good, non-zero = bad, 125 = skip). End with `git bisect reset`.\n\n### Other rescue tools\n`git stash` shelves uncommitted work; `git revert <sha>` safely undoes a pushed commit; `git reset --soft/--mixed/--hard` moves the branch (and optionally index/working tree); `git restore` discards file changes; `git blame` shows who last changed each line.",
+  "code_md": "```bash\n# 1) Update a feature branch on top of main, then tidy commits\ngit fetch origin\ngit switch feature/refunds\ngit rebase origin/main                 # replay my commits on the latest main\ngit rebase -i origin/main              # squash 'wip' and 'typo' commits\ngit push --force-with-lease            # safe force push of my own branch\n```\n\n```bash\n# 2) Backport a hotfix and recover from a mistake\ngit switch release/1.4\ngit cherry-pick 3f2a9c1                # copy one commit onto the release branch\n\ngit reset --hard HEAD~3                # oops, threw away work\ngit reflog                             # find the previous state, e.g. HEAD@{1}\ngit reset --hard HEAD@{1}              # restored\n```\n\n```bash\n# 3) Find the commit that broke the tests (automated)\ngit bisect start\ngit bisect bad HEAD\ngit bisect good v1.2.0\ngit bisect run python -m pytest tests/test_checkout.py -q\ngit bisect reset\n```",
+  "use_cases_md": "- Keeping a long-running feature branch up to date with `main` without noisy merge commits.\n- Squashing 12 messy commits into 2 meaningful ones before review.\n- Backporting a security fix to older release branches.\n- Finding which of 300 commits slowed an endpoint, using a benchmark script with `bisect run`.\n- Recovering a branch deleted by accident.",
+  "mistakes_md": "- **Rebasing a shared branch** and force-pushing: teammates get duplicated or lost commits. Only rebase private work.\n- **Plain `git push --force`**: can overwrite others' work; use `--force-with-lease`.\n- **Resolving conflicts by deleting both sides** without understanding intent; run tests after resolving.\n- **`reset --hard` with uncommitted changes**: those are not in the reflog. Commit or stash first.\n- **Cherry-picking big ranges repeatedly**: causes duplicates and later conflicts; merge instead.\n- **Bisecting with a flaky test**: mark results carefully or the answer is wrong.",
+  "best_practices_md": "- Rebase local work onto `main` before opening a PR; merge (or squash-merge) into `main` per team policy.\n- Make commits atomic so cherry-pick, revert and bisect work well.\n- Prefer `--force-with-lease`.\n- Keep a reproducible failing test ready for bisect.\n- Run the test suite after every conflict resolution.\n- Use `git reflog` before panicking.",
+  "my_context_md": "",
+  "revision_notes_md": "- Commits are immutable; rebase creates new commits.\n- `rebase main` = replay my commits on top of main (linear history).\n- Never rebase shared/published history; use `--force-with-lease` for your own branch.\n- `rebase -i`: pick, reword, squash, fixup, drop.\n- `cherry-pick <sha>` copies one commit (new hash).\n- Conflict flow: edit, `add`, `--continue` (or `--abort`).\n- During rebase, 'ours' = upstream, 'theirs' = your commit.\n- `reflog` = local HEAD history; recover with `reset --hard HEAD@{n}`.\n- `bisect start/bad/good/run/reset` = binary search for a regression.",
+  "exercises_md": "1. Create a repo with `main` and a feature branch with 4 commits (two named 'wip'); squash them into 2 using `git rebase -i`.\n2. Make a hotfix commit on `main` and cherry-pick it onto a `release/1.0` branch; compare the two hashes.\n3. Run `git reset --hard HEAD~2` on a throwaway branch, then restore the commits via `git reflog`.\n4. Write a tiny Python script with a function that breaks at commit N out of 15 and find N with `git bisect run`.",
+  "related": [
+    "be-git-basics",
+    "git-workflow",
+    "github-actions-ci"
+  ],
+  "flashcards": [
+    {
+      "front": "What does rebase actually do?",
+      "back": "Replays your commits on a new base, creating new commits with new hashes."
+    },
+    {
+      "front": "When is rebase unsafe?",
+      "back": "When the commits are already pushed and used by others; rewriting shared history."
+    },
+    {
+      "front": "Why --force-with-lease?",
+      "back": "It refuses to overwrite remote commits you have not seen, unlike plain --force."
+    },
+    {
+      "front": "What is git reflog?",
+      "back": "A local log of where HEAD/branches pointed; used to recover lost commits."
+    },
+    {
+      "front": "How many steps does bisect need for 1000 commits?",
+      "back": "About 10 (binary search, log2(1000))."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What does `git rebase main` do on a feature branch?",
+      "options": [
+        "Deletes the branch",
+        "Replays feature commits on top of main",
+        "Merges main with a merge commit",
+        "Pushes to main"
+      ],
+      "answer_index": 1,
+      "explanation": "Rebase replays commits onto a new base."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which command copies a single commit onto the current branch?",
+      "options": [
+        "git revert",
+        "git cherry-pick",
+        "git stash",
+        "git bisect"
+      ],
+      "answer_index": 1,
+      "explanation": "cherry-pick."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You ran `git reset --hard` on committed work by mistake. Best recovery?",
+      "options": [
+        "Reinstall Git",
+        "git reflog then reset to the previous HEAD",
+        "git clone again",
+        "Nothing can be done"
+      ],
+      "answer_index": 1,
+      "explanation": "The reflog still has the old commit."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is safest for force-pushing your own rebased branch?",
+      "options": [
+        "git push --force",
+        "git push --force-with-lease",
+        "git push -f origin main",
+        "git push --delete"
+      ],
+      "answer_index": 1,
+      "explanation": "--force-with-lease checks the remote has not changed."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In `git rebase -i`, which keeps the commit's changes but merges it into the previous commit discarding its message?",
+      "options": [
+        "pick",
+        "reword",
+        "fixup",
+        "drop"
+      ],
+      "answer_index": 2,
+      "explanation": "fixup melds into the previous commit and drops the message."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The command to find the first bad commit by binary search is git ____.",
+      "answers": [
+        "bisect"
+      ],
+      "explanation": "git bisect."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "After resolving rebase conflicts and staging files, run git rebase --____.",
+      "answers": [
+        "continue"
+      ],
+      "explanation": "--continue."
+    },
+    {
+      "type": "debug",
+      "prompt": "A teammate says your rebase 'duplicated all commits' on the shared develop branch. What went wrong?",
+      "code": "git switch develop\ngit rebase main\ngit push --force",
+      "answer": "develop is shared: rebasing rewrote commits others had already pulled, and a plain force push replaced the remote history. Others then merge old and new copies, producing duplicates.\n\nFix: do not rebase shared branches; merge main into develop instead. If you must rewrite your own branch use `--force-with-lease` and coordinate.",
+      "rubric": [
+        "Shared history was rewritten",
+        "Plain --force is dangerous",
+        "Merge instead or use --force-with-lease on private branches"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between merge and rebase and when you pick each.",
+      "answer": "Merge joins two histories with a merge commit and preserves the true timeline; it never rewrites commits so it is safe for shared branches. Rebase replays your commits on top of another branch to get linear history, but creates new commits, so use it only on unpublished work. Many teams rebase feature branches locally and merge/squash into main.",
+      "rubric": [
+        "Merge keeps history, adds merge commit",
+        "Rebase rewrites into linear history",
+        "Safety rule for shared branches"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you find which commit introduced a performance regression among 500 commits?",
+      "answer": "Write a script that exits non-zero when the endpoint is too slow (or a failing test), then `git bisect start`, `git bisect bad HEAD`, `git bisect good <last-known-good>` and `git bisect run ./check.sh`. Binary search needs about 9 steps. Finish with `git bisect reset` and inspect the culprit with `git show`.",
+      "rubric": [
+        "Deterministic check script",
+        "bisect start/bad/good/run",
+        "Binary search count / reset"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between git revert and git reset?",
+      "difficulty": "medium",
+      "answer_md": "`reset` moves the branch pointer (and optionally index and working tree), rewriting history - fine locally, risky if pushed. `revert` creates a new commit that applies the inverse of an old commit, leaving history intact, so it is the right tool for already-pushed commits. Example: a bad deploy on `main` is undone with `git revert <sha>` and a normal push."
+    },
+    {
+      "question": "How does git reflog help and what are its limits?",
+      "difficulty": "medium",
+      "answer_md": "The reflog records each position HEAD and branch tips had locally, so lost commits after reset, bad rebase or deleted branches can be found and restored with `git branch rescue <sha>`. Limits: it is local to your clone, entries expire (default ~90 days reachable, 30 unreachable), and uncommitted changes never appear in it."
+    },
+    {
+      "question": "Describe how you would clean up a feature branch before a PR.",
+      "difficulty": "medium",
+      "answer_md": "Fetch, rebase onto the latest `origin/main` to resolve conflicts once, then `git rebase -i origin/main` to squash fixups and reword messages so each commit is one logical change. Run the tests, then `git push --force-with-lease`. Reviewers get a short, linear, meaningful history."
+    }
+  ]
+}

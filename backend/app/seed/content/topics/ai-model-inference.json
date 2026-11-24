@@ -1,0 +1,150 @@
+{
+  "slug": "ai-model-inference",
+  "title": "Model inference: batching, quantization, local models",
+  "skill": "deep-learning",
+  "extra_skills": [
+    "ai-production"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "inference",
+    "batching",
+    "quantization",
+    "gpu",
+    "latency",
+    "throughput",
+    "ollama",
+    "llama-cpp",
+    "local-models"
+  ],
+  "summary": "Running trained models efficiently: how inference differs from training, batching for throughput, quantization to shrink models, CPU vs GPU trade-offs, measuring latency vs throughput, and running models locally with Ollama, llama.cpp and sentence-transformers — including the privacy benefits of keeping data on your own machines.",
+  "why_md": "- AI engineers mostly run models rather than train them; inference cost and latency decide whether a feature ships.\n- Batching and quantization routinely give 2-10x cost/latency improvements.\n- Local inference keeps sensitive data (financial settlements, customer messages) off third-party APIs.\n- Sizing hardware (\"will a 7B model fit on this GPU?\") is a frequent practical and interview question.",
+  "details_md": "### Inference vs training\nTraining runs forward + backward passes, stores activations for gradients and updates weights — memory-hungry and done rarely. Inference is forward-only with frozen weights: use `model.eval()` and `torch.inference_mode()` (or `no_grad`), no optimiser state, far less memory. It runs constantly, so its cost dominates in production.\n\n### Latency vs throughput\n- **Latency**: time for one request (report p50/p95/p99). For LLMs split into **time to first token (TTFT)** and **tokens per second** during generation.\n- **Throughput**: requests or tokens processed per second across all users.\nThey trade off: bigger batches raise throughput but each request may wait longer.\n\n### Batching\nGPUs (and vectorised CPUs) are far more efficient on many inputs at once. Embedding 10,000 titles in batches of 128 is dramatically faster than 10,000 single calls. LLM servers (vLLM, TGI, llama.cpp server) use **continuous batching**: new requests join the running batch between decoding steps, keeping the GPU busy. For APIs you call, batch at your side (one request with many inputs where supported) and use concurrency.\n\n### Quantization\nStore weights in fewer bits: float32 (4 bytes) → float16/bfloat16 (2) → int8 (1) → 4-bit (~0.5). Memory ≈ parameters × bytes per parameter (+ KV cache and overhead). A 7B model is ~14 GB in fp16 but ~4-5 GB at 4-bit (e.g. GGUF Q4_K_M), so it runs on a laptop. Small quality loss at 8-bit is usually negligible; at 4-bit it's often acceptable — evaluate on your task. Formats: GGUF (llama.cpp/Ollama), GPTQ/AWQ (GPU), bitsandbytes.\n\n### CPU vs GPU\nGPUs win for large models and big batches thanks to massive parallelism and memory bandwidth. LLM decoding speed is mostly limited by memory bandwidth (reading all weights per token). CPUs are fine for small models: sentence-transformers MiniLM, scikit-learn, and quantized 1-8B LLMs via llama.cpp at modest speed. Apple Silicon unified memory is a good local middle ground.\n\n### Running models locally\n- **sentence-transformers**: `SentenceTransformer(\"all-MiniLM-L6-v2\").encode(texts, batch_size=128)` — embeddings on CPU.\n- **Ollama**: `ollama pull llama3.2` / `ollama run …`; exposes an HTTP API on `localhost:11434` (and an OpenAI-compatible endpoint), handles GGUF quantized models.\n- **llama.cpp**: the C/C++ engine underneath many local tools; `llama-server` gives an HTTP server with batching.\n\n### Privacy benefits\nWith local or self-hosted inference, prompts and data never leave your infrastructure — useful for bank statements, settlement records, customer PII and internal SQL. Trade-offs: you own hardware, scaling, updates and quality (local small models are weaker than frontier APIs). A common pattern: local models for embeddings, classification and redaction; frontier APIs for hard reasoning on non-sensitive or redacted data.",
+  "code_md": "```python\n# Batched, CPU-friendly local embeddings + timing latency vs throughput\nimport time\nfrom sentence_transformers import SentenceTransformer\n\nmodel = SentenceTransformer(\"sentence-transformers/all-MiniLM-L6-v2\", device=\"cpu\")\ntitles = [f\"Product title number {i}\" for i in range(5000)]\n\nt0 = time.perf_counter()\nfor t in titles[:200]:\n    model.encode([t])                           # one at a time\nsingle = (time.perf_counter() - t0) / 200\n\nt0 = time.perf_counter()\nemb = model.encode(titles, batch_size=128, normalize_embeddings=True)\nbatched = (time.perf_counter() - t0) / len(titles)\nprint(f\"per-item: single {single*1000:.1f} ms, batched {batched*1000:.2f} ms\")\n```\n\n```python\n# Calling a local LLM via Ollama's HTTP API (data stays on this machine)\nimport httpx\n\nresp = httpx.post(\n    \"http://localhost:11434/api/chat\",\n    json={\n        \"model\": \"llama3.2\",                    # pulled earlier: `ollama pull llama3.2`\n        \"messages\": [\n            {\"role\": \"system\", \"content\": \"Classify the settlement note as FEE, REFUND or OTHER. Reply with one word.\"},\n            {\"role\": \"user\", \"content\": \"Commission reversal for order 402-889 refunded\"},\n        ],\n        \"stream\": False,\n        \"options\": {\"temperature\": 0},\n    },\n    timeout=60,\n)\nprint(resp.json()[\"message\"][\"content\"])\n```",
+  "use_cases_md": "- Nightly batch embedding of all product titles on CPU with sentence-transformers.\n- Local LLM classifying bank-statement narrations so financial data never leaves the VPC.\n- PII redaction locally before sending text to a hosted LLM.\n- Self-hosted model behind an internal API on a GPU instance for predictable cost at high volume.\n- Prototyping offline with Ollama on a laptop before choosing a hosted provider.",
+  "mistakes_md": "- **Running inference without `eval()`/`inference_mode()`** — dropout active, extra memory.\n- **One request per item** for embeddings/classification — 10-50x slower than batching.\n- **Sizing GPU memory by weights only** — forgot KV cache, activations, batch size, context length.\n- **Assuming quantized = same quality** — evaluate on your task, especially at 4-bit.\n- **Measuring only average latency** — users feel p95/p99.\n- **Loading the model per request** in a web handler.\n- **Exposing a local model server (e.g. port 11434) publicly** without auth.",
+  "best_practices_md": "- Load models once at process start; warm up with a dummy request.\n- Batch offline workloads; use continuous-batching servers for online LLM traffic.\n- Start with 8-bit/4-bit quantized models for local LLMs; evaluate quality before and after.\n- Track TTFT, tokens/sec, p95 latency, throughput and cost per 1k requests.\n- Estimate memory: params × bytes/param + KV cache + ~20% overhead.\n- Keep sensitive data on local/self-hosted models; redact before calling external APIs.\n- Bind local inference servers to localhost or a private network.",
+  "my_context_md": "`AmazonVendorBankRecon` and `ECSAmazonBankStatementPostgres` handle bank statements and settlements — exactly the kind of data where local inference (e.g. an Ollama model classifying statement narrations) avoids sending financial records to a third-party API. His `ECSInventoryPriceTracking/app/fetchers/spapi.py` already uses an async httpx client with `asyncio.Lock` pacing; the same pattern applies to calling a local model server with bounded concurrency. Model loading should follow the 'create once, reuse' approach he uses for the `ThreadedConnectionPool` in `AmazonVendorBankRecon/db.py`.",
+  "revision_notes_md": "- Inference = forward only; `eval()` + `inference_mode()`.\n- Latency (p50/p95, TTFT, tokens/s) vs throughput (req/s, tokens/s total).\n- Batching boosts throughput; continuous batching for LLM servers.\n- Memory ≈ params × bytes/param (+ KV cache, overhead).\n- fp32 4B, fp16 2B, int8 1B, 4-bit ~0.5B per param; 7B fp16 ≈ 14 GB, Q4 ≈ 4-5 GB.\n- GPU for big models/batches; CPU fine for small encoders and quantized small LLMs.\n- Local: sentence-transformers, Ollama (localhost:11434), llama.cpp (GGUF).\n- Privacy: data stays in your infra; trade-off is quality and ops burden.",
+  "exercises_md": "1. Benchmark sentence-transformers encoding of 5,000 titles at batch sizes 1, 16, 64, 256 on CPU; plot items/sec.\n2. Install Ollama, pull a small model, and classify 100 settlement descriptions locally; measure latency p50/p95 and accuracy vs labels.\n3. Write a function estimating GPU memory for a model given params, precision, context length and batch size (approximate KV cache) and check it against a real model.\n4. Build an async httpx client that calls the local model with a semaphore limiting concurrency to 4 and measure throughput.",
+  "related": [
+    "ai-neural-networks",
+    "ai-transformers",
+    "ai-embeddings",
+    "ai-serving-fastapi",
+    "ai-latency-cost-optimization"
+  ],
+  "flashcards": [
+    {
+      "front": "Approximate memory for a 7B-parameter model in fp16 vs 4-bit?",
+      "back": "fp16: 7B × 2 bytes ≈ 14 GB. 4-bit: ≈ 3.5 GB of weights (~4-5 GB in practice) — plus KV cache and overhead."
+    },
+    {
+      "front": "Latency vs throughput?",
+      "back": "Latency = time per request (p50/p95, TTFT). Throughput = total work per second. Batching usually raises throughput at some latency cost."
+    },
+    {
+      "front": "What is continuous batching?",
+      "back": "An LLM serving technique where new requests join the running batch between decoding steps, keeping the GPU busy (vLLM, TGI, llama.cpp server)."
+    },
+    {
+      "front": "Main privacy benefit of local inference?",
+      "back": "Prompts and data (e.g. bank statements, PII) never leave your own infrastructure."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You need to embed 2 million product titles overnight. What gives the biggest speed-up?",
+      "options": [
+        "Calling the model once per title with more threads",
+        "Switching from cosine to dot product",
+        "Encoding in batches (e.g. 128-256) with the model loaded once",
+        "Increasing the embedding dimension"
+      ],
+      "answer_index": 2,
+      "explanation": "Batching amortises overhead and uses vectorised hardware efficiently; loading once avoids repeated startup cost."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which statement about quantization is correct?",
+      "options": [
+        "It reduces weight precision (e.g. to int8/4-bit), cutting memory with usually small quality loss",
+        "It increases model accuracy",
+        "It only applies to training",
+        "It removes layers from the model"
+      ],
+      "answer_index": 0,
+      "explanation": "Fewer bits per weight → smaller, often faster models; evaluate the quality impact on your task."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "For LLMs, the delay before the first generated token appears is called time to first ____ (TTFT).",
+      "answers": [
+        "token"
+      ],
+      "explanation": "Dominated by prompt processing (prefill) and queueing."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Ollama serves its local HTTP API by default on localhost port ____.",
+      "answers": [
+        "11434"
+      ],
+      "explanation": "e.g. POST http://localhost:11434/api/chat."
+    },
+    {
+      "type": "output",
+      "prompt": "Model memory estimates by precision. What does this print?",
+      "code": "params = 8_000_000_000\nbytes_per = {\"fp32\": 4, \"fp16\": 2, \"int8\": 1, \"q4\": 0.5}\nfor name, b in bytes_per.items():\n    print(name, round(params * b / 1e9, 1), \"GB\")",
+      "answers": [
+        "fp32 32.0 GB\nfp16 16.0 GB\nint8 8.0 GB\nq4 4.0 GB"
+      ],
+      "explanation": "Weights only: params × bytes per parameter. KV cache and runtime overhead come on top."
+    },
+    {
+      "type": "output",
+      "prompt": "Latency percentiles and throughput from request timings. What does this print?",
+      "code": "import statistics\nlatencies_ms = [120, 95, 130, 110, 900, 105, 115, 98, 125, 102]\nq = statistics.quantiles(latencies_ms, n=20, method=\"inclusive\")\np50 = statistics.median(latencies_ms)\np95 = q[18]\nwall_seconds = 2.0\nprint(p50, round(p95, 1), statistics.mean(latencies_ms), len(latencies_ms) / wall_seconds)",
+      "answers": [
+        "112.5 553.5 190 5.0"
+      ],
+      "explanation": "The median is 112.5 ms, but one 900 ms outlier pushes p95 to ~553 ms and the mean to 190 ms — why we report percentiles. Throughput is 10 requests / 2 s = 5 req/s."
+    },
+    {
+      "type": "debug",
+      "prompt": "This local classification service is slow and its memory keeps growing. Fix it.",
+      "code": "from fastapi import FastAPI\nimport torch\nfrom transformers import AutoTokenizer, AutoModelForSequenceClassification\napp = FastAPI()\n\n@app.post(\"/classify\")\ndef classify(texts: list[str]):\n    tok = AutoTokenizer.from_pretrained(\"my-org/settlement-classifier\")\n    model = AutoModelForSequenceClassification.from_pretrained(\"my-org/settlement-classifier\")\n    out = []\n    for t in texts:\n        logits = model(**tok(t, return_tensors=\"pt\")).logits\n        out.append(int(logits.argmax()))\n    return out",
+      "answer": "1. Tokenizer and model are **loaded on every request** — load once at startup.\n2. No `model.eval()` and no `torch.inference_mode()`/`no_grad()` — autograd graphs are built (memory) and dropout may be active.\n3. Texts are processed **one at a time** — batch them with padding/truncation.\n\n```python\ntok = AutoTokenizer.from_pretrained(\"my-org/settlement-classifier\")\nmodel = AutoModelForSequenceClassification.from_pretrained(\"my-org/settlement-classifier\").eval()\n\n@app.post(\"/classify\")\ndef classify(texts: list[str]):\n    with torch.inference_mode():\n        batch = tok(texts, padding=True, truncation=True, max_length=128, return_tensors=\"pt\")\n        return model(**batch).logits.argmax(dim=-1).tolist()\n```",
+      "rubric": [
+        "Load model/tokenizer once at startup",
+        "Use eval() and inference_mode()/no_grad()",
+        "Batch inputs with padding/truncation instead of a per-item loop"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to your manager when you'd run a model locally/self-hosted versus calling a hosted LLM API.",
+      "answer": "**Local/self-hosted** makes sense when (1) data is sensitive — bank statements, settlement records, customer PII — and must not leave our infrastructure; (2) the task is narrow and a small model is good enough (embeddings, classification, extraction, redaction); (3) volume is high and steady so fixed hardware is cheaper than per-token pricing; or (4) we need offline/predictable latency. Costs: we own GPUs/CPUs, scaling, updates and monitoring, and small local models are weaker at complex reasoning. **Hosted APIs** win for hard reasoning and generation quality, spiky or low volume, and fast iteration. A practical hybrid: local models for embeddings, classification and PII redaction; send only redacted or non-sensitive data to a frontier API for the hard parts. Decide with a small benchmark: quality on our labelled examples, p95 latency and cost per 1,000 requests.",
+      "rubric": [
+        "Privacy/data residency as a key driver for local",
+        "Task difficulty vs model quality trade-off",
+        "Cost/volume and operational burden",
+        "Hybrid pattern and benchmarking to decide"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do batching and quantization improve inference, and what do they cost you?",
+      "difficulty": "medium",
+      "answer_md": "**Batching** processes many inputs in one forward pass. Hardware (GPU, SIMD CPU) is underused by a single small input, so batching raises throughput dramatically — often 10x+ for embeddings. Cost: individual requests may wait to fill a batch (higher latency), and padding wastes compute on uneven lengths (sort by length or use dynamic batching). LLM servers use **continuous batching** to add/remove sequences between decode steps.\n\n**Quantization** stores weights in fewer bits (fp16 → int8 → 4-bit). Memory drops 2-8x, letting bigger models fit on smaller GPUs or laptops, and decoding is often faster because it's memory-bandwidth bound. Cost: some quality loss (usually negligible at 8-bit, task-dependent at 4-bit), and some kernels/hardware support only certain formats.\n\nAlways measure: quality on your eval set, p95 latency, throughput and cost per request before and after."
+    },
+    {
+      "question": "Will a 13B-parameter LLM fit on a 24 GB GPU? How do you reason about it?",
+      "difficulty": "hard",
+      "answer_md": "Estimate memory = weights + KV cache + overhead.\n\n- **Weights**: 13B × 2 bytes (fp16) = 26 GB → does **not** fit. At 8-bit ≈ 13 GB; at 4-bit ≈ 6.5-8 GB → fits.\n- **KV cache** grows with context length × batch size × layers × hidden size × 2 (K and V) × bytes. For a 13B-class model it's very roughly ~0.5-1 MB per token in fp16 (less with grouped-query attention), so 8 concurrent 4k-token sequences can add several GB to tens of GB.\n- **Overhead**: CUDA context, activations, fragmentation — budget ~10-20%.\n\nSo: 4-bit or 8-bit weights fit, with the remaining memory determining how many concurrent long-context requests you can serve. Options if it's tight: lower precision, shorter max context, smaller batch, KV-cache quantization, or a smaller model. Then validate empirically with the serving engine (vLLM/llama.cpp) and measure quality at the chosen precision."
+    }
+  ]
+}

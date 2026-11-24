@@ -1,0 +1,73 @@
+{
+  "slug": "rest-api-design",
+  "why_md": "Every backend you build or integrate with (SP-API, internal services, an LLM serving endpoint) is judged by its API: predictable resources, correct status codes, safe retries, pagination that scales. API design questions - 'design the endpoints for X' - are a staple of backend system-design interviews.",
+  "revision_notes_md": "- Resources are nouns (`/uploads/{id}`), HTTP methods are verbs.\n- GET safe; GET/PUT/DELETE idempotent; POST not (use Idempotency-Key).\n- 200 OK, 201 Created (+Location), 202 Accepted for async jobs, 204 No Content.\n- 400 malformed, 401 unauthenticated, 403 forbidden, 404, 409 conflict, 422 validation, 429 rate limited.\n- Long jobs: `POST /uploads` -> 202 + status resource `GET /uploads/{id}`.\n- Cursor (keyset) pagination over large tables; OFFSET degrades with depth.\n- Consistent error body (`{\"error\": {\"code\", \"message\", \"details\"}}` or RFC 9457 problem+json).\n- Version breaking changes; adding optional fields is non-breaking.",
+  "exercises_md": "1. Design the endpoints (paths, methods, status codes, request/response JSON) for a 'marketplace report upload' API: create upload, poll status, list uploads per org with cursor pagination, retry a failed upload.\n2. Write the consistent error schema for that API and list which status code each of 6 failure scenarios returns.",
+  "my_context_md": "ECSMarketplaceDataUpload already tracks upload status - exposing that as `POST /uploads` -> 202 plus `GET /uploads/{id}` is the classic async-job API shape. On the consumer side, the async SP-API client in `ECSInventoryPriceTracking/app/fetchers/spapi.py` reads rate-limit headers, which is the client half of 429 handling.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "The status code for 'request accepted, processing will happen asynchronously' is ____.",
+      "answers": [
+        "202",
+        "202 accepted"
+      ],
+      "explanation": "Return 202 plus a link to a status resource."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A request with valid JSON but a negative quantity should typically return HTTP ____.",
+      "answers": [
+        "422",
+        "400",
+        "422 unprocessable entity",
+        "422 unprocessable content"
+      ],
+      "explanation": "422 (FastAPI default) or 400 are both common; 422 signals semantic validation failure."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Pagination that uses `WHERE id > :last_id ORDER BY id LIMIT 50` instead of OFFSET is called ____ pagination.",
+      "answers": [
+        "keyset",
+        "cursor",
+        "seek",
+        "keyset/cursor"
+      ],
+      "explanation": "It stays fast at any depth using an index."
+    },
+    {
+      "type": "debug",
+      "prompt": "Review this API design and fix the problems.",
+      "code": "POST /getUploadStatus        body: {\"upload_id\": 42}  -> 200 {\"status\": \"error\", \"msg\": \"not found\"}\nPOST /createUpload            -> 200 {\"id\": 43}\nGET  /deleteUpload?id=43      -> 200",
+      "answer": "- Verbs in paths and everything via POST/GET regardless of semantics.\n- Errors returned with 200 - clients and monitoring can't detect failures.\n- A GET that deletes is unsafe (crawlers, prefetch, retries).\n\n```\nGET    /uploads/42   -> 200 {...} | 404 {\"error\": {\"code\": \"not_found\", ...}}\nPOST   /uploads      -> 201 Created, Location: /uploads/43  (or 202 if processed async)\nDELETE /uploads/43   -> 204 No Content\n```",
+      "rubric": [
+        "Use nouns + HTTP methods instead of verbs in paths",
+        "Use real status codes, not 200 with an error body",
+        "GET must be safe - never delete via GET"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain idempotency in REST and how you make a POST that creates a payment-like record safe to retry.",
+      "answer": "An operation is idempotent if repeating it has the same effect as doing it once. GET, PUT and DELETE are defined idempotent; POST is not, so a client retrying after a timeout can create duplicates. Fix: the client sends an `Idempotency-Key` header; the server stores key -> result (with a unique constraint) and on a repeat returns the stored response instead of creating again. Alternatively use natural keys with `INSERT ... ON CONFLICT DO NOTHING`.",
+      "rubric": [
+        "Definition: same effect when repeated",
+        "POST isn't idempotent; retries can duplicate",
+        "Idempotency-Key stored with unique constraint / ON CONFLICT"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which change is backward compatible for existing clients?",
+      "options": [
+        "Renaming a response field",
+        "Adding a new optional response field",
+        "Making an optional request field required",
+        "Changing a field from string to int"
+      ],
+      "answer_index": 1,
+      "explanation": "Adding optional fields doesn't break tolerant clients."
+    }
+  ]
+}

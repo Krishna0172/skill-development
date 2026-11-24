@@ -1,0 +1,66 @@
+{
+  "slug": "git-workflow",
+  "why_md": "Git fluency is assumed for any backend role: small focused commits, clean PRs, safe rebases and the ability to recover from mistakes without destroying teammates' work. It's also the foundation of CI/CD - every pipeline triggers on branches, PRs and tags - and interviewers ask how you'd revert a bad deploy or resolve conflicts.",
+  "revision_notes_md": "- Feature branch per change -> PR -> review + CI -> merge to protected `main`.\n- `git switch -c feat/x`; `git add -p` to stage hunks; small, focused commits.\n- `git pull --rebase` / `git rebase origin/main` to update a branch; never rebase shared history.\n- After rebasing a pushed branch: `git push --force-with-lease`, not `--force`.\n- Undo published commits with `git revert <sha>`; `reset` only for local history.\n- `git reset --soft HEAD~1` undoes the commit keeping changes staged.\n- `git reflog` recovers 'lost' commits; `git stash` parks work in progress.\n- `git log -S \"text\"` finds when a string changed; `git bisect` finds the breaking commit.",
+  "exercises_md": "1. In a scratch repo, create a feature branch with 4 messy commits, then use interactive-free tools (`git reset --soft` + recommit, or `git commit --fixup` + `git rebase --autosquash` in your own terminal) to turn them into 2 clean commits.\n2. Simulate a bad commit on main, revert it with `git revert`, then use `git bisect run` with a tiny test script to locate a deliberately introduced bug among 10 commits.",
+  "my_context_md": "With 179 services in one repo (`python-postgres`), `git log -S` and `git bisect` are practical for finding when a processor's behaviour changed, and small PRs per service keep reviews manageable. The existing tests in `ForcesightJobSchedulerAndRunner` and `ECSInventoryPriceTracking` are what a CI check on PRs would run first.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To undo a commit that's already on a shared branch by creating an inverse commit, use git ____ <sha>.",
+      "answers": [
+        "revert"
+      ],
+      "explanation": "History stays intact for teammates."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "After rebasing a branch you already pushed, the safe way to update the remote is git push --force-with-____.",
+      "answers": [
+        "lease"
+      ],
+      "explanation": "It refuses if someone else pushed in the meantime."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To find the commit that introduced a bug by binary search over history, use git ____.",
+      "answers": [
+        "bisect"
+      ],
+      "explanation": "git bisect start/good/bad or git bisect run <script>."
+    },
+    {
+      "type": "debug",
+      "prompt": "A teammate's commits vanished from main after this. What went wrong and how do you recover?",
+      "code": "git checkout main\ngit rebase -i HEAD~5      # squashed some commits\ngit push --force",
+      "answer": "Rewriting history on shared `main` and force-pushing overwrote the remote, discarding commits teammates had pushed since your last fetch.\n\nRecovery: the lost commits still exist in the teammate's local clone or in reflogs - find the previous tip (`git reflog` on a machine that had it, or the server's push log), then restore it: `git push --force-with-lease origin <old-sha>:main`, and re-apply your intended change as normal commits.\n\nPrevention: never rewrite shared branches; protect `main`; use `--force-with-lease` only on your own feature branches.",
+      "rubric": [
+        "Rebasing/force-pushing shared main rewrites others' history",
+        "Recover via reflog / teammate clone and push old tip back",
+        "Protect main; use force-with-lease only on own branches"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain merge vs rebase and when you'd use each.",
+      "answer": "Merge combines branches with a merge commit, preserving the true history - safe for shared branches. Rebase replays your commits on top of the new base, producing linear history but rewriting commit SHAs - fine on your own unpublished (or solely-owned) feature branch to update it with main, dangerous on shared branches. Common team flow: rebase your feature branch onto `main` locally, then merge (or squash-merge) the PR into `main`.",
+      "rubric": [
+        "Merge preserves history with a merge commit",
+        "Rebase rewrites commits for linear history",
+        "Rebase only private branches; merge/squash into shared main"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "You ran `git reset --hard HEAD~2` on your local branch and lost two commits you needed. What recovers them?",
+      "options": [
+        "git revert HEAD~2",
+        "git stash pop",
+        "git reflog, then git reset --hard <sha-before-reset>",
+        "Nothing - they are deleted"
+      ],
+      "answer_index": 2,
+      "explanation": "reflog records where HEAD pointed; unreachable commits survive until garbage collection."
+    }
+  ]
+}

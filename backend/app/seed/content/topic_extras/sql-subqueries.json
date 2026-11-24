@@ -1,0 +1,65 @@
+{
+  "slug": "sql-subqueries",
+  "why_md": "- Subqueries (scalar, IN, EXISTS, correlated) appear in almost every non-trivial report and data-cleanup query.\n- Choosing EXISTS vs IN vs JOIN affects both correctness (NULLs, duplicates) and performance (SubPlan loops).\n- Reviewing LLM-generated SQL often means spotting correlated subqueries that run once per row.\n- Interviewers ask about NOT IN with NULLs and rewriting correlated subqueries as joins.",
+  "revision_notes_md": "- Scalar subquery must return at most one row, else 'more than one row returned' error; zero rows → NULL.\n- `IN (subquery)` = semi-join; duplicates in the subquery don't duplicate outer rows (unlike a JOIN).\n- `EXISTS` stops at the first match; SELECT list inside it is irrelevant (`SELECT 1`).\n- `NOT IN` returns nothing if the subquery yields any NULL; prefer `NOT EXISTS`.\n- Correlated subquery references the outer row; the planner may run it per row (SubPlan) unless it can decorrelate.\n- Derived tables (subquery in FROM) need an alias in PostgreSQL < 16 (optional from 16).\n- Rewrite repeated correlated scalar subqueries as one LEFT JOIN to a pre-aggregated subquery / LATERAL.",
+  "exercises_md": "1. Find a query with two or more correlated scalar subqueries in the SELECT list (or write one: last order date and order count per customer). Rewrite it with a single pre-aggregated join and compare EXPLAIN ANALYZE.\n2. Write three versions of 'SKUs in the catalog that never sold' (NOT IN, NOT EXISTS, LEFT JOIN/IS NULL), add a NULL sku to sales, and observe which ones break.",
+  "my_context_md": "",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "`WHERE ____ (SELECT 1 FROM orders o WHERE o.customer_id = c.id)` keeps customers with at least one order and stops scanning at the first match.",
+      "answers": [
+        "exists"
+      ],
+      "explanation": "EXISTS is a semi-join that is true as soon as one row matches."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A subquery that references a column of the outer query is called a ____ subquery.",
+      "answers": [
+        "correlated"
+      ],
+      "explanation": "Correlated subqueries depend on the outer row and can be evaluated once per outer row."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE p(sku TEXT);\nCREATE TABLE s(sku TEXT);\nINSERT INTO p VALUES ('A'),('B'),('C');\nINSERT INTO s VALUES ('A'),(NULL);\n''')\na = db.execute(\"SELECT COUNT(*) FROM p WHERE sku NOT IN (SELECT sku FROM s)\").fetchone()[0]\nb = db.execute('''SELECT COUNT(*) FROM p WHERE NOT EXISTS\n  (SELECT 1 FROM s WHERE s.sku = p.sku)''').fetchone()[0]\nprint(a, b)",
+      "answers": [
+        "0 2"
+      ],
+      "explanation": "NOT IN against a set containing NULL is never true, so 0 rows. NOT EXISTS correctly finds B and C."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE c(id INT);\nCREATE TABLE o(cid INT);\nINSERT INTO c VALUES (1),(2);\nINSERT INTO o VALUES (1),(1),(1);\n''')\nj = db.execute(\"SELECT COUNT(*) FROM c JOIN o ON o.cid = c.id\").fetchone()[0]\ni = db.execute(\"SELECT COUNT(*) FROM c WHERE id IN (SELECT cid FROM o)\").fetchone()[0]\nprint(j, i)",
+      "answers": [
+        "3 1"
+      ],
+      "explanation": "The JOIN repeats customer 1 once per order (3 rows). IN is a semi-join: customer 1 appears once."
+    },
+    {
+      "type": "debug",
+      "prompt": "This UPDATE fails at runtime with 'more than one row returned by a subquery used as an expression'. Fix it.",
+      "code": "UPDATE orders o\nSET warehouse_id = (SELECT w.id FROM warehouses w WHERE w.orgid = o.orgid)\nWHERE o.warehouse_id IS NULL;",
+      "answer": "A scalar subquery must return at most one row, but an org has several warehouses.\n\nDecide which one you want and make the subquery deterministic, or use `UPDATE ... FROM`:\n```sql\nUPDATE orders o\nSET warehouse_id = w.id\nFROM (SELECT DISTINCT ON (orgid) orgid, id\n      FROM warehouses ORDER BY orgid, is_default DESC, id) w\nWHERE w.orgid = o.orgid AND o.warehouse_id IS NULL;\n```\n(Or add `ORDER BY ... LIMIT 1` inside the scalar subquery.)",
+      "rubric": [
+        "Scalar subquery returned multiple rows",
+        "Pick one row deterministically (ORDER BY + LIMIT 1 / DISTINCT ON)",
+        "UPDATE ... FROM as an alternative"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Compare IN, EXISTS and JOIN for 'orders that have at least one shipment'. Which do you choose and why?",
+      "answer": "- **JOIN** returns one row per (order, shipment) pair, so orders with 3 shipments appear 3 times — you'd need DISTINCT, which is extra work and hides intent.\n- **IN (SELECT order_id FROM shipments)** is a semi-join: each order appears once. Fine for positive filters; dangerous as `NOT IN` if the column can be NULL.\n- **EXISTS (SELECT 1 FROM shipments s WHERE s.order_id = o.id)** is also a semi-join, stops at the first match, and `NOT EXISTS` is NULL-safe.\n\nPostgreSQL usually plans IN and EXISTS the same way (hash/nested-loop semi-join), so I default to EXISTS/NOT EXISTS for clarity and NULL safety, and use JOIN only when I need columns from the other table.",
+      "rubric": [
+        "JOIN duplicates rows for one-to-many",
+        "IN/EXISTS are semi-joins (no duplicates)",
+        "NOT IN is unsafe with NULLs; NOT EXISTS is safe",
+        "Use JOIN only when you need columns from the other table"
+      ]
+    }
+  ]
+}

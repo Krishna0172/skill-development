@@ -1,0 +1,185 @@
+{
+  "slug": "sql-case-set-operations",
+  "title": "CASE expressions and set operations (UNION, INTERSECT, EXCEPT)",
+  "skill": "postgresql",
+  "extra_skills": [
+    "query-optimization"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "case",
+    "union",
+    "intersect",
+    "except",
+    "coalesce",
+    "nullif"
+  ],
+  "summary": "CASE is SQL's if/else inside a query, used to label, bucket and pivot data. Set operations stack the results of two queries on top of each other (UNION), keep what both share (INTERSECT) or subtract one from the other (EXCEPT). Together they cover most reshaping tasks that do not need joins.",
+  "why_md": "- CASE appears in nearly every analytical or reporting query (status labels, buckets, conditional sums).\n- `UNION ALL` vs `UNION` is a classic performance and correctness question.\n- EXCEPT/INTERSECT give concise answers to 'in A but not in B' problems and reconciliation tasks.\n- Knowing COALESCE and NULLIF avoids NULL bugs and divide-by-zero errors.",
+  "details_md": "### CASE\nTwo forms:\n```\nCASE WHEN total >= 1000 THEN 'large' WHEN total >= 100 THEN 'medium' ELSE 'small' END\nCASE status WHEN 'P' THEN 'paid' WHEN 'S' THEN 'shipped' END   -- simple form: equality only\n```\nConditions are checked top to bottom and the first match wins; with no match and no ELSE the result is NULL. All branches must return compatible types. CASE works anywhere an expression is allowed: SELECT, WHERE, ORDER BY, and inside aggregates (`SUM(CASE WHEN ... THEN total END)`), which is how you pivot rows into columns.\n\n### COALESCE and NULLIF\n`COALESCE(a, b, c)` returns the first non-NULL argument; `NULLIF(a, b)` returns NULL when a = b, else a. The famous use: `total / NULLIF(count, 0)` avoids division by zero.\n\n### Set operations\nBoth queries must return the same number of columns with compatible types; column names come from the first query.\n- `UNION ALL`: concatenates all rows, no work beyond reading them.\n- `UNION`: concatenates and removes duplicates (needs a sort or hash step, so slower). Use it only when you actually need deduplication.\n- `INTERSECT`: rows present in both results (distinct).\n- `EXCEPT`: rows in the first but not the second (distinct). Order matters.\n`INTERSECT ALL` and `EXCEPT ALL` keep duplicates counted by multiplicity. These operators treat NULLs as equal for the purpose of comparing rows, unlike `=`.\n\n### Precedence and ordering\n`INTERSECT` binds tighter than `UNION`/`EXCEPT`; use parentheses. `ORDER BY` and `LIMIT` placed at the end apply to the final combined result; to sort a part, wrap it in parentheses or a subquery.\n\n### When to use what\n'Rows in A not in B': `EXCEPT` (simple) or `NOT EXISTS` (more flexible, can compare on a key rather than whole rows). 'Combine data from monthly tables': `UNION ALL`. 'Rows matching both conditions on different sources': `INTERSECT`.",
+  "code_md": "```sql\n-- CASE: bucket + label\nSELECT id,\n       total,\n       CASE WHEN total >= 1000 THEN 'large'\n            WHEN total >= 100  THEN 'medium'\n            ELSE 'small' END AS size_band\nFROM orders;\n```\n```sql\n-- CASE inside aggregates = pivot rows to columns\nSELECT date_trunc('month', created_at) AS month,\n       SUM(total) FILTER (WHERE status = 'paid')                  AS paid,\n       SUM(CASE WHEN status = 'cancelled' THEN total ELSE 0 END)  AS cancelled\nFROM orders\nGROUP BY 1 ORDER BY 1;\n\n-- Safe division\nSELECT SUM(total) / NULLIF(COUNT(*), 0) AS avg_total FROM orders;\n```\n```sql\n-- Set operations\nSELECT email FROM newsletter_subscribers\nUNION ALL                       -- keep duplicates, cheapest\nSELECT email FROM customers;\n\nSELECT sku FROM warehouse_a\nINTERSECT SELECT sku FROM warehouse_b;     -- stocked in both\n\nSELECT sku FROM catalog\nEXCEPT SELECT sku FROM listings;           -- catalog items with no listing\n```",
+  "use_cases_md": "- Mapping codes from marketplace reports to readable statuses with CASE.\n- Revenue by month with paid/cancelled columns (conditional aggregation).\n- Reconciliation: `EXCEPT` between 'orders in our DB' and 'orders in the marketplace report'.\n- `UNION ALL` of current and archived partitions/tables.\n- `COALESCE(preferred_name, name)` for display values.",
+  "mistakes_md": "- **`UNION` where `UNION ALL` is enough**: needless deduplication cost, and it can hide legitimate duplicates.\n- **CASE branches with mismatched types** (`THEN 1 ... ELSE 'n/a'`): error. Cast so all branches agree.\n- **Overlapping WHEN ranges in the wrong order**: first match wins, so order from most specific to least.\n- **Forgetting ELSE**: unmatched rows become NULL.\n- **Different column counts or order in UNION**: positions matter, not names.\n- **Expecting EXCEPT to be symmetric**: A EXCEPT B differs from B EXCEPT A.",
+  "best_practices_md": "- Prefer `UNION ALL` unless you need distinct rows.\n- Always provide an ELSE in CASE, or consciously accept NULL.\n- Use `NULLIF` to prevent divide-by-zero.\n- Use explicit column lists in set operations, in the same order.\n- Use parentheses with mixed set operators.\n- For key-based 'missing' checks prefer `NOT EXISTS` over `NOT IN` (NULL-safe).",
+  "my_context_md": "",
+  "revision_notes_md": "- CASE: first matching WHEN wins; no ELSE gives NULL; branches same type.\n- `COALESCE` = first non-null; `NULLIF(a,b)` = NULL if equal.\n- `x / NULLIF(y, 0)` avoids divide by zero.\n- UNION ALL = append; UNION = append + distinct (slower).\n- INTERSECT = in both; EXCEPT = in first only (order matters).\n- Same column count and compatible types; names from first query.\n- INTERSECT binds tighter than UNION/EXCEPT.\n- Set operators treat NULL = NULL as duplicates.",
+  "exercises_md": "1. Add a `size_band` column to a query over orders with three CASE branches, then count orders per band.\n2. Write a monthly report with paid, cancelled and refunded totals as separate columns.\n3. Create two tables of SKUs and write UNION, UNION ALL, INTERSECT and EXCEPT between them; explain each row count.\n4. Rewrite an `EXCEPT` query as `NOT EXISTS` and decide when each is better.",
+  "related": [
+    "sql-aggregates-having-basics",
+    "sql-null-handling",
+    "sql-subqueries",
+    "sql-joins"
+  ],
+  "flashcards": [
+    {
+      "front": "UNION vs UNION ALL?",
+      "back": "UNION removes duplicates (extra sort/hash); UNION ALL keeps everything and is cheaper."
+    },
+    {
+      "front": "What does CASE return if nothing matches and no ELSE?",
+      "back": "NULL."
+    },
+    {
+      "front": "What does NULLIF(a, b) do?",
+      "back": "Returns NULL if a = b, otherwise a. Used as `x / NULLIF(y, 0)`."
+    },
+    {
+      "front": "INTERSECT vs EXCEPT?",
+      "back": "INTERSECT: rows in both queries. EXCEPT: rows in the first and not in the second."
+    },
+    {
+      "front": "What must match across a UNION?",
+      "back": "Number of columns and compatible types, by position."
+    },
+    {
+      "front": "COALESCE?",
+      "back": "Returns the first non-NULL argument."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which is cheapest when you just want to append two result sets?",
+      "options": [
+        "UNION ALL",
+        "INTERSECT",
+        "EXCEPT",
+        "UNION"
+      ],
+      "answer_index": 0,
+      "explanation": "UNION ALL does no deduplication."
+    },
+    {
+      "type": "mcq",
+      "prompt": "CASE WHEN x > 10 THEN 'a' WHEN x > 5 THEN 'b' END returns what for x = 1?",
+      "options": [
+        "An error",
+        "'b'",
+        "'a'",
+        "NULL"
+      ],
+      "answer_index": 3,
+      "explanation": "No branch matches and there is no ELSE."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which expression avoids division by zero?",
+      "options": [
+        "a / COALESCE(b, 0)",
+        "a / NULLIF(b, 0)",
+        "a / ISNULL(b)",
+        "a / (b OR 1)"
+      ],
+      "answer_index": 1,
+      "explanation": "NULLIF turns 0 into NULL so the division yields NULL."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Return rows from A that are not in B: SELECT id FROM a ____ SELECT id FROM b;",
+      "answers": [
+        "except"
+      ],
+      "explanation": "EXCEPT subtracts the second result."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Return the first non-null of two columns: ____(nickname, name).",
+      "answers": [
+        "coalesce"
+      ],
+      "explanation": "COALESCE."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table a(x integer); create table b(x integer);\"\n                \"insert into a values (1),(2),(2),(3); insert into b values (2),(3),(3),(4);\")\nfor q in (\"select x from a union select x from b order by 1\",\n          \"select x from a union all select x from b order by 1\",\n          \"select x from a intersect select x from b order by 1\",\n          \"select x from a except select x from b order by 1\"):\n    print([r[0] for r in c.execute(q)])",
+      "answers": [
+        "[1, 2, 3, 4]\n[1, 2, 2, 2, 3, 3, 3, 4]\n[2, 3]\n[1]"
+      ],
+      "explanation": "UNION dedups; UNION ALL keeps 8 rows; INTERSECT gives 2,3; EXCEPT gives 1."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table o(id integer, total integer, items integer);\"\n                \"insert into o values (1,5,0),(2,150,3),(3,2000,4),(4,NULL,1);\")\nq = (\"select id, case when total >= 1000 then 'large' when total >= 100 then 'medium' \"\n     \"when total is not null then 'small' end, total / nullif(items, 0) from o order by id\")\nfor r in c.execute(q):\n    print(r)",
+      "answers": [
+        "(1, 'small', None)\n(2, 'medium', 50)\n(3, 'large', 500)\n(4, None, None)"
+      ],
+      "explanation": "Row 1: items 0 -> NULLIF gives NULL -> None; row 4: no matching branch -> None; integer division 150/3=50, 2000/4=500."
+    },
+    {
+      "type": "debug",
+      "prompt": "Revenue-by-status report shows 'cancelled' orders counted as 'paid'. What's wrong?",
+      "code": "SELECT SUM(CASE WHEN status LIKE '%paid%' THEN total END) AS paid\nFROM orders;\n-- statuses: 'paid', 'unpaid', 'partially_paid'",
+      "answer": "`LIKE '%paid%'` also matches 'unpaid' and 'partially_paid'. Use an exact comparison (or IN list).\n```sql\nSELECT SUM(total) FILTER (WHERE status = 'paid') AS paid FROM orders;\n```",
+      "rubric": [
+        "LIKE pattern too broad",
+        "Use equality or IN",
+        "FILTER or exact CASE condition"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between UNION and UNION ALL and when each is appropriate.",
+      "answer": "UNION ALL simply appends the rows of both queries. UNION also removes duplicate rows, which requires sorting or hashing the whole combined result. Use UNION ALL when the sources cannot overlap or duplicates are fine (most of the time) and UNION only when you need distinct rows.",
+      "rubric": [
+        "UNION ALL keeps duplicates",
+        "UNION dedups at a cost",
+        "Default to UNION ALL"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you find orders in your database that are missing from a marketplace report table?",
+      "answer": "`SELECT order_id FROM orders EXCEPT SELECT order_id FROM report_orders;` returns ids only in orders. If you need other columns, use `SELECT o.* FROM orders o WHERE NOT EXISTS (SELECT 1 FROM report_orders r WHERE r.order_id = o.order_id)`, which is NULL-safe and index-friendly.",
+      "rubric": [
+        "EXCEPT for key sets",
+        "NOT EXISTS when other columns needed",
+        "Avoid NOT IN with NULLs"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you pivot rows to columns in plain SQL?",
+      "difficulty": "medium",
+      "answer_md": "Group by the row key and use conditional aggregation: `SUM(amount) FILTER (WHERE kind = 'paid') AS paid, SUM(amount) FILTER (WHERE kind = 'refund') AS refund`. Equivalent: `SUM(CASE WHEN ... THEN amount END)`. The column list must be known in advance; for dynamic pivots use crosstab (tablefunc) or build SQL in code."
+    },
+    {
+      "question": "UNION vs UNION ALL performance?",
+      "difficulty": "easy",
+      "answer_md": "UNION ALL streams rows. UNION adds a HashAggregate or Sort+Unique node over the combined rows to remove duplicates, costing time and memory. Use UNION ALL by default."
+    },
+    {
+      "question": "What is the NOT IN NULL trap and how do EXCEPT/NOT EXISTS avoid it?",
+      "difficulty": "medium",
+      "answer_md": "If the subquery of `x NOT IN (subquery)` returns even one NULL, the result is never true so you get no rows. NOT EXISTS compares with explicit correlation and ignores NULL ambiguity; EXCEPT treats NULLs as equal for row comparison."
+    },
+    {
+      "question": "Which precedence rules apply to set operators?",
+      "difficulty": "hard",
+      "answer_md": "INTERSECT binds tighter than UNION and EXCEPT, which are evaluated left to right. `A UNION B INTERSECT C` means `A UNION (B INTERSECT C)`. Use parentheses to be explicit; an ORDER BY at the end applies to the full combined result."
+    }
+  ]
+}

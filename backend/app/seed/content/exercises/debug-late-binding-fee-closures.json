@@ -1,0 +1,102 @@
+{
+  "slug": "debug-late-binding-fee-closures",
+  "title": "Debug: every fee uses the last rate",
+  "category": "debugging",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "python",
+  "concepts": [
+    "closures",
+    "late binding",
+    "default-argument capture",
+    "lambda"
+  ],
+  "related_topics": [
+    "python-functions-args",
+    "python-decorators"
+  ],
+  "problem_md": "To compute marketplace fees on an order amount, the code builds one small calculator function per fee type, then applies them all:\n\n```python\ndef build_fee_calculators(fee_rates: dict) -> dict:   # name -> function(amount)\ndef compute_fees(fee_rates: dict, amount: float) -> dict:  # name -> fee\n```\n\nEach fee should be `round(amount * rate, 2)` using **that fee's own rate**.\n\n**Observed bug:** with a single fee type everything looks right, but with several, every fee comes out identical:\n\n```python\n>>> compute_fees({\"commission\": 0.1, \"shipping\": 0.05, \"tax\": 0.18}, 1000)\n{'commission': 180.0, 'shipping': 180.0, 'tax': 180.0}\n# expected {'commission': 100.0, 'shipping': 50.0, 'tax': 180.0}\n```\n\nFix the code. The tests call `compute_fees`.",
+  "examples": [
+    {
+      "input": "compute_fees({'commission': 0.1, 'shipping': 0.05, 'tax': 0.18}, 1000)",
+      "output": "{'commission': 100.0, 'shipping': 50.0, 'tax': 180.0}"
+    }
+  ],
+  "hints": [
+    "All three results equal the *last* rate. When does the lambda actually read `rate` — when it's created, or when it's called?",
+    "Closures capture *variables*, not values. By the time the calculators run, the loop has finished and `rate` holds its final value.",
+    "Bind the current value at creation time: `lambda amount, rate=rate: ...`, or create each function inside a helper `make_calc(rate)` so each gets its own scope."
+  ],
+  "starter_code": "def build_fee_calculators(fee_rates: dict) -> dict:\n    calculators = {}\n    for name, rate in fee_rates.items():\n        calculators[name] = lambda amount: round(amount * rate, 2)\n    return calculators\n\n\ndef compute_fees(fee_rates: dict, amount: float) -> dict:\n    calculators = build_fee_calculators(fee_rates)\n    return {name: calc(amount) for name, calc in calculators.items()}\n",
+  "solution_code": "def _make_calculator(rate: float):\n    def calc(amount: float) -> float:\n        return round(amount * rate, 2)\n    return calc\n\n\ndef build_fee_calculators(fee_rates: dict) -> dict:\n    return {name: _make_calculator(rate) for name, rate in fee_rates.items()}\n\n\ndef compute_fees(fee_rates: dict, amount: float) -> dict:\n    calculators = build_fee_calculators(fee_rates)\n    return {name: calc(amount) for name, calc in calculators.items()}\n",
+  "solution_md": "**Root cause — late binding:** a closure stores a reference to the *variable* `rate` in the enclosing scope, not a snapshot of its value. The lambda body isn't evaluated until `calc(amount)` is called, and by then the `for` loop has finished, so every lambda sees the last `rate` (0.18).\n\n**Fixes**\n1. **Factory function** (used above): each call to `_make_calculator(rate)` creates a new scope with its own `rate`. Clear and idiomatic.\n2. **Default-argument capture:** `lambda amount, rate=rate: round(amount * rate, 2)` — defaults are evaluated at definition time (the very property that causes the mutable-default bug!). Compact, but it leaks an extra parameter a caller could override.\n3. **`functools.partial`:** `partial(lambda amount, r: round(amount * r, 2), r=rate)`.\n\n**Where it bites in real code:** building callbacks/handlers in a loop (`for col in columns: df[col].apply(lambda x: ... col ...)` deferred), registering route handlers or retry hooks in a loop, and in JS with `var` in `for` loops (fixed there by `let`, which creates a new binding per iteration).\n\n**Testing lesson:** the single-fee case passes with the bug — you need at least two distinct inputs to expose it.",
+  "tests": {
+    "function": "compute_fees",
+    "cases": [
+      {
+        "args": [
+          {
+            "commission": 0.1,
+            "shipping": 0.05,
+            "tax": 0.18
+          },
+          1000
+        ],
+        "kwargs": {},
+        "expected": {
+          "commission": 100.0,
+          "shipping": 50.0,
+          "tax": 180.0
+        }
+      },
+      {
+        "args": [
+          {
+            "commission": 0.15
+          },
+          200
+        ],
+        "kwargs": {},
+        "expected": {
+          "commission": 30.0
+        }
+      },
+      {
+        "args": [
+          {},
+          500
+        ],
+        "kwargs": {},
+        "expected": {}
+      },
+      {
+        "args": [
+          {
+            "a": 0.2,
+            "b": 0.0
+          },
+          50
+        ],
+        "kwargs": {},
+        "expected": {
+          "a": 10.0,
+          "b": 0.0
+        }
+      },
+      {
+        "args": [
+          {
+            "commission": 0.125,
+            "fixed_pct": 0.02
+          },
+          80
+        ],
+        "kwargs": {},
+        "expected": {
+          "commission": 10.0,
+          "fixed_pct": 1.6
+        }
+      }
+    ]
+  }
+}

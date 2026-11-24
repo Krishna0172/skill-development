@@ -1,0 +1,62 @@
+{
+  "slug": "sql-bestselling-skus-having",
+  "title": "Best-selling SKUs (GROUP BY + HAVING)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "easy",
+  "skill": "sql-aggregations",
+  "concepts": [
+    "GROUP BY",
+    "HAVING",
+    "SUM of expression",
+    "ORDER BY tie-breaker"
+  ],
+  "related_topics": [
+    "sql-group-by"
+  ],
+  "problem_md": "The replenishment team only cares about fast movers: SKUs that sold **at least 10 units** in total.\n\n```sql\nCREATE TABLE order_items (\n  order_item_id INTEGER PRIMARY KEY,\n  order_id      INTEGER NOT NULL,\n  sku           TEXT NOT NULL,\n  quantity      INTEGER NOT NULL,\n  unit_price    REAL NOT NULL\n);\n```\n\n> Money columns are `REAL` in this sandbox (they would be `NUMERIC(12,2)` in production PostgreSQL). Dates are ISO `'YYYY-MM-DD'` text.\n\n**Task.** Return `sku`, `total_units` (sum of `quantity`) and `revenue` (sum of `quantity * unit_price`) for SKUs\nwhose total units are **>= 10**. Order by `total_units` descending, then `sku` ascending.",
+  "examples": [
+    {
+      "input": "TSHIRT-BLK-M: 4 @ 499 + 6 @ 479; JEANS-32: 9 @ 1999",
+      "output": "sku          | total_units | revenue\n... \nTSHIRT-BLK-M | 10          | 4870",
+      "explanation": "JEANS-32 sold only 9 units, so it is filtered out by HAVING even though its revenue is highest."
+    }
+  ],
+  "hints": [
+    "You can't use an aggregate like `SUM(quantity)` in `WHERE` - it isn't known until rows are grouped.",
+    "Filter groups with `HAVING SUM(quantity) >= 10`.",
+    "Revenue is `SUM(quantity * unit_price)` (multiply per row, then sum). Two SKUs tie on 10 units - sort by sku as the tie-breaker."
+  ],
+  "starter_code": "-- Write your query here\nSELECT sku\nFROM order_items\n",
+  "solution_code": "SELECT sku,\n       SUM(quantity)              AS total_units,\n       SUM(quantity * unit_price) AS revenue\nFROM order_items\nGROUP BY sku\nHAVING SUM(quantity) >= 10\nORDER BY total_units DESC, sku;",
+  "solution_md": "**WHERE vs HAVING.** Logical query order is `FROM -> WHERE -> GROUP BY -> HAVING -> SELECT -> ORDER BY`.\n`WHERE` filters individual rows before grouping; `HAVING` filters whole groups after aggregates are computed, so\n`SUM(quantity) >= 10` must go in `HAVING`.\n\n- Revenue must be `SUM(quantity * unit_price)`, not `SUM(quantity) * AVG(unit_price)` - the T-shirt sold at two\n  different prices (499 and 479) and only the per-row product is correct: 4*499 + 6*479 = 4870.\n- `KAJAL-01` and `TSHIRT-BLK-M` both have 10 units; `ORDER BY total_units DESC, sku` makes the order deterministic.\n- The boundary matters: `>= 10` includes exactly-10 SKUs; `JEANS-32` (9 units) is excluded.\n\nPostgreSQL does not allow the alias in `HAVING` (`HAVING total_units >= 10` fails), so repeat the expression.\n(SQLite happens to accept the alias, but don't rely on it.) Aliases *are* allowed in `ORDER BY`.\n\n**Performance.** For a fixed period you'd add `WHERE order_date BETWEEN ...` (via a join to `orders`) so the\nfilter cuts rows *before* aggregation - always push row filters into `WHERE`, not `HAVING`.",
+  "tests": {
+    "schema_sql": "CREATE TABLE order_items (\n  order_item_id INTEGER PRIMARY KEY,\n  order_id      INTEGER NOT NULL,\n  sku           TEXT NOT NULL,\n  quantity      INTEGER NOT NULL,\n  unit_price    REAL NOT NULL\n);\n\nINSERT INTO order_items VALUES\n (1,1,'TSHIRT-BLK-M', 4, 499.00),\n (2,2,'TSHIRT-BLK-M', 6, 479.00),\n (3,1,'SOCKS-3PK',    3, 299.00),\n (4,3,'SOCKS-3PK',    2, 299.00),\n (5,2,'LIPSTICK-RED',12, 349.00),\n (6,3,'KAJAL-01',     5, 199.00),\n (7,4,'KAJAL-01',     5, 189.00),\n (8,4,'JEANS-32',     9,1999.00);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "sku",
+        "total_units",
+        "revenue"
+      ],
+      "rows": [
+        [
+          "LIPSTICK-RED",
+          12,
+          4188
+        ],
+        [
+          "KAJAL-01",
+          10,
+          1940
+        ],
+        [
+          "TSHIRT-BLK-M",
+          10,
+          4870
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

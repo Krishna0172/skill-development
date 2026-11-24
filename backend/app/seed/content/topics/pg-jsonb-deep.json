@@ -1,0 +1,188 @@
+{
+  "slug": "pg-jsonb-deep",
+  "title": "JSONB in depth: operators, GIN indexes, jsonpath",
+  "skill": "postgresql",
+  "extra_skills": [
+    "query-optimization",
+    "database-design"
+  ],
+  "category": "Database",
+  "difficulty": "advanced",
+  "tags": [
+    "jsonb",
+    "gin",
+    "jsonpath",
+    "jsonb_to_recordset",
+    "indexing"
+  ],
+  "summary": "jsonb stores JSON in a decomposed binary format that PostgreSQL can index and query. This topic covers the operators, containment and existence tests, GIN indexes (jsonb_ops vs jsonb_path_ops), jsonpath queries, and turning JSON into relational rows with jsonb_to_recordset and jsonb_array_elements.",
+  "why_md": "- Semi-structured data (marketplace payloads, attributes, settings, LLM outputs) lives in jsonb in many backends.\n- Wrong operators or missing indexes make jsonb queries scan whole tables.\n- Knowing when to promote a field to a real column is a key schema-design judgment.\n- jsonb comes up in interviews as 'json vs jsonb' and 'how do you index JSON'.",
+  "details_md": "### json vs jsonb\n`json` keeps the exact text (whitespace, key order, duplicate keys) and reparses on every use. `jsonb` parses once into a binary tree: key order is not preserved, duplicate keys collapse (last wins), numbers are `numeric`, and it supports indexes and rich operators. Use `jsonb` unless you must keep the original text.\n\n### Access operators\n- `->` get field or array element as jsonb: `data -> 'user' -> 'id'`, `items -> 0`.\n- `->>` same but returns **text**: `data ->> 'sku'`. Cast for numbers: `(data ->> 'qty')::int`.\n- `#>` / `#>>` path access: `data #>> '{user,address,city}'`.\n- Subscripting (PG14+): `data['user']['id']`, also usable in UPDATE.\n- Missing keys yield NULL, not errors.\n\n### Containment and existence\n- `@>` contains: `data @> '{\"status\":\"paid\"}'` (right side's structure must appear in the left, arrays match by element). `<@` is the reverse.\n- `?` key exists (top-level key or string array element), `?|` any of keys, `?&` all keys.\n- `@?` and `@@` evaluate jsonpath.\n\n### Modifying\n`||` merges objects, `-` removes a key or element, `#-` removes by path, `jsonb_set(target, '{a,b}', '\"x\"', create_missing)`, `jsonb_insert`, `jsonb_strip_nulls`. Every change rewrites the whole jsonb value (and its TOASTed storage), so frequent updates of one small key inside a big document are expensive and bloat-prone.\n\n### GIN indexes\n- `CREATE INDEX ON orders USING gin (data);` default `jsonb_ops`: supports `@>`, `?`, `?|`, `?&`, `@?`, `@@`. Larger.\n- `USING gin (data jsonb_path_ops)`: supports only `@>`, `@?`, `@@` but is smaller and faster for containment.\n- A btree **expression index** for a single field: `CREATE INDEX ON orders ((data ->> 'sku'));`, or `((data ->> 'qty')::int)` for numeric comparisons, used by `WHERE data ->> 'sku' = 'X'`. The query expression must match the index expression exactly.\n- `->>` equality does **not** use a GIN index; use `data @> '{\"sku\":\"X\"}'` with GIN instead.\n\n### jsonpath\n`jsonb_path_query(data, '$.items[*] ? (@.qty > 2).sku')`, `jsonb_path_exists`, `data @? '$.items[*] ? (@.price > 100)'`. Good for filtering inside arrays.\n\n### From JSON to rows\n`jsonb_array_elements(arr)` returns one row per element; `jsonb_to_recordset(arr) AS x(sku text, qty int, price numeric)` maps an array of objects to typed columns; `jsonb_to_record` does it for a single object; `jsonb_each` / `jsonb_object_keys` iterate keys. Aggregating back: `jsonb_agg(...)`, `jsonb_build_object(...)`.\n\n### When not to use jsonb\nFields that you filter, join or constrain on regularly belong in columns (type checks, FKs, statistics). jsonb columns have no per-key statistics, so the planner guesses selectivity poorly. A common design: relational core columns plus a jsonb `attributes` column for the long tail.",
+  "code_md": "```sql\n-- Operators\nSELECT data -> 'buyer' ->> 'email'           AS email,        -- text\n       (data ->> 'total')::numeric           AS total,\n       data #>> '{shipping,address,city}'    AS city,\n       data['items'][0]['sku']               AS first_sku     -- PG14+ subscripting\nFROM orders\nWHERE data @> '{\"status\": \"paid\"}'           -- containment (GIN friendly)\n  AND data ? 'coupon';                       -- key exists\n```\n```sql\n-- Indexes\nCREATE INDEX orders_data_gin ON orders USING gin (data jsonb_path_ops);  -- @> only, compact\nCREATE INDEX orders_sku_idx  ON orders ((data ->> 'sku'));               -- btree on one field\n-- uses GIN:   WHERE data @> '{\"status\":\"paid\"}'\n-- uses btree: WHERE data ->> 'sku' = 'ABC-1'   (expression must match exactly)\n```\n```sql\n-- JSON array of line items to typed rows\nSELECT o.id, li.sku, li.qty, li.price\nFROM orders o\nCROSS JOIN LATERAL jsonb_to_recordset(o.data -> 'items')\n     AS li(sku text, qty int, price numeric);\n\n-- jsonpath filter inside arrays\nSELECT id FROM orders\nWHERE data @? '$.items[*] ? (@.price > 100 && @.qty >= 2)';\n```\n```sql\n-- Modify: merge, set a nested path, remove a key\nUPDATE orders\nSET data = jsonb_set(data || '{\"synced\": true}', '{shipping,carrier}', '\"DHL\"', true) - 'tmp_notes'\nWHERE id = 42\nRETURNING data;\n```",
+  "use_cases_md": "- Storing the raw marketplace API payload next to extracted columns for auditing and reprocessing.\n- Flexible product attributes (colour, size, material) as a jsonb column with a GIN index.\n- Exploding JSON line items into rows for revenue analysis.\n- Persisting LLM structured outputs or tool-call arguments.\n- Per-tenant settings documents.",
+  "mistakes_md": "- **Querying with `->>` equality and expecting the GIN index to help**: it will not; use `@>` or a matching expression btree index.\n- **Forgetting casts**: `data ->> 'qty' > 5` compares text. Use `(data ->> 'qty')::int > 5`.\n- **Huge documents updated often**: whole value rewritten each time, TOAST bloat. Split hot fields into columns.\n- **Everything in one jsonb blob**: no constraints, poor statistics, awkward joins.\n- **Relying on key order or duplicates**: jsonb normalises them.\n- **Using `json` type** for queryable data.",
+  "best_practices_md": "- Use jsonb, with real columns for fields you filter, join or constrain.\n- Index the access pattern: `jsonb_path_ops` GIN for containment, expression btree for single keys.\n- Add `CHECK (jsonb_typeof(data) = 'object')` and validate structure at write time.\n- Convert to rows with `jsonb_to_recordset` and explicit types.\n- Keep documents small; avoid updating tiny keys of large documents in hot paths.\n- Check plans with `EXPLAIN` to confirm the index is used.",
+  "my_context_md": "The learner's ForceSight services are described as JSONB-heavy raw SQL (psycopg2). Review where payloads are queried with `->>` equality in WHERE clauses on large tables and check whether a matching expression index or a `@>` containment query with a GIN index would help; check also where frequently filtered keys deserve real columns.",
+  "revision_notes_md": "- jsonb = parsed binary, indexable, no key order/duplicates; json = text copy.\n- `->` jsonb, `->>` text, `#>`/`#>>` path; `data['a']['b']` subscripts (PG14+).\n- `@>` contains, `?` key exists, `@?`/`@@` jsonpath.\n- GIN `jsonb_ops`: @>, ?, ?|, ?&; `jsonb_path_ops`: @> and jsonpath only, smaller/faster.\n- `->>` equality needs an expression btree index, not GIN.\n- Cast text to numeric before comparing.\n- `jsonb_to_recordset` / `jsonb_array_elements` explode arrays into rows.\n- Updates rewrite the whole value; promote hot/filtered keys to columns.",
+  "exercises_md": "1. Create `orders(id, data jsonb)` with 100k generated rows; compare `EXPLAIN ANALYZE` for `data @> '{\"status\":\"paid\"}'` before and after a GIN index.\n2. Show that `data ->> 'sku' = 'X'` ignores the GIN index and fix it with an expression index.\n3. Explode a `items` array into typed rows with `jsonb_to_recordset` and aggregate revenue by sku.\n4. Use `jsonb_set` and `-` to patch a document and compare the table size after many updates.",
+  "related": [
+    "sql-ctes",
+    "postgres-indexes",
+    "explain-analyze",
+    "pg-recursive-ctes-lateral",
+    "sql-null-handling"
+  ],
+  "flashcards": [
+    {
+      "front": "json vs jsonb?",
+      "back": "json stores text as is; jsonb stores a parsed binary form: indexable, no duplicate keys or key order, faster to query."
+    },
+    {
+      "front": "`->` vs `->>`?",
+      "back": "`->` returns jsonb, `->>` returns text."
+    },
+    {
+      "front": "Which operator uses a GIN index for containment?",
+      "back": "`@>` (also `?`, `?|`, `?&` with jsonb_ops)."
+    },
+    {
+      "front": "jsonb_ops vs jsonb_path_ops?",
+      "back": "jsonb_ops supports more operators (incl. key existence) but is larger; jsonb_path_ops supports `@>`/jsonpath only and is smaller and faster."
+    },
+    {
+      "front": "How to turn an array of objects into rows?",
+      "back": "`jsonb_to_recordset(arr) AS x(col type, ...)` or `jsonb_array_elements`."
+    },
+    {
+      "front": "Why can heavy jsonb updates be costly?",
+      "back": "The entire jsonb value is rewritten (and may be TOASTed) for every change, causing bloat."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which operator tests that a jsonb document contains a given sub-document?",
+      "options": [
+        "@>",
+        "#>",
+        "?",
+        "->>"
+      ],
+      "answer_index": 0,
+      "explanation": "@> is containment."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A GIN index on `data` will be used by:",
+      "options": [
+        "WHERE (data ->> 'qty')::int > 5",
+        "ORDER BY data",
+        "WHERE data ->> 'sku' = 'X'",
+        "WHERE data @> '{\"sku\":\"X\"}'"
+      ],
+      "answer_index": 3,
+      "explanation": "GIN supports containment and existence operators, not ->> comparisons."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is true of jsonb compared with json?",
+      "options": [
+        "It preserves duplicate keys",
+        "It supports indexing and does not keep key order",
+        "It is always smaller",
+        "It preserves whitespace"
+      ],
+      "answer_index": 1,
+      "explanation": "jsonb is parsed and normalised."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which maps a jsonb array of objects to typed columns?",
+      "options": [
+        "to_jsonb",
+        "jsonb_object_keys",
+        "jsonb_to_recordset",
+        "jsonb_strip_nulls"
+      ],
+      "answer_index": 2,
+      "explanation": "jsonb_to_recordset takes a column definition list."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Get a nested value as text by path: data ____ '{user,address,city}'.",
+      "answers": [
+        "#>>"
+      ],
+      "explanation": "#>> returns text at a path."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Index type for jsonb containment queries: CREATE INDEX ... USING ____ (data);",
+      "answers": [
+        "gin"
+      ],
+      "explanation": "GIN indexes jsonb."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Test whether a top-level key exists with the ____ operator: data ? 'coupon'.",
+      "answers": [
+        "?"
+      ],
+      "explanation": "The question mark operator checks key existence."
+    },
+    {
+      "type": "debug",
+      "prompt": "This query is slow on 20M rows even though a GIN index exists on `data`, and it also gives wrong results for qty > 10. What is wrong?",
+      "code": "CREATE INDEX orders_data_gin ON orders USING gin (data);\n\nSELECT id FROM orders\nWHERE data ->> 'sku' = 'ABC-1'\n  AND data ->> 'qty' > '10';",
+      "answer": "`->>` comparisons are not supported by GIN, so it seq-scans; and `data ->> 'qty' > '10'` compares text ('9' > '10'). Use containment for equality and cast numbers, with expression indexes as needed.\n```sql\nCREATE INDEX orders_sku_idx ON orders ((data ->> 'sku'));\nCREATE INDEX orders_qty_idx ON orders (((data ->> 'qty')::int));\nSELECT id FROM orders\nWHERE data ->> 'sku' = 'ABC-1' AND (data ->> 'qty')::int > 10;\n-- or: WHERE data @> '{\"sku\":\"ABC-1\"}' using the GIN index\n```",
+      "rubric": [
+        "->> equality does not use GIN",
+        "Text vs numeric comparison needs a cast",
+        "Expression index or @> containment"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would choose between a GIN index and an expression btree index for jsonb queries.",
+      "answer": "Use GIN (preferably jsonb_path_ops for containment-only workloads) when queries test containment or key existence on varying keys with `@>`, `?` or jsonpath. Use an expression btree on `(data ->> 'key')` (cast as needed) when you query one specific key with equality, range or ordering; it is smaller and supports range scans. The query must use the exact index expression.",
+      "rubric": [
+        "GIN for containment/existence on many keys",
+        "Btree expression index for a specific key and ranges",
+        "Expression must match exactly"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When should a jsonb field become a regular column?",
+      "answer": "When you filter, join, sort or aggregate on it regularly, need type safety, constraints or foreign keys, or update it frequently. Real columns have planner statistics and cheap updates; jsonb keys do not, and each change rewrites the whole document.",
+      "rubric": [
+        "Frequent filtering/joining",
+        "Constraints and statistics",
+        "Update cost of rewriting the document"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "jsonb vs json vs normalised columns: how do you decide?",
+      "difficulty": "medium",
+      "answer_md": "Use normalised columns for core, queried, constrained attributes. Use jsonb for sparse, variable or externally-shaped data (payloads, attributes). Use json only if the exact text must be preserved. Mix: key columns + `attributes jsonb`. Promote keys to columns when they become hot in WHERE/JOIN."
+    },
+    {
+      "question": "How do you index JSONB for 'find orders where status is paid and sku is ABC'?",
+      "difficulty": "medium",
+      "answer_md": "A GIN index with jsonb_path_ops supports `data @> '{\"status\":\"paid\",\"sku\":\"ABC\"}'` in a single index lookup. If you only ever filter by sku, a btree expression index `((data ->> 'sku'))` is smaller and also supports ordering. Verify with EXPLAIN."
+    },
+    {
+      "question": "What is the difference between `->` and `->>`, and why does it matter?",
+      "difficulty": "easy",
+      "answer_md": "`->` yields jsonb (can be chained further), `->>` yields text (for comparison or casting). Comparing `->>` output with numbers needs a cast, otherwise you compare strings."
+    },
+    {
+      "question": "What are the downsides of updating a small key inside a big jsonb document?",
+      "difficulty": "hard",
+      "answer_md": "PostgreSQL's MVCC writes a whole new row version and the entire jsonb value (large values are TOASTed and rewritten), so update cost and bloat scale with document size, plus WAL volume. Mitigate by keeping documents small, moving hot fields to columns, or splitting the document."
+    }
+  ]
+}

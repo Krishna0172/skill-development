@@ -1,0 +1,178 @@
+{
+  "slug": "py-strings-formatting",
+  "title": "Strings and formatting",
+  "skill": "python",
+  "extra_skills": [],
+  "category": "Python",
+  "difficulty": "beginner",
+  "tags": [
+    "str",
+    "f-strings",
+    "formatting",
+    "basics"
+  ],
+  "summary": "A string is an immutable sequence of text characters. You will slice, search, split, join and format strings constantly. This topic covers the everyday methods and f-strings from scratch.",
+  "why_md": "- Almost all input (CSV cells, JSON fields, URLs, log lines) arrives as text.\n- f-strings are the standard way to build messages and logs.\n- Understanding immutability and `join` avoids slow, buggy string building.\n- SQL built with f-strings is a classic security hole, so knowing the boundary matters.",
+  "details_md": "### Creating strings\nUse single or double quotes: `'hi'`, `\"hi\"`. Triple quotes `\"\"\"...\"\"\"` allow several lines. Prefix `r` makes a raw string (backslashes are kept as-is), handy for regex and Windows paths: `r\"C:\\data\\file.csv\"`.\n\n### Strings are immutable sequences\n`s = \"python\"`; `s[0]` is `'p'`, `s[-1]` is `'n'`. Slicing is `s[start:stop:step]` where stop is excluded: `s[1:4] == \"yth\"`, `s[::-1] == \"nohtyp\"`. You cannot assign `s[0] = \"P\"` (TypeError). Every 'change' makes a new string: `s.upper()` returns a new string and leaves `s` alone.\n\n### Everyday methods\n- Case: `upper()`, `lower()`, `title()`, `capitalize()`.\n- Clean: `strip()`, `lstrip()`, `rstrip()` (remove whitespace or given chars at the ends).\n- Search: `in`, `find()` (returns -1 if absent), `index()` (raises ValueError), `startswith()`, `endswith()`, `count()`.\n- Change: `replace(old, new)`.\n- Split/join: `\"a,b,c\".split(\",\")` gives `['a','b','c']`; `\",\".join([\"a\",\"b\"])` gives `\"a,b\"`. `join` is called on the separator.\n- Checks: `isdigit()`, `isalpha()`, `isspace()`.\n\n### f-strings\nPut `f` before the quote and place expressions in braces:\n\n```python\nname, price = \"Mug\", 249.5\nprint(f\"{name} costs {price:.2f}\")      # Mug costs 249.50\n```\nAfter the colon comes a format spec: `:.2f` two decimals, `:,` thousands separator, `:>8` right-align in width 8, `:05d` zero-pad, `:.1%` percent. `{x!r}` uses `repr`, and `{x=}` prints `x=value` (great for debugging).\n\n### Text vs bytes\n`str` is Unicode text. `bytes` is raw data. Convert with `.encode(\"utf-8\")` and `.decode(\"utf-8\")`. Reading files or HTTP responses often gives bytes first.\n\n### Performance note\nBecause strings are immutable, `s += x` in a big loop can be slow. Collect pieces in a list and `\"\".join(parts)` once.\n\n### Never put user data into SQL by formatting\n`f\"... WHERE id = {user_id}\"` allows SQL injection. Use parameterised queries from your database driver. f-strings are for messages, not for building queries from untrusted values.\n\n### Comparing\n`==` is case-sensitive. For case-insensitive comparison use `a.casefold() == b.casefold()`.\n\n### Multi-line and escape basics\nInside normal quotes `\n` is a newline and `\t` a tab. To include a quote, use the other kind of quote (`\"it's\"`) or escape it (`'it's'`). `len(s)` counts characters, and `s * 3` repeats the string, which is handy for separators like `\"-\" * 20`.",
+  "code_md": "```python\n# 1. slicing and methods\nsku = \"  ab-1234-XL  \"\nclean = sku.strip()\nprint(clean.upper(), clean[3:7], clean[::-1])\nprint(clean.split(\"-\"))\n```\n\n```python\n# 2. f-string formatting\nqty, total = 3, 1234567.891\nprint(f\"{qty:03d} | {total:,.2f} | {0.256:.1%}\")\nprint(f\"{'left':<8}|{'right':>8}|\")\n```\n\n```python\n# 3. join instead of += in loops\nrows = [f\"{i}:{i*i}\" for i in range(5)]\nprint(\" ; \".join(rows))\n```\n\n```python\n# 4. text <-> bytes\ndata = \"caf\\u00e9\".encode(\"utf-8\")\nprint(len(\"caf\\u00e9\"), len(data), data.decode(\"utf-8\"))\n```",
+  "use_cases_md": "- Normalising SKUs or emails from CSV: `.strip().lower()`.\n- Building log lines and error messages with f-strings.\n- Splitting `\"key=value\"` config lines or `\"a,b,c\"` cells.\n- Generating report text with aligned columns and thousands separators.\n- Encoding text to bytes before hashing or sending over a network.",
+  "mistakes_md": "- **Expecting in-place change**: `s.upper()` alone does nothing; assign `s = s.upper()`.\n- **`+` with numbers**: `\"id \" + 5` raises TypeError; use `f\"id {5}\"`.\n- **Loop concatenation** of huge strings; use `join`.\n- **`find()` truthiness**: `if s.find('x'):` is wrong because index 0 is falsy and -1 is truthy. Use `in`.\n- **SQL via f-strings** with user input.",
+  "best_practices_md": "- Prefer f-strings over `%` and `.format()` for new code.\n- Use `\"\".join(...)` to assemble many pieces.\n- Use `in` for membership and `startswith` for prefixes.\n- Use `casefold()` for case-insensitive compare.\n- Be explicit about encodings (`utf-8`).",
+  "my_context_md": "",
+  "revision_notes_md": "- Strings are immutable; methods return new strings.\n- Slice `s[start:stop:step]`, stop excluded, negatives count from the end.\n- `split` makes a list, `sep.join(list)` makes a string.\n- `strip` removes ends only; `replace` replaces everywhere.\n- f-string spec: `:.2f`, `:,`, `:>8`, `:05d`, `:.1%`, `{x=}`.\n- `find` returns -1; `index` raises ValueError.\n- `str` = text, `bytes` = data; `encode`/`decode`.\n- Use `join` not `+=` in loops.\n- Never build SQL from user input with f-strings.",
+  "exercises_md": "1. Given `\"  Order#4821 | shipped | 2024-05-01 \"`, extract the order number, status and date as three clean values.\n2. Print a 3-column table of product, qty, price with right-aligned numbers and 2 decimals.\n3. Reverse the words (not letters) of a sentence using `split` and `join`.\n4. Encode `\"caf\\u00e9\"` to UTF-8 and compare the length of the str and the bytes.",
+  "related": [
+    "py-variables-types-operators",
+    "py-lists-tuples-sets-dicts-basics",
+    "py-datetime-json-regex",
+    "py-file-handling"
+  ],
+  "flashcards": [
+    {
+      "front": "Can you change a character inside a str?",
+      "back": "No. Strings are immutable; build a new string."
+    },
+    {
+      "front": "Slice rule for `s[a:b]`?",
+      "back": "Includes index a, excludes b. Negative indexes count from the end; `s[::-1]` reverses."
+    },
+    {
+      "front": "How do you join a list of strings?",
+      "back": "`\"sep\".join(items)` - called on the separator."
+    },
+    {
+      "front": "What does `f\"{x:.2f}\"` do?",
+      "back": "Formats x as a float with 2 decimals."
+    },
+    {
+      "front": "`find` vs `index`?",
+      "back": "`find` returns -1 when missing; `index` raises ValueError."
+    },
+    {
+      "front": "str vs bytes?",
+      "back": "str is Unicode text; bytes is raw data. Use encode/decode to convert."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What does `\"hello\"[1:4]` return?",
+      "options": [
+        "\"hell\"",
+        "\"ello\"",
+        "\"ell\"",
+        "\"hel\""
+      ],
+      "answer_index": 2,
+      "explanation": "Index 1 up to but excluding 4 is 'e','l','l'."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the best way to build one big string from 100,000 pieces?",
+      "options": [
+        "s += piece in a loop",
+        "\"\".join(pieces)",
+        "s = s + piece + ''",
+        "str(pieces)"
+      ],
+      "answer_index": 1,
+      "explanation": "`join` allocates once; repeated += may copy repeatedly."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What happens with `\"Total: \" + 5`?",
+      "options": [
+        "TypeError",
+        "'Total: 5'",
+        "'Total: '",
+        "ValueError"
+      ],
+      "answer_index": 0,
+      "explanation": "Python will not implicitly convert int to str for `+`."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To split `\"a,b\"` into a list use `\"a,b\".____(\",\")`.",
+      "answers": [
+        "split"
+      ],
+      "explanation": "`split` returns a list."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Format spec `:.2f` rounds a float to two ____.",
+      "answers": [
+        "decimals",
+        "decimal places",
+        "decimal",
+        "digits after the point"
+      ],
+      "explanation": "f means fixed-point; .2 is the precision."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "s = \"  ab-1234-XL  \"\nc = s.strip()\nprint(c.upper())\nprint(c[3:7])\nprint(c[::-1])\nprint(c.split(\"-\"))\n",
+      "answers": [
+        "AB-1234-XL\n1234\nLX-4321-ba\n['ab', '1234', 'XL']"
+      ],
+      "explanation": "strip removes ends; slice 3:7 is '1234'; reverse; split on '-'."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "qty, total = 3, 1234567.891\nprint(f\"{qty:03d}|{total:,.2f}|{0.256:.1%}\")\nprint(f\"{'ab':>5}|{'cd':<5}|\")\nx = 7\nprint(f\"{x=}\")\n",
+      "answers": [
+        "003|1,234,567.89|25.6%\n   ab|cd   |\nx=7"
+      ],
+      "explanation": "`:03d` zero-pads, `:,.2f` adds commas, `.1%` multiplies by 100, `{x=}` prints name and value."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "name = \"mug\"\nname.upper()\nprint(name)\nif name.find(\"m\"):\n    print(\"starts with m\")\n",
+      "answer": "`name.upper()` returns a new string and is discarded, so name stays 'mug' (use `name = name.upper()`). `find` returns 0 for a match at the start, which is falsy, so the branch is skipped; use `if \"m\" in name:` or `name.startswith(\"m\")`.",
+      "rubric": [
+        "Notes strings are immutable and upper() returns a new string",
+        "Notes find() returns 0/-1, bad as a boolean",
+        "Fix with assignment and `in`/startswith"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain why strings are immutable and what that means for `s = s + 'x'` in a loop.",
+      "answer": "A str object cannot be modified once created, which makes strings safe as dict keys and shareable across code. Each `s + 'x'` builds a brand new string by copying, so in a large loop the copying can add up (CPython has an optimisation in some cases but you should not rely on it). The robust pattern is to append pieces to a list and call `''.join(parts)` once, which computes the final size and copies each piece one time.",
+      "rubric": [
+        "Immutable: no in-place modification",
+        "Concatenation creates a new string each time",
+        "Use list + join"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why is `f\"SELECT * FROM users WHERE id = {uid}\"` dangerous, and what should you do instead?",
+      "answer": "If `uid` comes from user input, an attacker can inject SQL (`1; DROP TABLE users`). The text is spliced into the query before the database sees it. Use parameterised queries, where the driver sends the SQL and values separately, e.g. `cur.execute(\"SELECT * FROM users WHERE id = %s\", (uid,))` with psycopg2.",
+      "rubric": [
+        "Input is spliced into SQL text (injection)",
+        "Use driver placeholders with a params tuple"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do f-strings differ from `%` and `.format()`, and which do you use?",
+      "difficulty": "easy",
+      "answer_md": "All three build text from values. f-strings evaluate expressions inline at runtime (`f\"{price:.2f}\"`), are the most readable and generally the fastest, and support `{x=}` for debugging. `.format()` and `%` take values separately and are still needed for templates stored as data. In logging, prefer lazy `logger.info(\"x=%s\", x)` so formatting only happens if the record is emitted. For new code I use f-strings, except for SQL (placeholders) and logging (lazy args)."
+    },
+    {
+      "question": "What is the difference between str and bytes, and when do they meet?",
+      "difficulty": "medium",
+      "answer_md": "`str` is a sequence of Unicode code points; `bytes` is a sequence of integers 0-255. They meet at I/O boundaries: files opened in binary mode, sockets, HTTP bodies, hashing and signing APIs all use bytes. Convert explicitly with `s.encode('utf-8')` and `b.decode('utf-8')`. Mixing them raises TypeError (`'a' + b'b'`). Always state the encoding; the length differs (`len('caf\\u00e9') == 4`, `len(...encode()) == 5`)."
+    },
+    {
+      "question": "How would you reverse a string and check if it is a palindrome ignoring case?",
+      "difficulty": "easy",
+      "answer_md": "Use slicing with a negative step: `s[::-1]`. For a case-insensitive palindrome, normalise first with `casefold()` and often drop non-alphanumerics.\n\n```python\ndef is_pal(s):\n    t = [c for c in s.casefold() if c.isalnum()]\n    return t == t[::-1]\n```\nThis is O(n) time and space."
+    }
+  ]
+}

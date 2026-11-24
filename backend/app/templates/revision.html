@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, stat, empty, chips, kv %}
+{% block title %}Revision{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Revision</h1><p>Spaced repetition on the {{ stats.ladder|join(" → ") }}-day ladder. Rate honestly — "forgot" resets an item to day 1.</p></div>
+  <div class="actions"><a class="btn" href="/revision/quiz">Quick quiz</a><a class="btn {{ 'primary' if q.overdue or q.due_today }}" href="/revision/session{{ '?type=' ~ type if type }}">Start session ({{ (q.overdue|length) + (q.due_today|length) }})</a></div>
+</div>
+
+<div class="grid g4 mb">
+  {{ stat("Due today", stats.due_today, (stats.overdue ~ " overdue") if stats.overdue else None) }}
+  {{ stat("Next 7 days", stats.upcoming_7d) }}
+  {{ stat("Active items", q.total_active) }}
+  {{ stat("Recall rate", (stats.success_rate|round|int ~ "%") if stats.success_rate is not none else "—", stats.total_reviews ~ " reviews") }}
+</div>
+
+{{ chips("type", item_types, type, "/revision") }}
+
+<div class="grid g-side mt">
+  <div class="stack">
+    {% for key, heading in [("overdue", "Overdue"), ("due_today", "Due today"), ("upcoming", "Upcoming · 7 days")] %}
+      {% if q[key] %}
+        {% call card(heading ~ " (" ~ q[key]|length ~ ")", flush=True) %}
+          <table class="table">
+          {% for i in q[key] %}
+            <tr>
+              <td>{{ badge(i.item_type) }}</td>
+              <td style="width:55%">{% if i.topic_id %}<a href="/topics/{{ i.topic_id }}">{{ i.title[:110] }}</a>{% else %}{{ i.title[:110] }}{% endif %}{% if i.topic and i.item_type != "topic" %}<div class="tiny faint">{{ i.topic }}</div>{% endif %}</td>
+              <td class="small muted num">{{ i.due_date|rel }}</td>
+              <td class="tiny faint num">stage {{ i.stage }} · {{ i.interval_days }}d{% if i.lapses %} · {{ i.lapses }} lapses{% endif %}</td>
+              <td style="text-align:right"><form method="post" action="/revision/items/{{ i.id }}/pause" class="inline-form"><button class="btn sm ghost" title="Stop scheduling this item">Pause</button></form></td>
+            </tr>
+          {% endfor %}
+          </table>
+        {% endcall %}
+      {% endif %}
+    {% endfor %}
+    {% if not (q.overdue or q.due_today or q.upcoming) %}{{ empty("Nothing due this week", "Topics enter revision once you pass their assessment; missed quiz questions and new flashcards come here too.") }}{% endif %}
+  </div>
+
+  <div class="stack">
+    {% call card("Ratings") %}
+      {% for r, text in [("easy", "Easy"), ("need_practice", "Need practice"), ("difficult", "Difficult"), ("forgot", "Forgot")] %}{{ kv(text, stats.by_rating.get(r, 0)) }}{% endfor %}
+    {% endcall %}
+    {% if stats.frequently_forgotten %}
+      {% call card("Frequently forgotten", flush=True) %}
+        <ul class="list">{% for e in stats.frequently_forgotten[:10] %}<li class="small between"><span>{{ badge(e.item_type) }} {% if e.topic_id %}<a href="/topics/{{ e.topic_id }}">{{ e.title[:60] }}</a>{% else %}{{ e.title[:60] }}{% endif %}</span><span class="bad num">{{ e.misses }}/{{ e.reviews }}</span></li>{% endfor %}</ul>
+      {% endcall %}
+    {% endif %}
+    {% if stats.consistently_remembered %}
+      {% call card("Consistently remembered", flush=True) %}
+        <ul class="list">{% for e in stats.consistently_remembered[:10] %}<li class="small between"><span>{{ e.title[:60] }}</span><span class="good num">{{ e.reviews }}</span></li>{% endfor %}</ul>
+      {% endcall %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

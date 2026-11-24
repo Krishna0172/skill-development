@@ -1,0 +1,122 @@
+{
+  "slug": "python-exceptions",
+  "title": "Exceptions & Error Handling",
+  "skill": "error-handling",
+  "extra_skills": [
+    "python",
+    "logging-observability"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "python",
+    "exceptions",
+    "try-except",
+    "logging",
+    "custom-exceptions",
+    "exception-groups"
+  ],
+  "summary": "Exceptions are how Python signals that something went wrong; `try/except` lets you catch the ones you can actually handle. Catch specific exception types, add context, and let everything else bubble up to a single place that logs it. Define your own exception classes for domain errors so callers can react to them precisely.",
+  "details_md": "### Anatomy of try\n```python\ntry:\n    risky()\nexcept (ValueError, KeyError) as e:   # handle specific errors\n    ...\nelse:                                  # runs only if no exception\n    ...\nfinally:                               # always runs (cleanup)\n    ...\n```\nKeep the `try` block minimal so you don't accidentally catch errors from unrelated lines.\n\n### The hierarchy\n`BaseException` is the root. `Exception` is the base for normal errors. `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` inherit from `BaseException` directly, which is why `except Exception` doesn't swallow Ctrl+C but a bare `except:` does. `asyncio.CancelledError` is also a `BaseException` (since 3.8), so catching `Exception` does not break task cancellation.\n\nUseful built-ins: `ValueError` (right type, bad value), `TypeError`, `KeyError`/`IndexError` (both `LookupError`), `FileNotFoundError` (an `OSError`), `TimeoutError`, `NotImplementedError`.\n\n### Raising and chaining\n- `raise` with no argument inside `except` re-raises the current exception with its traceback.\n- `raise NewError(\"ctx\") from e` sets `__cause__` - tracebacks show \"The above exception was the direct cause of...\". Use it when translating low-level errors into domain errors.\n- Raising inside `except` without `from` sets `__context__` (\"During handling of the above exception, another exception occurred\").\n- `raise ... from None` hides the original (use sparingly).\n- `e.add_note(\"row 42, file orders.csv\")` (3.11+) attaches extra context that is printed with the traceback.\n\n### Custom exceptions\nCreate a small hierarchy rooted at one base class for your app:\n```python\nclass UploadError(Exception): ...\nclass ValidationError(UploadError): ...\nclass UnsupportedFileType(UploadError): ...\n```\nCallers can catch the whole family or one type. Add attributes (e.g. `missing_columns`) instead of encoding data in the message string.\n\n### Exception groups (3.11+)\n`ExceptionGroup` bundles several unrelated exceptions - e.g. from `asyncio.TaskGroup` when multiple tasks fail. Handle them with `except*`, which can match sub-groups by type: `except* ValueError as eg:`.\n\n### Logging exceptions\nInside an `except`, `logger.exception(\"msg\")` logs at ERROR level with the full traceback. Avoid logging and re-raising at every layer - you get the same stack trace five times. Log once at the boundary (Lambda handler, API endpoint, job runner) where you also convert the error into a status/response.\n\n### EAFP vs LBYL\nPython favours **EAFP** (\"easier to ask forgiveness than permission\"): try the operation and handle the exception, rather than pre-checking everything (LBYL). It avoids race conditions (file deleted between `exists()` and `open()`), but don't use exceptions for ordinary control flow in hot loops when a simple `dict.get` works.\n\n### Boundaries and resilience\nAt system boundaries, convert exceptions into something durable: an HTTP status code, an error row in a status table, a failed-job record. For batch processing, decide per use case whether one bad row fails the whole file or is collected into an error report while the rest proceeds.",
+  "code_md": "```python\n# Custom exception hierarchy with structured data\nclass UploadError(Exception):\n    '''Base class for upload pipeline errors.'''\n\nclass MissingColumnsError(UploadError):\n    def __init__(self, missing: set[str], report_type: str):\n        self.missing = missing\n        self.report_type = report_type\n        super().__init__(f\"{report_type}: missing columns {sorted(missing)}\")\n\ndef validate(columns: list[str], required: set[str], report_type: str) -> None:\n    missing = required - set(columns)\n    if missing:\n        raise MissingColumnsError(missing, report_type)\n\ntry:\n    validate([\"sku\"], {\"sku\", \"qty\"}, \"inventory\")\nexcept MissingColumnsError as e:\n    print(e.missing)          # {'qty'}\n```\n\n```python\n# Exception chaining and notes: translate low-level errors with context\nimport json\n\nclass ConfigError(Exception): ...\n\ndef load_config(path: str) -> dict:\n    try:\n        with open(path) as f:\n            return json.load(f)\n    except FileNotFoundError as e:\n        raise ConfigError(f\"config not found: {path}\") from e\n    except json.JSONDecodeError as e:\n        e.add_note(f\"while parsing {path}\")   # 3.11+\n        raise                                  # re-raise original with note\n```\n\n```python\n# Boundary handler: log once, record status, return a clean response\nimport logging\nlogger = logging.getLogger(__name__)\n\ndef handler(event, context):\n    upload_id = event.get(\"upload_id\")\n    try:\n        process(upload_id)\n    except UploadError as e:                 # expected, user-facing failure\n        logger.warning(\"upload %s failed: %s\", upload_id, e)\n        set_status(upload_id, \"Error\", str(e))\n        return {\"statusCode\": 422, \"body\": str(e)}\n    except Exception:                         # unexpected bug\n        logger.exception(\"unexpected failure for upload %s\", upload_id)\n        set_status(upload_id, \"Error\", \"internal error\")\n        return {\"statusCode\": 500, \"body\": \"internal error\"}\n    set_status(upload_id, \"Completed\")\n    return {\"statusCode\": 200, \"body\": \"ok\"}\n```\n\n```python\n# ExceptionGroup + except* (3.11+)\nimport asyncio\n\nasync def fail(kind):\n    raise kind(\"boom\")\n\nasync def main():\n    try:\n        async with asyncio.TaskGroup() as tg:\n            tg.create_task(fail(ValueError))\n            tg.create_task(fail(KeyError))\n    except* ValueError as eg:\n        print(\"value errors:\", eg.exceptions)\n    except* KeyError as eg:\n        print(\"key errors:\", eg.exceptions)\n\nasyncio.run(main())\n```",
+  "use_cases_md": "- Validating uploaded files and raising a domain error with the missing/invalid columns.\n- Translating driver errors (psycopg2, boto3 `ClientError`, `requests` exceptions) into app-level errors with context.\n- Retrying only transient errors (timeouts, deadlocks, 429/5xx) and failing fast on others.\n- Recording failures in a status table or returning proper HTTP status codes at API boundaries.\n- Guaranteeing cleanup with `finally` or context managers.",
+  "mistakes_md": "- **Bare `except:` or `except Exception: pass`** - hides bugs and even swallows Ctrl+C (bare). Fix: catch specific exceptions; if you must catch broadly, log with `logger.exception` and re-raise or record the failure.\n- **Huge try blocks** - you catch errors from lines you didn't intend. Fix: wrap only the risky call; use `else` for follow-up code.\n- **`raise e` instead of `raise`** - works but adds a misleading frame; and `raise NewError(str(e))` without `from e` loses the cause. Fix: bare `raise` or `raise X from e`.\n- **Logging and re-raising at every level** - duplicate stack traces. Fix: log once at the boundary.\n- **Returning `None`/`False` for errors** - callers forget to check. Fix: raise exceptions.\n- **Catching `BaseException`** - breaks cancellation and shutdown. Fix: `Exception` at most.\n- **Stringly-typed errors** - parsing messages to decide behaviour. Fix: custom exception classes with attributes.",
+  "best_practices_md": "- Define one base exception per application/library and subclass it for specific failures.\n- Raise early with precise messages including identifiers (file, org, row) - but never secrets.\n- Use `raise ... from e` when translating, `add_note()` to add context without changing type.\n- Handle exceptions at the layer that can do something meaningful; let others propagate.\n- Use `logger.exception` in handlers to capture the traceback.\n- Separate expected errors (bad input -> 4xx/Error status) from bugs (-> 500, alert).\n- Write tests asserting the right exception is raised (`pytest.raises`).",
+  "my_context_md": "- In ECSMarketplaceDataUpload, the `fs_upload` table's Processing/Completed/Error states are the boundary where exceptions become durable status - a custom hierarchy (e.g. a validation error carrying missing columns from `read_and_validate()`) lets the handler record a precise error message instead of a generic one.\n- Your deadlock-retry loop on Citus order upserts is an example of catching a *specific* transient error (`psycopg2.errors.DeadlockDetected`) and retrying, while letting other errors fail.\n- Your downloader apps use `threading.Event` for cancellation and run jobs in background executors - exceptions in those jobs never reach the client automatically, so they must be caught in the job function and stored in the job's dict entry (status + error) for the SSE stream to report.\n- `lambda_test.py` is a good place to simulate failing events and confirm the handler returns the right status code.",
+  "related": [
+    "python-context-managers",
+    "retries-backoff-idempotency",
+    "pytest-essentials",
+    "python-asyncio",
+    "aws-lambda-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "When does the `else` clause of a try statement run?",
+      "back": "Only if the `try` block raised no exception (before `finally`)."
+    },
+    {
+      "front": "Why doesn't `except Exception` catch KeyboardInterrupt?",
+      "back": "KeyboardInterrupt, SystemExit, GeneratorExit (and asyncio.CancelledError) inherit from BaseException, not Exception."
+    },
+    {
+      "front": "`raise X from e` sets which attribute?",
+      "back": "`X.__cause__ = e` - shown as 'direct cause' in the traceback."
+    },
+    {
+      "front": "How do you add context to an exception without changing its type (3.11+)?",
+      "back": "`e.add_note('extra context')` then `raise`."
+    },
+    {
+      "front": "Syntax to handle part of an ExceptionGroup?",
+      "back": "`except* ValueError as eg:` (eg is an ExceptionGroup of the matched exceptions)."
+    },
+    {
+      "front": "How to log an exception with its traceback?",
+      "back": "`logger.exception('msg')` inside the except block (ERROR level + traceback)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which is the best way to translate a `FileNotFoundError` into your own `ConfigError` while preserving the original?",
+      "options": [
+        "raise ConfigError(str(e))",
+        "raise ConfigError('missing') from e",
+        "return None",
+        "raise ConfigError('missing') from None"
+      ],
+      "answer_index": 1,
+      "explanation": "`from e` records the original as `__cause__` so the full chain appears in tracebacks."
+    },
+    {
+      "question": "What does a bare `except:` catch that `except Exception:` does not?",
+      "options": [
+        "ValueError",
+        "OSError",
+        "KeyboardInterrupt and SystemExit",
+        "Nothing - they're identical"
+      ],
+      "answer_index": 2,
+      "explanation": "A bare except catches BaseException, including interrupts and exit requests."
+    },
+    {
+      "question": "In a multi-layer app, where should unexpected exceptions usually be logged with traceback?",
+      "options": [
+        "Once, at the boundary (handler/endpoint/job runner)",
+        "In every function that sees them",
+        "Nowhere; just re-raise",
+        "Only in finally blocks"
+      ],
+      "answer_index": 0,
+      "explanation": "Logging once at the boundary avoids duplicate traces and is where you convert errors to responses/status."
+    },
+    {
+      "question": "What is EAFP?",
+      "options": [
+        "A logging library",
+        "Checking all preconditions before acting",
+        "An exception group type",
+        "Trying the operation and handling exceptions if it fails"
+      ],
+      "answer_index": 3,
+      "explanation": "'Easier to Ask Forgiveness than Permission' - idiomatic Python, avoids race conditions between check and use."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you design error handling for a batch file-processing job?",
+      "difficulty": "medium",
+      "answer_md": "I separate **expected** failures from **bugs**, and decide the failure granularity up front.\n\n1. **Domain exceptions**: a base `UploadError` with subclasses like `MissingColumnsError(missing=...)`, `UnsupportedFileType`. Validation raises these early with identifiers (upload id, report type, row number).\n2. **Transient errors** (network timeouts, DB deadlocks, throttling) are retried with backoff close to where they happen - and only for idempotent operations.\n3. **Row-level vs file-level**: for some reports, bad rows are collected into an error list and the rest are written; for others any invalid row fails the file. That's a business decision, made explicit.\n4. **One boundary handler** wraps the job: on success set status `Completed`; on `UploadError` set `Error` with a user-readable message; on any other `Exception` call `logger.exception`, set `Error` with a generic message, and alert.\n5. **Transactions** ensure a failure doesn't leave half-written data: commit only after the batch succeeds.\n\n```python\ntry:\n    run_job(upload_id)\nexcept UploadError as e:\n    mark(upload_id, \"Error\", str(e))\nexcept Exception:\n    logger.exception(\"job %s crashed\", upload_id)\n    mark(upload_id, \"Error\", \"internal error\")\n    raise\n```"
+    },
+    {
+      "question": "What is the difference between `raise`, `raise e`, and `raise NewError() from e`?",
+      "difficulty": "easy",
+      "answer_md": "- **`raise`** (bare, inside `except`) re-raises the exception currently being handled with its original traceback untouched. Use it when you've logged/cleaned up and want the error to continue.\n- **`raise e`** re-raises the same object but appends the current line to the traceback, which is slightly noisier. Functionally similar; bare `raise` is preferred.\n- **`raise NewError(\"msg\") from e`** raises a *different* exception and sets `NewError.__cause__ = e`. The traceback shows both, with \"The above exception was the direct cause of the following exception\". Use it to translate low-level errors into your domain while keeping debugging info.\n\nRaising a new exception inside `except` **without** `from` still links them implicitly via `__context__` (\"During handling of the above exception, another exception occurred\"), which reads like a bug in the handler. `from None` suppresses the chain - only appropriate when the original is pure noise.\n```python\ntry:\n    row = rows[i]\nexcept IndexError as e:\n    raise RowNotFound(i) from e\n```"
+    },
+    {
+      "question": "What are ExceptionGroups and except*, and when do you encounter them?",
+      "difficulty": "hard",
+      "answer_md": "Python 3.11 added `ExceptionGroup` (and `BaseExceptionGroup`) to represent **multiple unrelated exceptions raised together**, plus `except*` syntax to handle them.\n\nYou meet them mainly with structured concurrency: `asyncio.TaskGroup` cancels remaining tasks when one fails and raises an `ExceptionGroup` containing every task failure. Libraries doing parallel validation may also raise groups.\n\n`except*` matches by type **inside** the group; each clause receives a sub-group of matching exceptions, and unmatched ones propagate:\n```python\ntry:\n    async with asyncio.TaskGroup() as tg:\n        for url in urls:\n            tg.create_task(fetch(url))\nexcept* TimeoutError as eg:\n    log.warning(\"%d timeouts\", len(eg.exceptions))\nexcept* ValueError as eg:\n    for exc in eg.exceptions:\n        log.error(\"bad payload: %s\", exc)\n```\nMultiple `except*` clauses can run for one group, unlike regular `except`. You can't mix `except` and `except*` in one try, and `break`/`continue`/`return` aren't allowed in `except*` blocks. If you want \"collect all failures, don't cancel siblings\", use `asyncio.gather(..., return_exceptions=True)` instead."
+    }
+  ]
+}

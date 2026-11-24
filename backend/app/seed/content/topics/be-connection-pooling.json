@@ -1,0 +1,152 @@
+{
+  "slug": "be-connection-pooling",
+  "title": "Database connection pooling: psycopg2, PgBouncer, SQLAlchemy",
+  "skill": "psycopg2",
+  "extra_skills": [
+    "postgresql",
+    "aws-lambda",
+    "sqlalchemy"
+  ],
+  "category": "Database",
+  "difficulty": "advanced",
+  "tags": [
+    "connection-pool",
+    "pgbouncer",
+    "psycopg2",
+    "sqlalchemy",
+    "lambda",
+    "max_connections"
+  ],
+  "summary": "Opening a Postgres connection costs a TCP/TLS handshake, authentication and a new backend process, so services reuse connections from a pool. Pools exist at two levels: in the application (psycopg2 pools, SQLAlchemy's QueuePool) and in front of the database (PgBouncer, RDS Proxy). Transaction-mode PgBouncer multiplexes many clients onto few server connections, but breaks session state like SET, prepared statements and session advisory locks.",
+  "why_md": "- Each Postgres connection is a process using several MB; `max_connections` is finite and running out takes the whole platform down.\n- With many services and ECS tasks sharing one database, pool sizing is a capacity-planning problem.\n- Lambda's one-request-per-environment model causes connection storms without a proxy.\n- 'Why is my connection pool exhausted?' and PgBouncer modes are common senior interview topics.",
+  "details_md": "### Why pool\nA new connection takes milliseconds to tens of milliseconds (TLS + auth + fork of a backend process). Postgres performs best with a modest number of active connections — roughly a small multiple of CPU cores; thousands of mostly-idle connections waste memory and hurt throughput. Pools keep a bounded set of open connections and hand them out per unit of work.\n\n### psycopg2 pools\n- `SimpleConnectionPool(minconn, maxconn, dsn)`: not thread-safe — single-threaded use only.\n- `ThreadedConnectionPool`: guarded by a lock; safe across threads.\nAPI: `getconn()`, `putconn(conn, close=False)`, `closeall()`. When all `maxconn` are checked out, `getconn()` raises `PoolError(\"connection pool exhausted\")` immediately — it doesn't wait. Always return connections in `finally` (or a context manager), and roll back/commit before returning so no transaction is left open.\n\n### PgBouncer\nA lightweight proxy holding a small pool of server connections:\n- **Session pooling**: client gets a server connection for its whole session. Everything works, but little multiplexing.\n- **Transaction pooling**: a server connection is assigned only for the duration of a transaction. Huge multiplexing, but anything that relies on session state breaks: `SET` (use `SET LOCAL` inside the transaction), session-level advisory locks, `LISTEN/NOTIFY`, temp tables across transactions, and protocol-level prepared statements (PgBouncer 1.21+ can track them with `max_prepared_statements`). psycopg2 uses client-side parameter interpolation, so it's generally fine.\n- **Statement pooling**: per statement; multi-statement transactions not allowed.\n\n### SQLAlchemy pools\n`create_engine(url, pool_size=5, max_overflow=10, pool_timeout=30, pool_recycle=1800, pool_pre_ping=True)`. QueuePool **waits** up to `pool_timeout` for a free connection. `pool_pre_ping` detects dead connections; `pool_recycle` avoids server/proxy idle timeouts. Behind transaction-mode PgBouncer, some teams use `NullPool` and let PgBouncer pool.\n\n### Sizing and Lambda storms\nTotal connections = services × tasks × processes × pool max. 30 tasks × 4 workers × pool 10 = 1,200 — over a typical `max_connections`. Size pools small per process and put PgBouncer/RDS Proxy in front. Lambda: each concurrent environment holds its own connection; a burst of 500 invocations = 500 connections. Create the connection outside the handler (reused while warm), cap reserved concurrency, and use RDS Proxy or PgBouncer.",
+  "code_md": "```python\nimport threading\nfrom contextlib import contextmanager\nfrom psycopg2.pool import ThreadedConnectionPool\n\n_pool = None\n_lock = threading.Lock()\n\ndef get_pool() -> ThreadedConnectionPool:\n    global _pool\n    if _pool is None:                      # double-checked locking\n        with _lock:\n            if _pool is None:\n                _pool = ThreadedConnectionPool(1, 5, dsn=load_dsn_from_secrets())\n    return _pool\n\n@contextmanager\ndef db_transaction():\n    pool = get_pool()\n    conn = pool.getconn()                  # raises PoolError if all 5 are in use\n    try:\n        yield conn\n        conn.commit()\n    except Exception:\n        conn.rollback()\n        raise\n    finally:\n        pool.putconn(conn)                 # ALWAYS return it\n\n# Behind transaction-mode PgBouncer: session SET leaks/breaks -> use SET LOCAL\nwith db_transaction() as conn, conn.cursor() as cur:\n    cur.execute(\"SET LOCAL statement_timeout = '5s'\")   # scoped to this transaction\n    cur.execute(\"SELECT count(*) FROM orders WHERE org_id = %s\", (7,))\n```\n\n```python\nfrom sqlalchemy import create_engine, text\n\nengine = create_engine(\n    \"postgresql+psycopg2://app@pgbouncer:6432/app\",\n    pool_size=5,          # steady connections per process\n    max_overflow=5,       # temporary extra under burst\n    pool_timeout=10,      # wait this long for a free connection, then error\n    pool_recycle=1800,    # avoid proxy/server idle disconnects\n    pool_pre_ping=True,   # test connection on checkout\n)\n\nwith engine.begin() as conn:            # transaction; returned to pool on exit\n    n = conn.execute(text(\"SELECT count(*) FROM listings\")).scalar_one()\n```",
+  "use_cases_md": "- ECS report processors using a `ThreadedConnectionPool` with `ThreadPoolExecutor` workers — pool size must be ≥ worker threads.\n- Dozens of services sharing one Postgres behind PgBouncer in transaction mode.\n- Lambda functions writing upload status: connection created at module level, RDS Proxy in front.\n- FastAPI with Uvicorn workers: one SQLAlchemy engine per process, sized so workers × pool fits the budget.\n- Diagnosing 'too many clients already' errors by counting connections per `application_name` in `pg_stat_activity`.",
+  "mistakes_md": "- **Not returning connections on exceptions** → pool exhaustion after a few errors. Use `finally`/context managers.\n- **`SimpleConnectionPool` with threads** → corrupted pool state. Use `ThreadedConnectionPool`.\n- **Pool smaller than worker threads** → `PoolError: connection pool exhausted` under load.\n- **Huge pools 'just in case'** multiplied by tasks → exceeding `max_connections`.\n- **Session state behind transaction pooling**: `SET search_path`, session advisory locks, `LISTEN` silently apply to a random later client or get lost.\n- **Returning a connection mid-transaction** (`idle in transaction`) → holds locks, next user inherits it.\n- **Creating connections inside the Lambda handler** on every invocation.",
+  "best_practices_md": "- One pool per process, created once (lifespan / module init with a lock).\n- Pool max ≈ number of threads that do DB work; keep per-process pools small.\n- Budget: Σ(pools) < `max_connections` minus reserved; use PgBouncer/RDS Proxy for fan-out.\n- Use `SET LOCAL` and `pg_advisory_xact_lock` under transaction pooling.\n- Set `application_name` per service for visibility in `pg_stat_activity`.\n- `statement_timeout` and `idle_in_transaction_session_timeout` as guards.\n- Health-check/pre-ping and recycle connections.",
+  "my_context_md": "`AmazonVendorBankRecon/db.py` is the textbook version of this topic: a `ThreadedConnectionPool` created lazily with double-checked locking (`threading.Lock`), the DSN from AWS Secrets Manager cached with a TTL, and a `@contextmanager db_transaction()` that commits/rolls back and returns the connection — behind PgBouncer. Questions to check there: is the pool max ≥ the number of threads using it? Does any code run `SET` (not `SET LOCAL`) or session advisory locks that transaction-mode PgBouncer would break? With 179 services sharing Postgres, what is the total connection budget?",
+  "revision_notes_md": "- Connection = backend process + auth + TLS: expensive; pool them.\n- `SimpleConnectionPool` = single thread; `ThreadedConnectionPool` = thread-safe.\n- `getconn()` raises `PoolError` when exhausted (no waiting); `putconn()` in `finally`.\n- SQLAlchemy: `pool_size`, `max_overflow`, `pool_timeout` (waits), `pool_pre_ping`, `pool_recycle`.\n- PgBouncer modes: session / transaction / statement.\n- Transaction mode breaks: SET (use SET LOCAL), session advisory locks, LISTEN/NOTIFY, temp tables, protocol prepared statements (unless tracked).\n- Total = services × tasks × processes × pool size < max_connections.\n- Lambda: connect outside handler, RDS Proxy/PgBouncer, cap concurrency.",
+  "exercises_md": "1. Read `AmazonVendorBankRecon/db.py` and write down the maximum connections it can open per ECS task; compare with the thread count of the code using it.\n2. Write a test that raises inside `db_transaction()` 20 times with a pool max of 5 and proves no `PoolError` occurs afterwards.\n3. Run PgBouncer in Docker in transaction mode; show that a session `SET statement_timeout` leaks to/vanishes from subsequent transactions, then fix with `SET LOCAL`.\n4. Query `pg_stat_activity` grouped by `application_name` and `state` on a dev database and identify `idle in transaction` sessions.",
+  "related": [
+    "psycopg2-essentials",
+    "transactions-isolation",
+    "be-postgres-locking-deadlocks",
+    "aws-lambda-essentials",
+    "sqlalchemy-essentials",
+    "be-request-lifecycle"
+  ],
+  "flashcards": [
+    {
+      "front": "What happens when a psycopg2 pool hits maxconn and you call getconn()?",
+      "back": "It immediately raises `PoolError('connection pool exhausted')` — it does not wait."
+    },
+    {
+      "front": "Which PgBouncer mode breaks session `SET` and session advisory locks?",
+      "back": "Transaction pooling (and statement pooling)."
+    },
+    {
+      "front": "Safe alternative to `SET` behind transaction pooling?",
+      "back": "`SET LOCAL` inside the transaction (and `pg_advisory_xact_lock` for locks)."
+    },
+    {
+      "front": "Why do Lambdas cause connection storms?",
+      "back": "Each concurrent execution environment opens its own connection; bursts create hundreds at once."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A service uses `ThreadPoolExecutor(max_workers=16)` and a `ThreadedConnectionPool(1, 8)`. Every task does a DB query. What happens under full load?",
+      "options": [
+        "Extra threads wait for a free connection",
+        "Some `getconn()` calls raise PoolError: connection pool exhausted",
+        "The pool grows to 16 automatically",
+        "Postgres rejects the extra connections"
+      ],
+      "answer_index": 1,
+      "explanation": "psycopg2 pools don't block; with 16 concurrent getconn calls and max 8, the extra calls raise PoolError."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Behind PgBouncer in transaction mode, which statement is safe?",
+      "options": [
+        "`SET search_path = tenant_7` once after connecting",
+        "`SELECT pg_advisory_lock(42)` then work across several transactions",
+        "`LISTEN report_ready`",
+        "`SET LOCAL statement_timeout = '5s'` inside a transaction"
+      ],
+      "answer_index": 3,
+      "explanation": "SET LOCAL is scoped to the current transaction, which stays on one server connection. The others depend on session state that transaction pooling doesn't preserve."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The thread-safe psycopg2 pool class is `psycopg2.pool.____`.",
+      "answers": [
+        "ThreadedConnectionPool"
+      ],
+      "explanation": "SimpleConnectionPool has no locking and is for single-threaded apps."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In SQLAlchemy, `pool_____=True` tests each connection on checkout so dead connections are replaced transparently.",
+      "answers": [
+        "pre_ping"
+      ],
+      "explanation": "`pool_pre_ping` issues a lightweight ping before handing out the connection."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib pool mimics psycopg2's non-blocking behaviour. One code path forgets to return its connection. What does it print?",
+      "code": "class PoolError(Exception): pass\n\nclass Pool:\n    def __init__(self, maxconn):\n        self.free = [f\"c{i}\" for i in range(maxconn)]\n    def getconn(self):\n        if not self.free:\n            raise PoolError(\"connection pool exhausted\")\n        return self.free.pop(0)\n    def putconn(self, c):\n        self.free.append(c)\npool = Pool(2)\nfor i in range(4):\n    try:\n        conn = pool.getconn()\n        if i % 2 == 0:\n            raise ValueError(\"bad row\")\n        pool.putconn(conn)\n        print(i, \"ok\", conn)\n    except ValueError:\n        print(i, \"failed, leaked\", conn)\n    except PoolError as e:\n        print(i, e)\n",
+      "answers": [
+        "0 failed, leaked c0\n1 ok c1\n2 failed, leaked c1\n3 connection pool exhausted"
+      ],
+      "explanation": "Requests 0 and 2 raise before `putconn`, leaking c0 and then c1. By request 3 the pool is empty. Moving `putconn` into `finally` fixes it."
+    },
+    {
+      "type": "debug",
+      "prompt": "A Lambda that records upload status fails with 'sorry, too many clients already' during bursts. What's wrong and how do you fix it?",
+      "code": "import psycopg2\n\ndef handler(event, context):\n    conn = psycopg2.connect(get_dsn())\n    cur = conn.cursor()\n    cur.execute(\"UPDATE uploads SET status=%s WHERE id=%s\", (event[\"status\"], event[\"id\"]))\n    conn.commit()\n    return {\"ok\": True}\n",
+      "answer": "- A new connection per invocation, created inside the handler, and **never closed** — warm environments leak connections until they're recycled.\n- Bursts of concurrent invocations each open their own connection → hundreds of connections → `max_connections` hit.\n\nFix:\n```python\nimport psycopg2\nconn = None                      # module level: reused while the environment is warm\n\ndef get_conn():\n    global conn\n    if conn is None or conn.closed:\n        conn = psycopg2.connect(get_dsn(), connect_timeout=5)  # via RDS Proxy / PgBouncer\n    return conn\n\ndef handler(event, context):\n    c = get_conn()\n    try:\n        with c.cursor() as cur:\n            cur.execute(\"UPDATE uploads SET status=%s WHERE id=%s\", (event[\"status\"], event[\"id\"]))\n        c.commit()\n    except Exception:\n        c.rollback()\n        raise\n    return {\"ok\": True}\n```\nPut RDS Proxy or PgBouncer in front and cap the function's reserved concurrency.",
+      "rubric": [
+        "Connection opened per invocation and never closed",
+        "Concurrency burst = one connection per environment",
+        "Reuse a module-level connection across warm invocations",
+        "RDS Proxy/PgBouncer and concurrency cap"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain PgBouncer's session vs transaction pooling to a teammate, including what breaks in transaction mode.",
+      "answer": "PgBouncer sits between clients and Postgres, holding a small set of real server connections. In **session mode** a client keeps one server connection from connect to disconnect — fully compatible, but with 500 clients you still need 500 server connections. In **transaction mode** a server connection is lent to a client only for one transaction, then returned; 500 mostly-idle clients can share ~20 server connections. The price: anything stored in the *session* doesn't follow the client — `SET` parameters (use `SET LOCAL`), `search_path` changes, session-level advisory locks (use `pg_advisory_xact_lock`), `LISTEN/NOTIFY`, temp tables and `WITH HOLD` cursors across transactions, and protocol-level prepared statements unless PgBouncer's prepared-statement tracking is enabled. Leaving a transaction open also pins a server connection, so keep transactions short.",
+      "rubric": [
+        "Session mode: one server connection per client session",
+        "Transaction mode: connection per transaction, high multiplexing",
+        "Lists broken features: SET, advisory locks, LISTEN, prepared statements, temp tables",
+        "Workarounds: SET LOCAL, xact advisory locks, short transactions"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "You run 12 ECS services, each with 4 tasks, each task running 2 processes with a pool max of 10, against Postgres with max_connections=500. Is this OK?",
+      "answer": "Worst case = 12 × 4 × 2 × 10 = **960** connections, nearly double `max_connections` (and some are reserved for superusers/maintenance). Under load or after a deploy (old + new tasks overlap) you'd hit 'too many clients'. Options: shrink pools to what each process truly uses concurrently, put PgBouncer in transaction mode in front (clients can exceed max_connections while server connections stay ~50-100), set `application_name` and monitor per-service usage, and account for deploy overlap and autoscaling maximums.",
+      "rubric": [
+        "Correct multiplication: 960 > 500",
+        "Deploy overlap / autoscaling makes it worse",
+        "Fix: smaller pools and/or PgBouncer, monitoring per service"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Your service logs 'connection pool exhausted' errors under load. How do you investigate?",
+      "difficulty": "medium",
+      "answer_md": "First distinguish **leak** from **undersizing**. A leak: connections checked out and never returned — code paths that raise before `putconn`, or long-running generators holding a connection. Check `pg_stat_activity` for this service's `application_name`: many `idle` or `idle in transaction` sessions while the app reports exhaustion suggests leaks or forgotten commits. Undersizing: pool max smaller than the number of threads doing DB work (e.g. ThreadPoolExecutor of 16 with pool max 8). Also look at slow queries/locks: if each checkout lasts longer (lock waits, slow query), the same pool supports less throughput — check `wait_event_type = 'Lock'`.\n\nFixes: always use a context manager that returns in `finally`; set `idle_in_transaction_session_timeout`; size the pool ≥ concurrent DB-using threads; add a semaphore or a waiting pool rather than failing fast; fix slow queries; add metrics for checkouts in use and wait time."
+    },
+    {
+      "question": "How do you handle Postgres connections from AWS Lambda at scale?",
+      "difficulty": "hard",
+      "answer_md": "Lambda scales by adding execution environments, each processing one event at a time, so concurrent invocations ≈ connections. Mitigations:\n1. **Create the connection outside the handler** (module scope) so warm invocations reuse it; validate it (`conn.closed`) and reconnect on failure.\n2. **Put a pooler in front**: RDS Proxy (managed, IAM auth, pins connections when session state is used) or PgBouncer in transaction mode, so thousands of client connections map to a small server pool.\n3. **Limit concurrency**: reserved concurrency on the function or an SQS event source with `maximum concurrency`, so a burst queues instead of opening 1,000 connections.\n4. **Keep transactions short** and avoid session state that causes proxy pinning.\n5. **Batch**: process SQS batches per invocation to reduce connection churn.\n6. Set `connect_timeout` and `statement_timeout`.\nIf the workload is steady and DB-heavy, moving it to a long-running ECS service with a normal pool is often simpler."
+    }
+  ]
+}

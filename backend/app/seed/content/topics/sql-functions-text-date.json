@@ -1,0 +1,182 @@
+{
+  "slug": "sql-functions-text-date",
+  "title": "Text and date functions, date_trunc and generate_series",
+  "skill": "postgresql",
+  "extra_skills": [],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "string-functions",
+    "date-functions",
+    "date_trunc",
+    "generate_series",
+    "interval"
+  ],
+  "summary": "PostgreSQL has a rich toolbox for cleaning text and working with dates: concatenation, substring, regex, date arithmetic, date_trunc for bucketing, and generate_series for creating sequences of numbers or dates. Together they build clean reports, fill gaps in time series and normalise messy imported data.",
+  "why_md": "- Data from marketplace reports is messy (padding, case, odd date strings); text functions clean it in the database.\n- Daily/weekly/monthly reports need `date_trunc` and interval arithmetic.\n- `generate_series` plus LEFT JOIN is the standard way to show zero-sales days.\n- Date and time-zone errors are among the most common production data bugs.",
+  "details_md": "### Text functions\n- Concatenate: `'a' || 'b'`, or `concat(a, b)` (treats NULL as empty; `||` with NULL gives NULL). `concat_ws('-', a, b, c)` joins with a separator and skips NULLs.\n- Case and trim: `lower`, `upper`, `initcap`, `trim`, `ltrim`, `rtrim`, `btrim(s, 'x')`.\n- Length and position: `length(s)`, `position('x' IN s)`, `strpos`.\n- Slicing: `substring(s FROM 2 FOR 3)`, `left(s, n)`, `right(s, n)`, `split_part(s, ',', 2)`.\n- Replace: `replace(s, 'a', 'b')`, `regexp_replace(s, '\\s+', ' ', 'g')`, `translate`.\n- Pattern matching: `LIKE`/`ILIKE`, regex operators `~` (match), `~*` (case-insensitive), `!~`; `regexp_match(s, pattern)`, `regexp_matches(s, pattern, 'g')`.\n- Formatting: `format('%s has %s items', name, n)`, `to_char(total, 'FM999,999.00')`, `lpad(id::text, 8, '0')`.\n- Aggregation: `string_agg(name, ', ' ORDER BY name)`.\n\n### Date and time basics\nTypes: `date`, `timestamp`, `timestamptz`, `interval`. Current values: `current_date`, `now()` (transaction start time), `clock_timestamp()` (real time).\nArithmetic: `date + 7` adds days; `timestamptz + interval '1 month'`; subtracting two dates gives an integer number of days, two timestamps give an interval. Use `age(a, b)` for a calendar-style interval.\nExtract parts: `EXTRACT(year FROM ts)`, `EXTRACT(dow FROM ts)` (0 = Sunday), `date_part`.\nFormat and parse: `to_char(ts, 'YYYY-MM-DD HH24:MI')`, `to_date('03/04/2026', 'DD/MM/YYYY')`, `to_timestamp(...)`. Prefer ISO strings `'2026-03-04'`, which are unambiguous.\n\n### date_trunc: bucketing\n`date_trunc('month', ts)` rounds a timestamp **down** to the start of the unit (`hour`, `day`, `week`, `month`, `quarter`, `year`). It is the basis of `GROUP BY date_trunc('day', created_at)`. Weeks start on Monday. For `timestamptz`, truncation happens in the session time zone; use `date_trunc('day', ts, 'UTC')` (PostgreSQL 12+) or `ts AT TIME ZONE` to be explicit.\n\n### Time zones\n`ts AT TIME ZONE 'Asia/Kolkata'` converts a timestamptz to a local timestamp (and vice versa for timestamp). Set zones explicitly in reporting queries.\n\n### Range filters\nUse half-open ranges: `created_at >= '2026-03-01' AND created_at < '2026-04-01'`, not `BETWEEN`, which includes the upper bound's midnight. Avoid wrapping the column in a function (`date(created_at) = ...`), which blocks index use.\n\n### generate_series\n`generate_series(1, 5)` returns numbers; `generate_series(start_ts, end_ts, interval '1 day')` returns timestamps. Used to create calendars so days without data still appear.",
+  "code_md": "```sql\n-- Cleaning text\nSELECT upper(trim(sku))                               AS sku,\n       split_part(email, '@', 2)                      AS domain,\n       regexp_replace(phone, '[^0-9]', '', 'g')       AS digits,\n       lpad(id::text, 8, '0')                         AS padded_id,\n       concat_ws(', ', city, state, country)          AS address\nFROM raw_customers;\n```\n```sql\n-- Monthly buckets with a half-open range, index-friendly\nSELECT date_trunc('month', created_at) AS month,\n       count(*)                        AS orders,\n       sum(total)                      AS revenue\nFROM orders\nWHERE created_at >= date '2026-01-01' AND created_at < date '2027-01-01'\nGROUP BY 1\nORDER BY 1;\n```\n```sql\n-- Show zero-sales days with generate_series + LEFT JOIN\nSELECT d::date AS day, coalesce(s.revenue, 0) AS revenue\nFROM generate_series(date '2026-03-01', date '2026-03-31', interval '1 day') AS d\nLEFT JOIN (\n    SELECT created_at::date AS day, sum(total) AS revenue\n    FROM orders GROUP BY 1\n) s ON s.day = d::date\nORDER BY day;\n```\n```sql\n-- Date arithmetic and time zones\nSELECT now() - interval '7 days'                        AS week_ago,\n       date '2026-03-31' + interval '1 month'           AS plus_month,   -- 2026-04-30\n       age(timestamptz '2026-03-04', timestamptz '2025-01-01') AS span,\n       now() AT TIME ZONE 'Asia/Kolkata'                AS local_time,\n       string_agg(DISTINCT status, ',' ORDER BY status) AS statuses\nFROM orders;\n```",
+  "use_cases_md": "- Normalising SKUs and phone numbers from uploaded marketplace reports.\n- Daily/weekly revenue series, with gaps filled by `generate_series`.\n- Extracting the domain from emails for analytics.\n- Cohort analysis: `date_trunc('month', first_order_at)`.\n- Building a readable summary line with `string_agg`.",
+  "mistakes_md": "- **`WHERE date(created_at) = '2026-03-04'`**: prevents index use. Use a half-open range on the raw column.\n- **`BETWEEN` for timestamp ranges**: includes the upper boundary instant. Use `>= start AND < end`.\n- **Concatenating with `||` when a value may be NULL**: whole result becomes NULL; use `concat`/`concat_ws` or COALESCE.\n- **Ignoring time zones in date_trunc**: day boundaries move with the session zone.\n- **Ambiguous date strings** (`'03/04/2026'`): depends on DateStyle. Use ISO format.\n- **Month arithmetic surprises**: `+ interval '1 month'` clamps to the last valid day.",
+  "best_practices_md": "- Filter on the bare column with half-open ranges.\n- Use ISO 8601 date strings.\n- Be explicit about time zones in reports.\n- Clean data once, on ingestion, not in every query.\n- Use `generate_series` to build calendars before LEFT JOINing facts.\n- Prefer `concat_ws` for optional pieces.",
+  "my_context_md": "",
+  "revision_notes_md": "- `||` gives NULL if any side is NULL; `concat`/`concat_ws` skip NULLs.\n- `trim`, `lower`, `split_part`, `substring`, `replace`, `regexp_replace(..., 'g')`, `lpad`, `string_agg`.\n- `now()` is fixed per transaction; `clock_timestamp()` moves.\n- `date_trunc('month', ts)` rounds down; weeks begin Monday.\n- `EXTRACT(dow ...)`: 0 = Sunday.\n- Use `>= start AND < end`, not BETWEEN or `date(col) =`.\n- `generate_series(start, end, interval)` for calendars.\n- `AT TIME ZONE` converts between timestamptz and timestamp.",
+  "exercises_md": "1. Take a table with messy SKUs (spaces, mixed case) and produce a clean column with trim/upper/regexp_replace.\n2. Report orders per week for the last 8 weeks, including weeks with zero orders (generate_series + LEFT JOIN).\n3. Explain with EXPLAIN why `WHERE created_at::date = '2026-03-04'` does not use an index on created_at while a half-open range does.\n4. Show how `date_trunc('day', now())` differs when you `SET TIME ZONE 'UTC'` versus `'Asia/Kolkata'`.",
+  "related": [
+    "sql-select-filter-sort",
+    "sql-data-types-ddl",
+    "sql-group-by",
+    "postgres-indexes"
+  ],
+  "flashcards": [
+    {
+      "front": "What does date_trunc('month', ts) return?",
+      "back": "ts rounded down to the first instant of its month."
+    },
+    {
+      "front": "`||` vs concat with NULL?",
+      "back": "`||` returns NULL if any operand is NULL; concat/concat_ws skip NULLs."
+    },
+    {
+      "front": "Why avoid BETWEEN for timestamps?",
+      "back": "It is inclusive at both ends; use `>= start AND < next_start`."
+    },
+    {
+      "front": "What does generate_series(date, date, interval) give you?",
+      "back": "A sequence of timestamps, handy as a calendar to LEFT JOIN facts onto."
+    },
+    {
+      "front": "now() vs clock_timestamp()?",
+      "back": "now() is the transaction start time (constant inside a transaction); clock_timestamp() is the actual current time."
+    },
+    {
+      "front": "Why is `WHERE date(col) = x` slow?",
+      "back": "Wrapping the column in a function prevents a normal index on col from being used."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which returns the first moment of the month of a timestamp?",
+      "options": [
+        "date_part('month', ts)",
+        "date_trunc('month', ts)",
+        "to_char(ts, 'MM')",
+        "age(ts)"
+      ],
+      "answer_index": 1,
+      "explanation": "date_trunc rounds down to the unit start."
+    },
+    {
+      "type": "mcq",
+      "prompt": "'a' || NULL || 'b' evaluates to?",
+      "options": [
+        "'ab'",
+        "'a b'",
+        "NULL",
+        "Error"
+      ],
+      "answer_index": 2,
+      "explanation": "Any NULL operand makes || return NULL."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Best filter for all of March 2026 on an indexed timestamptz column?",
+      "options": [
+        "WHERE ts >= '2026-03-01' AND ts < '2026-04-01'",
+        "WHERE to_char(ts,'YYYY-MM') = '2026-03'",
+        "WHERE extract(month from ts) = 3",
+        "WHERE date(ts) BETWEEN '2026-03-01' AND '2026-03-31'"
+      ],
+      "answer_index": 0,
+      "explanation": "A half-open range on the bare column is correct and index-friendly."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To list every day in March including empty ones: SELECT d FROM ____(date '2026-03-01', date '2026-03-31', interval '1 day') d;",
+      "answers": [
+        "generate_series"
+      ],
+      "explanation": "generate_series creates the calendar."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Join optional address parts with a separator, skipping NULLs: ____(', ', city, state).",
+      "answers": [
+        "concat_ws"
+      ],
+      "explanation": "concat_ws ignores NULL arguments."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (SQLite equivalents of the PostgreSQL functions)",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nq = (\"select upper(trim('  ab-12 ')), substr('invoice-2026-03', 9, 4), replace('a,b,c', ',', ';'), \"\n     \"length('hello'), 'x' || 'y' || NULL\")\nprint(c.execute(q).fetchone())",
+      "answers": [
+        "('AB-12', '2026', 'a;b;c', 5, None)"
+      ],
+      "explanation": "SQLite substr is 1-based; concatenating NULL gives NULL as in PostgreSQL."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (SQLite date_trunc-like bucketing and a recursive generate_series)",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table o(ts text, total integer);\"\n                \"insert into o values ('2026-03-01 09:00',10),('2026-03-01 18:30',5),('2026-03-03 10:00',7);\")\nq = '''\nwith recursive d(day) as (\n  select '2026-03-01' union all select date(day, '+1 day') from d where day < '2026-03-04'\n)\nselect d.day, coalesce(sum(o.total), 0)\nfrom d left join o on date(o.ts) = d.day\ngroup by d.day order by d.day\n'''\nfor r in c.execute(q):\n    print(r)",
+      "answers": [
+        "('2026-03-01', 15)\n('2026-03-02', 0)\n('2026-03-03', 7)\n('2026-03-04', 0)"
+      ],
+      "explanation": "The calendar adds the empty 2nd and 4th days with 0."
+    },
+    {
+      "type": "debug",
+      "prompt": "This report is slow on a 200M-row table and is easy to get wrong at the month boundary. What is wrong?",
+      "code": "SELECT count(*)\nFROM orders\nWHERE date(created_at) BETWEEN '2026-03-01' AND '2026-03-31';\n-- index exists on orders(created_at)",
+      "answer": "`date(created_at)` wraps the column so the index on created_at cannot be used. Also, if you drop the date() wrapper, BETWEEN with a date upper bound treats '2026-03-31' as midnight, so orders after 00:00 on the 31st are excluded. Use a half-open range.\n```sql\nSELECT count(*) FROM orders\nWHERE created_at >= '2026-03-01' AND created_at < '2026-04-01';\n```",
+      "rubric": [
+        "Function on the column blocks index",
+        "BETWEEN end-bound problem",
+        "Half-open range on the raw column"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how to produce a daily revenue series that includes days with no sales.",
+      "answer": "Generate a calendar with generate_series over the date range, then LEFT JOIN the aggregated daily revenue to it and COALESCE missing revenue to 0. Aggregating the orders alone cannot return days that have no rows.",
+      "rubric": [
+        "generate_series builds the calendar",
+        "LEFT JOIN from calendar to facts",
+        "COALESCE to zero"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is the difference between timestamp and timestamptz in date_trunc('day', ts)?",
+      "answer": "For timestamptz the day boundary depends on the session time zone (or the zone argument in PG12+), so the same instant can fall into different days. For timestamp there is no zone and truncation is purely on the digits. For reports, set the zone explicitly.",
+      "rubric": [
+        "timestamptz truncates in session zone",
+        "Zone argument or AT TIME ZONE for explicitness",
+        "timestamp has no zone"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you report daily orders including days with zero orders?",
+      "difficulty": "medium",
+      "answer_md": "Build a calendar with `generate_series(start, end, interval '1 day')`, LEFT JOIN the per-day aggregation to it and COALESCE counts to 0. Doing this in SQL avoids gap-filling in Python."
+    },
+    {
+      "question": "Why shouldn't you use BETWEEN for timestamp ranges?",
+      "difficulty": "easy",
+      "answer_md": "BETWEEN is inclusive at both ends. `BETWEEN '2026-03-01' AND '2026-03-31'` stops at midnight on the 31st and excludes the rest of that day; using the next day's midnight inclusively would double-count rows at that instant. Use `>= start AND < next_start`."
+    },
+    {
+      "question": "What does now() return inside a long transaction?",
+      "difficulty": "medium",
+      "answer_md": "The transaction's start time, identical for every call within the transaction. `clock_timestamp()` returns the real current time and `statement_timestamp()` the start of the current statement. This matters when stamping rows in loops."
+    },
+    {
+      "question": "How would you clean 'phone' values like '(091) 98765-43210'?",
+      "difficulty": "easy",
+      "answer_md": "`regexp_replace(phone, '[^0-9]', '', 'g')` removes everything except digits. Then slice with `right(digits, 10)` or validate with a CHECK constraint and a regex match `~ '^[0-9]{10}$'`."
+    }
+  ]
+}

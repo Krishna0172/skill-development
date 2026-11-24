@@ -1,0 +1,55 @@
+{
+  "slug": "python-threading-gil",
+  "why_md": "Choosing threads vs processes vs asyncio is a daily backend decision: fetching 500 reports, scanning S3, or running CPU-heavy parsing. Getting it wrong means either no speedup (CPU work on threads under the GIL) or race conditions on shared state. 'Explain the GIL' and 'when would you use multiprocessing?' are near-certain interview questions.",
+  "revision_notes_md": "- The GIL lets one thread execute Python bytecode at a time per process (default CPython build).\n- Blocking I/O (sockets, DB, file) releases the GIL -> threads speed up I/O-bound work.\n- CPU-bound pure Python -> `ProcessPoolExecutor`/multiprocessing (or NumPy/pandas that release the GIL).\n- Python 3.13+ offers an experimental free-threaded build; don't rely on it in production yet.\n- `x += 1` on shared data is not atomic - protect with `threading.Lock`.\n- `queue.Queue` for producer/consumer; `threading.Event` for cooperative cancellation.\n- `ThreadPoolExecutor.map` / `submit` + `as_completed`; exceptions surface on `.result()`.\n- Size DB-using thread pools to the connection pool size.",
+  "exercises_md": "1. Fetch 50 URLs (or a fake `time.sleep(0.2)` function) sequentially, with `ThreadPoolExecutor(10)`, and compute a CPU-heavy function both with threads and `ProcessPoolExecutor`; record the timings and explain them.\n2. Write a counter incremented by 8 threads 100k times each without a lock, then with one; reproduce the lost updates.",
+  "my_context_md": "`AmazonVendorBankRecon/db.py` creates its `ThreadedConnectionPool` with double-checked locking around a `threading.Lock` - a textbook guard against two threads initialising the pool at once. `ForcesightJobSchedulerAndRunner/runner.py` runs claimed jobs on a `ThreadPoolExecutor`, which works well because the jobs are I/O-bound (PostgreSQL); multiprocessing is listed as not used anywhere yet.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "A pool designed for CPU-bound pure-Python work that sidesteps the GIL is concurrent.futures.____.",
+      "answers": [
+        "ProcessPoolExecutor"
+      ],
+      "explanation": "Separate processes each have their own GIL."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The threading primitive typically used to signal a worker thread to stop cooperatively is threading.____.",
+      "answers": [
+        "Event"
+      ],
+      "explanation": "Workers check event.is_set() and exit."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from concurrent.futures import ThreadPoolExecutor\n\ndef work(n):\n    if n == 2:\n        raise ValueError(f\"job {n} failed\")\n    return n * 10\n\nwith ThreadPoolExecutor(max_workers=3) as ex:\n    futures = [ex.submit(work, n) for n in range(4)]\nfor f in futures:\n    try:\n        print(f.result())\n    except ValueError as e:\n        print(\"error:\", e)",
+      "answers": [
+        "0\n10\nerror: job 2 failed\n30"
+      ],
+      "explanation": "Exceptions inside workers are stored on the future and re-raised by .result(); results are read in submission order."
+    },
+    {
+      "type": "debug",
+      "prompt": "Two threads sometimes create two connection pools. Why, and how do you fix it?",
+      "code": "_pool = None\n\ndef get_pool():\n    global _pool\n    if _pool is None:\n        _pool = ThreadedConnectionPool(1, 10, dsn=DSN)\n    return _pool",
+      "answer": "Check-then-act race: both threads can see `_pool is None` before either assigns it. Use a lock, with double-checked locking so the fast path stays lock-free:\n\n```python\nimport threading\n_pool = None\n_lock = threading.Lock()\n\ndef get_pool():\n    global _pool\n    if _pool is None:\n        with _lock:\n            if _pool is None:\n                _pool = ThreadedConnectionPool(1, 10, dsn=DSN)\n    return _pool\n```",
+      "rubric": [
+        "Check-then-act is not atomic across threads",
+        "Guard creation with a threading.Lock",
+        "Re-check inside the lock (double-checked locking)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the GIL and its practical impact on a Python backend.",
+      "answer": "The GIL is a mutex in CPython that allows only one thread at a time to execute Python bytecode, simplifying memory management (reference counting). Threads still help for I/O-bound work because blocking calls (network, DB, disk) release the GIL, so other threads run while one waits. For CPU-bound Python code threads give no speedup; use processes (`ProcessPoolExecutor`), or libraries like NumPy that release the GIL in C code. The GIL doesn't make your code thread-safe: compound operations like `count += 1` can still interleave, so shared state needs locks.",
+      "rubric": [
+        "One thread runs Python bytecode at a time per process",
+        "I/O releases the GIL -> threads fine for I/O-bound",
+        "CPU-bound -> processes; GIL is not a substitute for locks"
+      ]
+    }
+  ]
+}

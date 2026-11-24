@@ -1,0 +1,180 @@
+{
+  "slug": "py-oop-basics",
+  "title": "Classes and objects (OOP basics)",
+  "skill": "python-oop",
+  "extra_skills": [
+    "python"
+  ],
+  "category": "Python",
+  "difficulty": "beginner",
+  "tags": [
+    "class",
+    "__init__",
+    "self",
+    "inheritance",
+    "oop"
+  ],
+  "summary": "A class is a blueprint that bundles data (attributes) and behaviour (methods); an object is one instance of it. This topic explains __init__, self, instance vs class attributes and a first look at inheritance, from zero.",
+  "why_md": "- Most Python libraries and frameworks (FastAPI, SQLAlchemy, Pydantic) expose classes.\n- Classes let you keep related data and behaviour together and model real things like an Order or a Product.\n- Interviews start with class vs object, `self`, inheritance and `super()`.",
+  "details_md": "### Class and object\n```python\nclass Product:\n    def __init__(self, sku, price):\n        self.sku = sku\n        self.price = price\n\n    def with_tax(self, rate=0.18):\n        return round(self.price * (1 + rate), 2)\n\np = Product(\"A1\", 100)\nprint(p.with_tax())      # 118.0\n```\n`Product` is the class (blueprint). `p` is an object (instance) created by calling the class: `Product(\"A1\", 100)`.\n\n### __init__ and self\n`__init__` is the initialiser: Python calls it right after creating the empty object so you can set up attributes. `self` is the instance being worked on; it is the first parameter of every normal method and Python passes it automatically (`p.with_tax()` is `Product.with_tax(p)`). `self.price = price` stores data *on the instance*.\n\n### Instance vs class attributes\nAttributes set on `self` belong to one instance. A variable written directly in the class body is shared by all instances:\n\n```python\nclass Product:\n    currency = \"INR\"       # class attribute (shared)\n```\nReading `p.currency` finds it via the class. Assigning `p.currency = \"USD\"` creates an instance attribute that shadows it, leaving the class value alone.\n\n### Methods\n- Regular methods take `self`.\n- `@classmethod` takes `cls` and is often an alternative constructor: `Product.from_row(row)`.\n- `@staticmethod` takes neither; it is just a function grouped in the class.\n\n### __repr__ and __str__\n`__repr__` returns an unambiguous string for developers (shown in the REPL and logs); `__str__` returns a friendly string used by `print`. Always define `__repr__`.\n\n### Inheritance\nA child class reuses and extends a parent:\n\n```python\nclass Perishable(Product):\n    def __init__(self, sku, price, days):\n        super().__init__(sku, price)\n        self.days = days\n```\n`super()` calls the parent's method. A child can override methods. `isinstance(x, Product)` is True for children too.\n\n### Encapsulation by convention\nPython has no strict private. A leading underscore (`_cache`) means 'internal, please do not touch'.\n\n### Composition over inheritance\nOften an object should *have* another object (an Order has a list of LineItems) rather than *be* one. Prefer composition unless there is a genuine 'is-a' relationship.\n\n### dataclasses\nFor simple data holders, `@dataclass` generates `__init__` and `__repr__` for you (see the dataclasses topic).",
+  "code_md": "```python\n# 1. basic class\nclass Cart:\n    def __init__(self):\n        self.items = []          # per-instance list\n\n    def add(self, sku, qty=1):\n        self.items.append((sku, qty))\n\n    def count(self):\n        return sum(q for _, q in self.items)\n\nc = Cart()\nc.add(\"pen\"); c.add(\"book\", 2)\nprint(c.count())\n```\n\n```python\n# 2. __repr__ and a classmethod constructor\nclass Product:\n    def __init__(self, sku, price):\n        self.sku, self.price = sku, price\n    def __repr__(self):\n        return f\"Product({self.sku!r}, {self.price})\"\n    @classmethod\n    def from_row(cls, row):\n        sku, price = row.split(\",\")\n        return cls(sku, float(price))\n\nprint(Product.from_row(\"A1,99.5\"))\n```\n\n```python\n# 3. inheritance with super()\nclass Perishable(Product):\n    def __init__(self, sku, price, days):\n        super().__init__(sku, price)\n        self.days = days\n\nx = Perishable(\"milk\", 55, 3)\nprint(isinstance(x, Product), x.days)\n```",
+  "use_cases_md": "- Modelling domain objects: `Order`, `Customer`, `Invoice`.\n- A `Repository` class that wraps database access methods.\n- A base `Fetcher` class with subclasses per marketplace API.\n- Custom exception classes that inherit from `Exception`.\n- Alternative constructors like `Order.from_json(payload)`.",
+  "mistakes_md": "- **Forgetting `self`** in a method definition or when accessing attributes (`price` instead of `self.price`).\n- **Shared mutable class attribute**: `items = []` in the class body is shared by all instances; create it in `__init__`.\n- **Forgetting `super().__init__()`** in a subclass, so parent attributes are missing.\n- **Inheritance for code reuse only**: prefer composition.\n- **No `__repr__`**: debugging prints show `<Product object at 0x...>`.",
+  "best_practices_md": "- Keep `__init__` simple: assign attributes, avoid heavy work.\n- Define `__repr__` on every class.\n- Use `@classmethod` for alternative constructors.\n- Prefer composition; keep inheritance hierarchies shallow.\n- Use `@dataclass` for plain data containers.",
+  "my_context_md": "",
+  "revision_notes_md": "- Class = blueprint, instance = object made by `Class(args)`.\n- `__init__(self, ...)` initialises the new instance.\n- `self` is the instance; Python passes it automatically.\n- Instance attrs via `self.x`; class attrs in the class body (shared).\n- Mutable class attribute is shared by all instances.\n- `@classmethod` gets `cls`; `@staticmethod` gets nothing.\n- `super().__init__(...)` calls the parent.\n- Define `__repr__`; prefer composition over inheritance.",
+  "exercises_md": "1. Write a `Product` class with `sku`, `price`, a `with_tax` method and a `__repr__`.\n2. Create a `Cart` class holding items; add `add`, `total` and `__len__`.\n3. Subclass `Product` into `DigitalProduct` with a `download_url`; call `super().__init__`.\n4. Demonstrate the shared mutable class attribute bug, then fix it in `__init__`.",
+  "related": [
+    "py-functions-basics",
+    "py-dunder-methods-protocols",
+    "python-oop-dataclasses",
+    "py-solid-design-principles"
+  ],
+  "flashcards": [
+    {
+      "front": "Class vs instance?",
+      "back": "A class is the blueprint; an instance is an object created from it."
+    },
+    {
+      "front": "What is `self`?",
+      "back": "The instance the method is called on; first parameter of normal methods."
+    },
+    {
+      "front": "What does `__init__` do?",
+      "back": "Initialises a newly created instance (sets attributes)."
+    },
+    {
+      "front": "What does `super()` do?",
+      "back": "Gives access to the parent class's methods, e.g. `super().__init__()`."
+    },
+    {
+      "front": "Class attribute vs instance attribute?",
+      "back": "Class attribute is shared by all instances; instance attribute (self.x) is per object."
+    },
+    {
+      "front": "`@classmethod` use?",
+      "back": "Receives the class as `cls`; typical for alternative constructors."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is `self` in a method?",
+      "options": [
+        "The class itself",
+        "The instance the method is called on",
+        "A reserved keyword",
+        "The parent class"
+      ],
+      "answer_index": 1,
+      "explanation": "Python passes the instance as the first argument."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which creates an instance of `Product`?",
+      "options": [
+        "Product.new()",
+        "new Product()",
+        "Product(\"A1\", 10)",
+        "Product.init(\"A1\", 10)"
+      ],
+      "answer_index": 2,
+      "explanation": "Calling the class creates an instance and runs `__init__`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A subclass defines `__init__` but never calls `super().__init__()`. What is likely?",
+      "options": [
+        "Parent attributes are never set",
+        "Python calls it automatically",
+        "SyntaxError",
+        "The class cannot be instantiated"
+      ],
+      "answer_index": 0,
+      "explanation": "Overriding `__init__` replaces the parent's; without super() its attributes are missing."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A variable defined directly in the class body, shared by all instances, is a ____ attribute.",
+      "answers": [
+        "class"
+      ],
+      "explanation": "As opposed to instance attributes set via self."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The special method named ____ returns the developer-friendly string shown in the REPL and logs.",
+      "answers": [
+        "__repr__",
+        "repr"
+      ],
+      "explanation": "`__repr__` is meant to be unambiguous; `__str__` is the friendly one used by print."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class Cart:\n    def __init__(self):\n        self.items = []\n    def add(self, sku, qty=1):\n        self.items.append((sku, qty))\n    def count(self):\n        return sum(q for _, q in self.items)\n\nc = Cart()\nc.add(\"pen\")\nc.add(\"book\", 2)\nprint(c.count(), len(c.items))\n",
+      "answers": [
+        "3 2"
+      ],
+      "explanation": "Quantities 1 + 2 = 3; two entries."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class A:\n    tags = []\n    def __init__(self, n):\n        self.n = n\n\na, b = A(1), A(2)\na.tags.append(\"x\")\nprint(b.tags, a.n, b.n)\nb.tags = [\"own\"]\nprint(a.tags, b.tags)\n",
+      "answers": [
+        "['x'] 1 2\n['x'] ['own']"
+      ],
+      "explanation": "`tags` is one shared list; assigning b.tags creates an instance attribute that shadows the class one."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "class Product:\n    items = []\n    def __init__(self, sku):\n        sku = sku\n    def add(self, x):\n        items.append(x)\n\np = Product(\"A1\")\nprint(p.sku)\n",
+      "answer": "(1) `sku = sku` only assigns a local; use `self.sku = sku`, otherwise `p.sku` raises AttributeError. (2) `items.append(x)` references a bare name `items` (NameError); use `self.items`. (3) `items = []` in the class body is shared by every instance; initialise `self.items = []` in `__init__`.",
+      "rubric": [
+        "Uses self.sku",
+        "Uses self.items to access attribute",
+        "Notes shared class-level mutable list"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between a class and an object to a beginner.",
+      "answer": "A class is a blueprint that defines what data and behaviour things of a kind will have, like the idea of a 'Product' with a sku and a price. An object (instance) is one concrete thing built from that blueprint: `Product('A1', 100)`. Many objects can exist from one class and each has its own attribute values. Methods are functions defined in the class that operate on a particular instance via `self`.",
+      "rubric": [
+        "Class is the blueprint",
+        "Object is a concrete instance",
+        "Each instance has its own attributes",
+        "Methods work on an instance via self"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When should you prefer composition over inheritance?",
+      "answer": "Inheritance models 'is-a' and tightly couples child to parent; changes in the parent ripple down and deep trees are hard to follow. Composition models 'has-a': an Order holds LineItems or a Fetcher holds an HttpClient. It is more flexible (swap parts, easy to test with fakes). Use inheritance for genuine specialisation or to implement an interface; otherwise compose.",
+      "rubric": [
+        "Inheritance is tight coupling, is-a",
+        "Composition is has-a, flexible and testable"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between `@classmethod`, `@staticmethod` and an instance method?",
+      "difficulty": "easy",
+      "answer_md": "An instance method receives the instance (`self`) and can read or change instance state. A `@classmethod` receives the class (`cls`), so it works with class-level state and is the idiomatic alternative constructor (`Order.from_json(...)`), and it behaves correctly for subclasses. A `@staticmethod` receives neither; it is a plain function namespaced inside the class for organisation. If a method does not use `self` or `cls`, consider a module-level function."
+    },
+    {
+      "question": "What happens when you define a mutable attribute at class level?",
+      "difficulty": "medium",
+      "answer_md": "It is stored once on the class and shared by all instances; mutating it through any instance changes it for all. Reading `obj.items` finds the class attribute through attribute lookup. Assigning `obj.items = [...]` creates an instance attribute that shadows it. Put per-instance mutable state in `__init__` (`self.items = []`).\n\n```python\nclass A:\n    tags = []\na, b = A(), A()\na.tags.append(1)\nprint(b.tags)  # [1]\n```"
+    },
+    {
+      "question": "What does `super()` do and why use it?",
+      "difficulty": "medium",
+      "answer_md": "`super()` returns a proxy that looks up methods on the next class in the MRO (method resolution order), not just 'the parent'. In single inheritance it calls the parent method; in multiple inheritance it ensures each class in the chain is called once in a consistent order (C3 linearisation). Use `super().__init__(...)` in subclasses so parent setup runs and cooperative inheritance works. Inspect the order with `Cls.__mro__`."
+    }
+  ]
+}

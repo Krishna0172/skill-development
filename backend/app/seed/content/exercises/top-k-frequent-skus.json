@@ -1,0 +1,126 @@
+{
+  "slug": "top-k-frequent-skus",
+  "title": "Top K most frequently returned SKUs",
+  "category": "problem-solving",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "dsa",
+  "concepts": [
+    "counting",
+    "sorting with keys",
+    "heaps",
+    "tie-breaking"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "From a returns report you have a list of SKUs, one per returned unit. Merchandising wants the `k` SKUs returned most often.\n\nImplement:\n\n```python\ndef top_k_frequent(skus: list[str], k: int) -> list[str]:\n```\n\nRules:\n- Order the result by frequency, **highest first**.\n- Break ties by SKU in **ascending** (alphabetical) order, so the answer is deterministic.\n- If `k` exceeds the number of distinct SKUs, return all of them.\n- If `k <= 0` or the input is empty, return `[]`.",
+  "examples": [
+    {
+      "input": "skus = ['A', 'B', 'A', 'C', 'B', 'A'], k = 2",
+      "output": "['A', 'B']",
+      "explanation": "A×3, B×2, C×1."
+    },
+    {
+      "input": "skus = ['x', 'y', 'z', 'y', 'x'], k = 2",
+      "output": "['x', 'y']",
+      "explanation": "x and y tie on 2; alphabetical order decides."
+    }
+  ],
+  "hints": [
+    "First count occurrences — `collections.Counter` does this in one line.",
+    "Sort the distinct SKUs with a key that combines both rules. Sorting by `-count` puts the highest counts first.",
+    "`sorted(counts, key=lambda s: (-counts[s], s))[:max(k, 0)]`"
+  ],
+  "starter_code": "from collections import Counter\n\n\ndef top_k_frequent(skus: list[str], k: int) -> list[str]:\n    # your code here\n    ...\n",
+  "solution_code": "from collections import Counter\n\n\ndef top_k_frequent(skus: list[str], k: int) -> list[str]:\n    if k <= 0:\n        return []\n    counts = Counter(skus)\n    return sorted(counts, key=lambda sku: (-counts[sku], sku))[:k]\n",
+  "solution_md": "Count, then sort distinct SKUs by the tuple `(-count, sku)`: Python compares tuples element-wise, so higher counts come first and equal counts fall back to alphabetical order.\n\n- **Time:** O(n + d log d), where d = number of distinct SKUs\n- **Space:** O(d)\n\n**Alternatives**\n- `heapq.nsmallest(k, counts, key=lambda s: (-counts[s], s))` → O(n + d log k); better when d is huge and k is small.\n- **Bucket sort** by frequency → O(n), but you still need to sort within each bucket for the tie-break.\n- `Counter.most_common(k)` is tempting but breaks ties by *first-seen order*, not alphabetically — so it fails the determinism rule.\n\nIn pandas: `df[\"sku\"].value_counts()` then a stable sort on `[count desc, sku asc]`.",
+  "tests": {
+    "function": "top_k_frequent",
+    "cases": [
+      {
+        "args": [
+          [
+            "A",
+            "B",
+            "A",
+            "C",
+            "B",
+            "A"
+          ],
+          2
+        ],
+        "kwargs": {},
+        "expected": [
+          "A",
+          "B"
+        ]
+      },
+      {
+        "args": [
+          [
+            "x",
+            "y",
+            "z",
+            "y",
+            "x"
+          ],
+          2
+        ],
+        "kwargs": {},
+        "expected": [
+          "x",
+          "y"
+        ]
+      },
+      {
+        "args": [
+          [
+            "b",
+            "a",
+            "c"
+          ],
+          2
+        ],
+        "kwargs": {},
+        "expected": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "args": [
+          [
+            "a",
+            "b"
+          ],
+          5
+        ],
+        "kwargs": {},
+        "expected": [
+          "a",
+          "b"
+        ]
+      },
+      {
+        "args": [
+          [],
+          3
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [
+            "a",
+            "a"
+          ],
+          0
+        ],
+        "kwargs": {},
+        "expected": []
+      }
+    ]
+  }
+}

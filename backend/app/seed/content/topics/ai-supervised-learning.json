@@ -1,0 +1,149 @@
+{
+  "slug": "ai-supervised-learning",
+  "title": "Supervised learning: regression, trees and boosting",
+  "skill": "ml-fundamentals",
+  "extra_skills": [],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "linear-regression",
+    "logistic-regression",
+    "decision-trees",
+    "random-forest",
+    "gradient-boosting",
+    "forecasting"
+  ],
+  "summary": "The workhorse supervised algorithms for tabular data — linear and logistic regression, decision trees, random forests and gradient boosting — how each one works intuitively, and how to choose between them for problems like return prediction and demand forecasting.",
+  "why_md": "- Most business ML on tabular data (orders, SKUs, settlements) is solved with these models, not deep learning.\n- Gradient boosting is the default winner on tabular data; logistic regression is the default interpretable baseline.\n- Knowing the inductive bias of each model lets you pick fast and explain results to stakeholders.\n- \"Random forest vs gradient boosting\" and \"why is logistic regression a classifier?\" are standard interview questions.",
+  "details_md": "### Linear regression\nPredicts `y = w·x + b`; fitted by minimising squared error. Fast, interpretable (each weight = effect of one unit of the feature, holding others fixed), but only captures linear relationships unless you engineer features (log price, day-of-week one-hot). Use Ridge (L2) / Lasso (L1) to regularise.\n\n### Logistic regression\nA linear score passed through the **sigmoid** `σ(z) = 1/(1+e^-z)` to give a probability between 0 and 1; trained with log loss. Despite the name, it's a classifier. Great baseline for \"will this order be returned?\" — calibrated probabilities, coefficients you can explain.\n\n### Decision trees\nRecursively split data on the feature/threshold that best separates the target (\"price > 2000 and category = electronics → high return rate\"). Handle non-linearity and interactions, need no scaling, but a single deep tree overfits badly.\n\n### Random forests\nTrain hundreds of deep trees on bootstrap samples with random feature subsets, then **average** them (bagging). Averaging cancels variance. Robust, few hyperparameters, hard to badly overfit; a solid second model.\n\n### Gradient boosting\nBuild shallow trees **sequentially**, each one fitting the residual errors of the ensemble so far, scaled by a learning rate. Implementations: scikit-learn `HistGradientBoostingRegressor/Classifier`, XGBoost, LightGBM, CatBoost. Usually the most accurate on tabular data; handles missing values natively (Hist/XGB/LGBM); needs tuning (learning rate, number of trees, depth) and early stopping.\n\n### Choosing\n| Situation | Start with |\n|---|---|\n| Need explanation / small data | Linear or logistic regression |\n| Strong baseline, little tuning | Random forest |\n| Best accuracy on tabular data | Gradient boosting |\n| Demand forecasting per SKU | Gradient boosting on lag/calendar features, vs a seasonal-naive baseline |\n\nTrees can't **extrapolate**: a tree-based forecaster never predicts above the highest target it saw. For strongly trending sales, model the trend separately or predict ratios/differences.",
+  "code_md": "```python\n# Return prediction: interpretable baseline vs gradient boosting\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.ensemble import HistGradientBoostingClassifier\nfrom sklearn.pipeline import make_pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.metrics import roc_auc_score\n\nlogreg = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))\ngbm = HistGradientBoostingClassifier(learning_rate=0.05, max_iter=500,\n                                     early_stopping=True, random_state=42)\nfor name, model in [(\"logreg\", logreg), (\"gbm\", gbm)]:\n    model.fit(X_train, y_train)\n    p = model.predict_proba(X_test)[:, 1]          # P(returned)\n    print(name, round(roc_auc_score(y_test, p), 3))\n```\n\n```python\n# Demand forecasting as supervised regression with lag features (pandas)\nimport pandas as pd\nfrom sklearn.ensemble import HistGradientBoostingRegressor\n\ndf = df.sort_values([\"sku\", \"week\"])\ng = df.groupby(\"sku\")[\"units\"]\ndf[\"lag_1\"] = g.shift(1)\ndf[\"lag_52\"] = g.shift(52)                       # same week last year\ndf[\"roll_4\"] = g.transform(lambda s: s.shift(1).rolling(4).mean())\ndf[\"weekofyear\"] = df[\"week\"].dt.isocalendar().week.astype(int)\n\ntrain, test = df[df.week < \"2026-07-01\"], df[df.week >= \"2026-07-01\"]   # time split\nfeats = [\"lag_1\", \"lag_52\", \"roll_4\", \"weekofyear\", \"price\"]\nreg = HistGradientBoostingRegressor(random_state=42).fit(train[feats], train[\"units\"])\n```",
+  "use_cases_md": "- **Return prediction** (classification): logistic regression baseline → gradient boosting.\n- **Demand forecasting** (regression): gradient boosting on lags, rolling means, price, promotions, calendar.\n- **Price elasticity** estimates: linear regression on log price vs log units.\n- **Fraud/claim scoring** on settlements: gradient boosting with class weights.\n- **Lead/seller churn**: random forest as a robust first model.",
+  "mistakes_md": "- **Jumping to deep learning** for tabular data — boosting usually wins with far less effort.\n- **Treating logistic regression output as a hard label only** — use the probability and choose a threshold by cost.\n- **Unscaled features with regularised linear models** — penalty hits features unequally.\n- **Expecting trees to extrapolate trends** — they predict within the training range.\n- **Random split on forecasting data** and lag features computed without `shift` — leakage.\n- **Untuned boosting with huge learning rate and no early stopping** — overfits.",
+  "best_practices_md": "- Always train a simple baseline (logistic/linear or seasonal-naive) first.\n- Use `HistGradientBoosting*` / LightGBM for medium-to-large tabular data.\n- Enable early stopping on a validation set for boosting.\n- Explain models with coefficients (linear) or permutation importance / SHAP (trees).\n- For forecasting: time-based split, lags via `groupby().shift()`, compare against last-year-same-week.",
+  "my_context_md": "His repo includes sales-forecasting services; reframing forecasting as supervised regression on lag/rolling/calendar features built with pandas `groupby().shift()` (or SQL window functions like `LAG()` in PostgreSQL) is the standard approach to compare against whatever method they use. `ECSAmazonReviewRatingPostgres` holds reviews and ratings — a natural logistic-regression/boosting classification problem (e.g. predicting low ratings from text n-grams).",
+  "revision_notes_md": "- Linear: `w·x+b`, MSE, interpretable; Ridge/Lasso regularise.\n- Logistic: sigmoid(w·x+b) → probability; log loss; a classifier.\n- Tree: greedy splits; no scaling; overfits alone.\n- Random forest: bagging + random features, averages → low variance.\n- Boosting: sequential trees on residuals; learning rate + early stopping; best on tabular.\n- Trees don't extrapolate.\n- Forecasting = regression on lags + calendar; time split.\n- Baseline first; tabular → boosting before deep learning.",
+  "exercises_md": "1. Train logistic regression and HistGradientBoosting on a return-prediction style dataset; compare ROC-AUC and inspect top logistic coefficients.\n2. Build weekly lag/rolling features per SKU with both pandas `shift` and a PostgreSQL `LAG() OVER (PARTITION BY sku ORDER BY week)` query; assert they match.\n3. Compare a seasonal-naive forecast (same week last year) against gradient boosting on a time-based holdout.\n4. Show tree non-extrapolation: train on y = 2x for x in 0..50 and predict x = 100 with a random forest vs linear regression.",
+  "related": [
+    "ai-ml-fundamentals",
+    "ai-model-training",
+    "ai-model-evaluation",
+    "ai-feature-engineering",
+    "ai-scikit-learn"
+  ],
+  "flashcards": [
+    {
+      "front": "Bagging vs boosting?",
+      "back": "Bagging (random forest): many independent deep trees on bootstrap samples, averaged → reduces variance. Boosting: shallow trees built sequentially on the previous errors → reduces bias."
+    },
+    {
+      "front": "What turns linear regression into logistic regression?",
+      "back": "Passing the linear score through the sigmoid 1/(1+e^-z) to get a probability, and training with log loss."
+    },
+    {
+      "front": "Why can't tree models extrapolate?",
+      "back": "Leaves predict averages of training targets, so predictions never exceed the range seen in training."
+    },
+    {
+      "front": "Default strongest model for tabular data?",
+      "back": "Gradient boosting (HistGradientBoosting, LightGBM, XGBoost, CatBoost)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which statement about random forests vs gradient boosting is correct?",
+      "options": [
+        "Random forests build trees sequentially on residuals",
+        "Gradient boosting averages independent trees trained in parallel",
+        "Random forests average independent trees; boosting adds trees sequentially to correct errors",
+        "Both require feature scaling"
+      ],
+      "answer_index": 2,
+      "explanation": "Bagging = independent + average; boosting = sequential residual fitting. Neither needs scaling."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Sales have grown every month and the test period has higher sales than anything in training. Which model will systematically under-predict?",
+      "options": [
+        "Gradient-boosted trees",
+        "Linear regression with a time trend feature",
+        "A model predicting week-over-week change",
+        "Linear regression on log sales with a trend"
+      ],
+      "answer_index": 0,
+      "explanation": "Tree ensembles predict within the range of training targets, so they cap out on a rising trend."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Logistic regression converts a linear score into a probability using the ____ function.",
+      "answers": [
+        "sigmoid",
+        "logistic"
+      ],
+      "explanation": "σ(z) = 1/(1 + e^(−z))."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Gradient boosting fits each new tree to the ____ (errors) of the current ensemble.",
+      "answers": [
+        "residuals",
+        "residual",
+        "gradients",
+        "negative gradients"
+      ],
+      "explanation": "For squared error, the negative gradient is exactly the residual."
+    },
+    {
+      "type": "output",
+      "prompt": "Logistic regression scoring by hand: what does this print?",
+      "code": "import math\nw = {\"price_k\": 0.4, \"past_returns\": 1.2}\nb = -3.0\norder = {\"price_k\": 5.0, \"past_returns\": 1}\nz = b + sum(w[k] * order[k] for k in w)\np = 1 / (1 + math.exp(-z))\nprint(round(z, 2), round(p, 3), p >= 0.5)",
+      "answers": [
+        "0.2 0.55 True"
+      ],
+      "explanation": "z = -3 + 2.0 + 1.2 = 0.2; sigmoid(0.2) ≈ 0.550 → above the 0.5 threshold."
+    },
+    {
+      "type": "output",
+      "prompt": "Two rounds of boosting with a constant 'tree' on residuals. What does this print?",
+      "code": "y = [10, 12, 20]\npred = [sum(y) / len(y)] * 3       # start from the mean\nlr = 0.5\nfor _ in range(2):\n    resid = [t - p for t, p in zip(y, pred)]\n    # stump: predict resid of the last item separately from the rest\n    fit = [sum(resid[:2]) / 2] * 2 + [resid[2]]\n    pred = [p + lr * f for p, f in zip(pred, fit)]\nprint([round(p, 2) for p in pred])",
+      "answers": [
+        "[11.75, 11.75, 18.5]"
+      ],
+      "explanation": "Start at the mean 14. Round 1: residuals [-4,-2,6] → stump [-3,-3,6] → pred [12.5,12.5,17]. Round 2: residuals [-2.5,-0.5,3] → stump [-1.5,-1.5,3] → [11.75,11.75,18.5]. Each round moves predictions a learning-rate step toward fitting the residuals."
+    },
+    {
+      "type": "debug",
+      "prompt": "This forecasting model looks amazing in validation but fails live. Find the bug.",
+      "code": "df = df.sort_values([\"sku\", \"week\"])\ndf[\"roll_4\"] = df.groupby(\"sku\")[\"units\"].transform(lambda s: s.rolling(4).mean())\ntrain, test = train_test_split(df, test_size=0.2, random_state=42)\nmodel.fit(train[[\"roll_4\", \"price\"]], train[\"units\"])",
+      "answer": "Two leaks: (1) the rolling mean includes the **current** week's units (the target) — shift first: `s.shift(1).rolling(4).mean()`; (2) a **random** split mixes future weeks into training. Fix:\n\n```python\ndf[\"roll_4\"] = df.groupby(\"sku\")[\"units\"].transform(lambda s: s.shift(1).rolling(4).mean())\ncutoff = \"2026-07-01\"\ntrain, test = df[df.week < cutoff], df[df.week >= cutoff]\n```",
+      "rubric": [
+        "Rolling feature includes the current target — needs shift(1)",
+        "Random split on time series leaks the future — use a time cutoff",
+        "Features must use only information available at prediction time"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "A product manager asks which model to use to predict returns. Explain your choice and plan.",
+      "answer": "Start with **logistic regression** in a Pipeline (scaled numerics, one-hot categories): it's fast, gives calibrated probabilities, and coefficients explain drivers (\"electronics above ₹5k with prior returns\"). Measure ROC-AUC / precision at the review budget versus a simple rule baseline. Then try **gradient boosting** (HistGradientBoosting/LightGBM), which captures non-linear effects and interactions and usually wins on tabular data; tune with early stopping. Keep it if the lift justifies the loss of simple explanations; explain it with permutation importance or SHAP. Use the predicted probability with a threshold chosen by cost (QC check cost vs return cost), not a default 0.5.",
+      "rubric": [
+        "Interpretable baseline first (logistic regression)",
+        "Gradient boosting as stronger tabular model",
+        "Compare on a proper metric vs baseline and choose threshold by cost",
+        "Mentions explainability trade-off"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain how gradient boosting works.",
+      "difficulty": "medium",
+      "answer_md": "Gradient boosting builds an additive model of many small trees, one at a time:\n\n1. Start with a constant prediction (mean of y, or log-odds for classification).\n2. Compute the **negative gradient of the loss** for each example — for squared error this is just the residual `y − ŷ`.\n3. Fit a shallow tree (depth 3-8) to those residuals.\n4. Add it to the ensemble scaled by a **learning rate** (e.g. 0.05): `ŷ += lr · tree(x)`.\n5. Repeat for hundreds/thousands of rounds, using **early stopping** on a validation set.\n\nSmall learning rate + many trees generalises better. Key hyperparameters: learning rate, number of trees, depth/leaves, min samples per leaf, subsampling. Libraries: XGBoost, LightGBM, CatBoost, scikit-learn HistGradientBoosting (histogram binning makes it fast and NaN-aware)."
+    },
+    {
+      "question": "How would you frame SKU demand forecasting as a supervised learning problem?",
+      "difficulty": "hard",
+      "answer_md": "- **Row** = (SKU, week); **target** = units sold that week (or next week, depending on the forecast horizon).\n- **Features** known at forecast time: lags (`units` 1, 2, 4, 52 weeks ago), rolling means/std shifted by the horizon, planned price and promotion flags, calendar (week of year, festival flags like Diwali), SKU attributes (category, brand), marketplace.\n- Build lags with `groupby('sku').shift()` or SQL `LAG() OVER (PARTITION BY sku ORDER BY week)`.\n- **Split by time**; validate with rolling-origin backtests (train up to week t, predict t+1..t+h, slide).\n- **Baselines**: last value, seasonal naive (same week last year), moving average.\n- **Model**: one global gradient boosting model across all SKUs (shares patterns, handles cold-ish SKUs better than per-SKU models). Consider predicting `log1p(units)`.\n- **Metric**: WAPE/MAE per category; watch zero-demand SKUs (MAPE breaks)."
+    }
+  ]
+}

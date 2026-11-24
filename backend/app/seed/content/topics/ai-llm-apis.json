@@ -1,0 +1,152 @@
+{
+  "slug": "ai-llm-apis",
+  "title": "Calling LLM APIs: requests, streaming, retries, providers",
+  "skill": "llm-applications",
+  "extra_skills": [
+    "api-integration",
+    "python-asyncio"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "chat-completions",
+    "streaming",
+    "rate-limits",
+    "retries",
+    "ollama",
+    "openai-compatible"
+  ],
+  "summary": "LLM providers expose an HTTP chat API: you send a model id, a list of role-tagged messages and sampling parameters; you get back choices, a finish reason and token usage. Production calls need timeouts, retries with backoff on 429/5xx, streaming for responsiveness, and a thin provider abstraction so you can swap hosted models for a local Ollama server.",
+  "why_md": "- This is plain API integration - the skill you already use for marketplace APIs - applied to a new, slow, rate-limited, metered service.\n- Streaming changes perceived latency from many seconds to near-instant first tokens in a chat UI.\n- Usage fields in the response are what per-org cost tracking is built on.\n- Interviews: 'how do you handle rate limits and timeouts for LLM calls?', 'how would you avoid vendor lock-in?'",
+  "details_md": "### Request and response shape\nThe OpenAI-compatible chat API has become a de facto standard; many providers and local servers (Ollama, vLLM, LM Studio) implement it. A request is `POST /v1/chat/completions` with `model`, `messages` (`role` + `content`), and optional `temperature`, `max_tokens`, `stop`, `tools`, `response_format`, `stream`. The response holds `choices[0].message.content`, `choices[0].finish_reason` (`stop`, `length` when cut off by `max_tokens`, `tool_calls`, or a content filter reason) and `usage` (`prompt_tokens`, `completion_tokens`, `total_tokens`). Always check `finish_reason`: `length` means a truncated, possibly unparseable answer.\n\nThe API is **stateless**: the server remembers nothing between calls, so you resend the conversation history each time. That history is what your sessions/messages tables store.\n\n### Streaming\nWith `stream=True` the server sends Server-Sent Events; each chunk has `choices[0].delta.content` with a few tokens, and the stream ends with `data: [DONE]`. Your backend forwards chunks to the client (SSE from FastAPI/Flask) and accumulates the full text to save afterwards. Usage may only arrive in the final chunk or require an option - check provider docs.\n\n### Failures to design for\n- **429 rate limits**: limits are typically per minute on requests and tokens. Honour `Retry-After` and rate-limit headers, back off exponentially with jitter, and pace concurrent workers.\n- **5xx/overloaded and timeouts**: generation can take tens of seconds; set explicit connect/read timeouts and a total deadline. Retry idempotent calls only a few times.\n- **4xx (bad request, context too long, auth)**: don't retry; fix the input.\nSDKs often have built-in retries (`max_retries`, `timeout` on the client) - know what they do so you don't stack retries.\n\n### Provider abstraction\nWrap calls in your own small interface (`complete(messages, **params) -> Result(text, usage, model)`), keep model ids in config, and normalise errors. That lets you switch provider, route cheap tasks to small models, or run locally. Look up model ids, prices and limits in each provider's docs/console; they change often.\n\n### Local models with Ollama\nOllama runs open-weight models on your machine and serves an OpenAI-compatible endpoint at `http://localhost:11434/v1`. Point the same client at it with any non-empty API key. Great for development, privacy-sensitive data and offline tests; quality and speed depend on model size and your hardware.\n",
+  "code_md": "```python\n# One client interface, hosted or local, with timeouts and retries configured\nimport os\nfrom dataclasses import dataclass\nfrom openai import OpenAI, APIStatusError, APITimeoutError\n\n@dataclass\nclass LLMResult:\n    text: str\n    finish_reason: str\n    prompt_tokens: int\n    completion_tokens: int\n    model: str\n\ndef make_client() -> OpenAI:\n    if os.getenv(\"LLM_BACKEND\") == \"ollama\":\n        return OpenAI(base_url=\"http://localhost:11434/v1\", api_key=\"ollama\", timeout=120, max_retries=0)\n    return OpenAI(api_key=os.environ[\"LLM_API_KEY\"], timeout=60, max_retries=2)  # SDK retries 429/5xx\n\ndef complete(client: OpenAI, model: str, messages: list[dict], **params) -> LLMResult:\n    r = client.chat.completions.create(model=model, messages=messages, **params)\n    c = r.choices[0]\n    if c.finish_reason == \"length\":\n        raise ValueError(\"truncated: raise max_tokens or shorten the prompt\")\n    return LLMResult(c.message.content or \"\", c.finish_reason,\n                     r.usage.prompt_tokens, r.usage.completion_tokens, r.model)\n```\n\n```python\n# Streaming: forward tokens as they arrive, keep the full text to store in history\ndef stream_answer(client, model, messages):\n    parts = []\n    stream = client.chat.completions.create(model=model, messages=messages, stream=True)\n    for chunk in stream:\n        if not chunk.choices:             # some providers send a final usage-only chunk\n            continue\n        delta = chunk.choices[0].delta.content or \"\"\n        parts.append(delta)\n        yield delta                       # e.g. wrap as SSE 'data: ...' in your web layer\n    save_assistant_message(\"\".join(parts))\n```",
+  "use_cases_md": "- Chat backend: resend session history per call, stream the reply, store message + usage.\n- Batch jobs (summarising thousands of reviews) with a concurrency cap and token-per-minute pacing.\n- Routing: small/local model for classification, larger hosted model for text-to-SQL.\n- Local Ollama for dev and CI so tests don't burn API credit.",
+  "mistakes_md": "- **No timeout** - a hung generation ties up a worker indefinitely.\n- **Retrying 400s** (context too long, invalid params) - they'll fail every time.\n- **Stacking retries** - your own loop around an SDK that already retries multiplies attempts.\n- **Ignoring `finish_reason == 'length'`** - storing or parsing a truncated answer.\n- **Assuming the API remembers the conversation** - it's stateless; send history.\n- **Hard-coding model ids and keys** in handlers.",
+  "best_practices_md": "- Explicit timeouts + bounded retries with exponential backoff and jitter; respect `Retry-After`.\n- Cap concurrency (semaphore) to stay within requests/tokens per minute.\n- Log model, usage, latency, finish_reason, request id per call.\n- Thin provider interface; model ids and base URLs in config.\n- Stream user-facing responses; non-streaming for background jobs.\n- Use Ollama locally for development and privacy-sensitive experiments.",
+  "my_context_md": "`ECSInventoryPriceTracking/app/fetchers/spapi.py` is the template: an async httpx client with token refresh, an `asyncio.Lock` for request pacing and reading rate-limit headers. An LLM client needs the same things - pacing, header-aware backoff, timeouts - plus streaming. `GetLlmData` already stores sessions, history and per-org cost; the `usage` block in each response is the input to that cost tracking.",
+  "revision_notes_md": "- POST /v1/chat/completions: model, messages, temperature, max_tokens, stream, tools, response_format.\n- Response: choices[0].message.content, finish_reason, usage.{prompt,completion}_tokens.\n- finish_reason 'length' = truncated.\n- Stateless: resend history every call.\n- Streaming: SSE chunks with delta.content, ends with [DONE].\n- Retry 429/5xx/timeouts with backoff+jitter; never 4xx validation errors.\n- Know SDK retry defaults; don't stack retries.\n- Ollama: http://localhost:11434/v1, any api_key.",
+  "exercises_md": "1. Install Ollama, pull a small model, and call it with the `openai` client via `base_url`; print usage and finish_reason.\n2. Build `complete()` behind a Protocol with two implementations (hosted, local) chosen by env var.\n3. Write an async batch summariser for 500 review texts using httpx/AsyncOpenAI with a semaphore of 5 and backoff on 429.\n4. Add a streaming endpoint (FastAPI or Flask) that forwards deltas as SSE and saves the full message at the end.",
+  "related": [
+    "retries-backoff-idempotency",
+    "server-sent-events",
+    "python-asyncio",
+    "ai-context-tokens-cost",
+    "ai-structured-outputs",
+    "ai-serving-fastapi"
+  ],
+  "flashcards": [
+    {
+      "front": "Where is the generated text in an OpenAI-compatible response?",
+      "back": "response.choices[0].message.content (streaming: chunk.choices[0].delta.content)."
+    },
+    {
+      "front": "What does finish_reason 'length' mean?",
+      "back": "Generation stopped at max_tokens - the answer is truncated."
+    },
+    {
+      "front": "Which errors should you retry?",
+      "back": "429, 5xx/overloaded, timeouts/connection errors - with backoff, jitter and Retry-After. Not 400/401/422."
+    },
+    {
+      "front": "How do you call a local Ollama model with the OpenAI SDK?",
+      "back": "OpenAI(base_url='http://localhost:11434/v1', api_key='ollama') - the key is required by the SDK but ignored."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A chat completion returns finish_reason = 'length'. What happened?",
+      "options": [
+        "The model refused",
+        "The request was rate-limited",
+        "The model called a tool",
+        "Output was cut off at max_tokens"
+      ],
+      "answer_index": 3,
+      "explanation": "'length' means the token limit stopped generation; the text is incomplete."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which response should NOT be retried automatically?",
+      "options": [
+        "400 error: context length exceeded",
+        "503 Service Unavailable",
+        "Read timeout",
+        "429 Too Many Requests"
+      ],
+      "answer_index": 0,
+      "explanation": "A context-length error is deterministic; retrying sends the same too-long input. Shorten or truncate instead."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Because chat APIs are ____, the client must resend the conversation history with every request.",
+      "answers": [
+        "stateless",
+        "state-less"
+      ],
+      "explanation": "The server keeps no session state between calls."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "With stream=True, each chunk's new text is in choices[0].____.content.",
+      "answers": [
+        "delta"
+      ],
+      "explanation": "Streaming chunks carry a delta, not a full message."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (parsing SSE stream lines)",
+      "code": "import json\n\nlines = [\n    'data: {\"choices\": [{\"delta\": {\"role\": \"assistant\"}}]}',\n    'data: {\"choices\": [{\"delta\": {\"content\": \"SELECT \"}}]}',\n    '',\n    'data: {\"choices\": [{\"delta\": {\"content\": \"1\"}, \"finish_reason\": \"stop\"}]}',\n    'data: [DONE]',\n]\ntext, reason = [], None\nfor line in lines:\n    if not line.startswith(\"data: \"):\n        continue\n    payload = line[len(\"data: \"):]\n    if payload == \"[DONE]\":\n        break\n    choice = json.loads(payload)[\"choices\"][0]\n    text.append(choice[\"delta\"].get(\"content\", \"\"))\n    reason = choice.get(\"finish_reason\") or reason\nprint(repr(\"\".join(text)), reason)",
+      "answers": [
+        "'SELECT 1' stop"
+      ],
+      "explanation": "The first chunk only sets the role (no content), the blank line is skipped, content pieces join to 'SELECT 1', finish_reason comes from the last chunk, and [DONE] ends the loop."
+    },
+    {
+      "type": "debug",
+      "prompt": "This batch job over 2,000 reviews gets lots of 429s, sometimes hangs forever, and occasionally makes 9 attempts for one call. What's wrong and how do you fix it?",
+      "code": "client = OpenAI(api_key=KEY)          # SDK defaults\n\ndef summarise(text):\n    for attempt in range(3):\n        try:\n            return client.chat.completions.create(model=M, messages=[...])\n        except Exception:\n            continue\n\nwith ThreadPoolExecutor(max_workers=64) as pool:\n    results = list(pool.map(summarise, reviews))",
+      "answer": "- 64 concurrent workers blow through requests/tokens-per-minute limits -> 429 storm.\n- Retries with no backoff/jitter hit the limit again immediately; broad `except Exception` also retries non-retryable errors and silently returns None.\n- Own loop x SDK internal retries = multiplied attempts.\n- No explicit timeout.\n\n```python\nclient = OpenAI(api_key=KEY, timeout=60, max_retries=0)  # one retry layer: ours\nRETRYABLE = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)\n\ndef summarise(text):\n    for attempt in range(5):\n        try:\n            return client.chat.completions.create(model=M, messages=[...])\n        except RETRYABLE as e:\n            if attempt == 4:\n                raise\n            time.sleep(min(30, 2 ** attempt) * random.uniform(0.5, 1.5))\n\nwith ThreadPoolExecutor(max_workers=4) as pool:   # sized to rate limits\n    ...\n```",
+      "rubric": [
+        "Concurrency too high for rate limits",
+        "Need backoff with jitter and only retry transient errors",
+        "Avoid stacking SDK and manual retries",
+        "Set an explicit timeout"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd structure an LLM client layer so the app can switch between a hosted provider and a local Ollama model.",
+      "answer": "Define a small interface, e.g. `complete(messages, **params) -> LLMResult(text, finish_reason, usage, model)` and `stream(...)`. Implementations hold provider specifics: base URL, auth, model id mapping, error normalisation (map provider exceptions to your own `RateLimited`, `Timeout`, `BadRequest`). Because Ollama and many providers expose the OpenAI-compatible API, one implementation often covers both by changing `base_url`, key and model id from config. Business code depends only on the interface, so tests can inject a fake, dev/CI can use local models, and routing (cheap model for classification) is a config change.",
+      "rubric": [
+        "Own interface returning normalised result/usage",
+        "Provider specifics and model ids in config/implementations",
+        "Normalise errors",
+        "Enables fakes in tests and local dev via Ollama"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why stream responses in a chat UI but not in a nightly batch job?",
+      "answer": "Streaming reduces time-to-first-token: users see text after a fraction of a second instead of waiting for the full generation. The backend forwards deltas via SSE and saves the joined text at the end. A batch job has no user waiting; non-streaming is simpler (one response, usage included, easier retries and parsing), so streaming adds complexity for no benefit.",
+      "rubric": [
+        "Streaming improves perceived latency (time to first token)",
+        "Batch jobs prefer simpler non-streaming calls",
+        "Backend must accumulate streamed text for storage"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you handle rate limits when calling an LLM API from many workers?",
+      "difficulty": "medium",
+      "answer_md": "Limits are usually on requests per minute and tokens per minute per key/org. Approach:\n- **Cap concurrency** with a semaphore or worker pool sized to the limit; for token limits, estimate tokens per request and use a token-bucket pacer.\n- **Read headers**: many providers return remaining requests/tokens and reset times, and `Retry-After` on 429. Slow down proactively when remaining is low.\n- **Retry** 429/5xx/timeouts with exponential backoff and jitter, bounded attempts, single retry layer (know the SDK's `max_retries`).\n- **Queue** background work (job table / queue) so spikes are smoothed rather than retried.\n\nThis mirrors an SP-API client with a pacing lock that reads rate-limit headers: the same pattern, applied to a metered LLM endpoint."
+    },
+    {
+      "question": "What does a chat completion response contain and what do you persist?",
+      "difficulty": "easy",
+      "answer_md": "`id`, `model` (the exact version that served the call), `choices` - each with `message` (`role`, `content`, possibly `tool_calls`) and `finish_reason` - and `usage` with prompt/completion/total tokens.\n\nPersist: session id, the assistant message content, model, finish_reason, prompt and completion tokens, computed cost, latency, prompt template version, request id, and any tool calls. That supports conversation replay (the API is stateless, so history must come from your DB), per-org cost reporting, debugging truncation (`length`) and comparing quality across model or prompt versions."
+    }
+  ],
+  "category": "AI"
+}

@@ -1,0 +1,249 @@
+{
+  "slug": "merge-sorted-records-by-key",
+  "title": "Merge two sorted record lists by key",
+  "category": "python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "python",
+  "concepts": [
+    "two pointers",
+    "merge step",
+    "stability"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "You pull settlement lines from two sources (say, the marketplace API and a manually uploaded CSV). Each source is **already sorted ascending** by some key (e.g. `\"settled_at\"` or `\"amount\"`). You need one combined, sorted list for reconciliation.\n\nImplement:\n\n```python\ndef merge_sorted_by_key(left: list[dict], right: list[dict], key: str) -> list[dict]:\n```\n\nRules:\n- Both inputs are sorted ascending by `record[key]`; the output must be too.\n- **Stability:** when a record from `left` and one from `right` have equal keys, the `left` record comes first. Records from the same list keep their relative order.\n- Aim for O(len(left) + len(right)) — don't re-sort everything.\n- Don't modify the input lists.",
+  "examples": [
+    {
+      "input": "left = [{'id': 1}, {'id': 4}], right = [{'id': 2}, {'id': 3}, {'id': 5}], key = 'id'",
+      "output": "[{'id': 1}, {'id': 2}, {'id': 3}, {'id': 4}, {'id': 5}]"
+    },
+    {
+      "input": "left = [{'ts': 1, 'src': 'L'}], right = [{'ts': 1, 'src': 'R'}], key = 'ts'",
+      "output": "[{'ts': 1, 'src': 'L'}, {'ts': 1, 'src': 'R'}]",
+      "explanation": "Tie → left first."
+    }
+  ],
+  "hints": [
+    "This is the merge step from merge sort.",
+    "Keep an index into each list. Repeatedly take the smaller head; on a tie, take from `left`.",
+    "Use `<=` when comparing `left[i][key] <= right[j][key]` to get the stability rule, then append whatever remains in either list with `extend`."
+  ],
+  "starter_code": "def merge_sorted_by_key(left: list[dict], right: list[dict], key: str) -> list[dict]:\n    # your code here\n    ...\n",
+  "solution_code": "def merge_sorted_by_key(left: list[dict], right: list[dict], key: str) -> list[dict]:\n    merged = []\n    i = j = 0\n    while i < len(left) and j < len(right):\n        if left[i][key] <= right[j][key]:\n            merged.append(left[i])\n            i += 1\n        else:\n            merged.append(right[j])\n            j += 1\n    merged.extend(left[i:])\n    merged.extend(right[j:])\n    return merged\n",
+  "solution_md": "Classic two-pointer merge. Comparing with `<=` (not `<`) means that on equal keys we take from `left` first, which is exactly the stability requirement.\n\n- **Time:** O(n + m)\n- **Space:** O(n + m) for the output\n\n**Alternatives**\n- `sorted(left + right, key=lambda r: r[key])` also gives the right answer (Timsort is stable and detects the two pre-sorted runs, so it's close to linear in practice) — perfectly fine in production, but the exercise is about the merge itself.\n- `heapq.merge(left, right, key=lambda r: r[key])` is the lazy, k-way version and is also stable — great when merging many sorted files or DB cursors without loading them all.",
+  "tests": {
+    "function": "merge_sorted_by_key",
+    "cases": [
+      {
+        "args": [
+          [
+            {
+              "id": 1,
+              "src": "L"
+            },
+            {
+              "id": 4,
+              "src": "L"
+            }
+          ],
+          [
+            {
+              "id": 2,
+              "src": "R"
+            },
+            {
+              "id": 3,
+              "src": "R"
+            },
+            {
+              "id": 5,
+              "src": "R"
+            }
+          ],
+          "id"
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "id": 1,
+            "src": "L"
+          },
+          {
+            "id": 2,
+            "src": "R"
+          },
+          {
+            "id": 3,
+            "src": "R"
+          },
+          {
+            "id": 4,
+            "src": "L"
+          },
+          {
+            "id": 5,
+            "src": "R"
+          }
+        ]
+      },
+      {
+        "args": [
+          [
+            {
+              "ts": 1,
+              "src": "L"
+            },
+            {
+              "ts": 2,
+              "src": "L"
+            }
+          ],
+          [
+            {
+              "ts": 1,
+              "src": "R"
+            },
+            {
+              "ts": 2,
+              "src": "R"
+            }
+          ],
+          "ts"
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "ts": 1,
+            "src": "L"
+          },
+          {
+            "ts": 1,
+            "src": "R"
+          },
+          {
+            "ts": 2,
+            "src": "L"
+          },
+          {
+            "ts": 2,
+            "src": "R"
+          }
+        ]
+      },
+      {
+        "args": [
+          [],
+          [
+            {
+              "id": 1
+            },
+            {
+              "id": 2
+            }
+          ],
+          "id"
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "id": 1
+          },
+          {
+            "id": 2
+          }
+        ]
+      },
+      {
+        "args": [
+          [],
+          [],
+          "id"
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [
+            {
+              "d": "2024-01-03",
+              "n": 1
+            }
+          ],
+          [
+            {
+              "d": "2024-01-01",
+              "n": 2
+            },
+            {
+              "d": "2024-01-02",
+              "n": 3
+            }
+          ],
+          "d"
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "d": "2024-01-01",
+            "n": 2
+          },
+          {
+            "d": "2024-01-02",
+            "n": 3
+          },
+          {
+            "d": "2024-01-03",
+            "n": 1
+          }
+        ]
+      },
+      {
+        "args": [
+          [
+            {
+              "amount": -50.5,
+              "ref": "R1"
+            },
+            {
+              "amount": 10,
+              "ref": "S1"
+            }
+          ],
+          [
+            {
+              "amount": -50.5,
+              "ref": "R2"
+            },
+            {
+              "amount": 0,
+              "ref": "S2"
+            }
+          ],
+          "amount"
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "amount": -50.5,
+            "ref": "R1"
+          },
+          {
+            "amount": -50.5,
+            "ref": "R2"
+          },
+          {
+            "amount": 0,
+            "ref": "S2"
+          },
+          {
+            "amount": 10,
+            "ref": "S1"
+          }
+        ]
+      }
+    ]
+  }
+}

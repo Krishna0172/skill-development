@@ -1,0 +1,120 @@
+{
+  "slug": "git-workflow",
+  "title": "Git Workflow",
+  "skill": "git",
+  "extra_skills": [
+    "github"
+  ],
+  "category": "Tools",
+  "difficulty": "intermediate",
+  "tags": [
+    "git",
+    "branching",
+    "rebase",
+    "merge",
+    "pull-requests",
+    "version-control"
+  ],
+  "summary": "Git tracks snapshots of your project as commits linked into a history. A good everyday workflow: create a short-lived branch per change, commit small logical steps with clear messages, keep the branch up to date with main (rebase or merge), open a pull request for review, then merge. Know how to undo safely: `restore`, `revert`, `reset`, and `reflog` to recover almost anything.",
+  "details_md": "### The model\n- A **commit** is a snapshot of the whole tree plus metadata and parent pointer(s), identified by a hash.\n- A **branch** is just a movable pointer to a commit; `HEAD` points to the current branch.\n- Three areas: **working tree** (files on disk) -> `git add` -> **index/staging area** -> `git commit` -> **repository**.\n- Remotes (`origin`) are other copies; `fetch` downloads, `pull` = fetch + merge (or rebase), `push` uploads.\n\n### Modern commands\nGit 2.23+ split the overloaded `checkout`:\n- `git switch <branch>` / `git switch -c <new>` - change branches.\n- `git restore <file>` - discard working-tree changes; `git restore --staged <file>` - unstage.\n\n### A trunk-based / GitHub-flow workflow\n1. `git switch main && git pull --ff-only`\n2. `git switch -c feat/upload-retry`\n3. Small commits (`git add -p` to stage hunks selectively).\n4. Sync with main regularly: `git fetch && git rebase origin/main` (or merge).\n5. `git push -u origin feat/upload-retry`, open a PR, CI runs tests, reviewer approves.\n6. Merge (squash or merge commit, per team policy), delete the branch.\nKeep branches short-lived (days, not weeks) to avoid painful conflicts. Long-lived \"develop/release\" branches (Git Flow) suit versioned products more than continuously deployed services.\n\n### Merge vs rebase\n- **Merge** joins histories with a merge commit; non-destructive, preserves exactly what happened.\n- **Rebase** replays your commits on top of another base, producing a linear history with **new commit hashes**. Golden rule: don't rebase commits others have already pulled. After rebasing a pushed branch of your own, push with `git push --force-with-lease` (refuses if the remote moved unexpectedly), ideally plus `--force-if-includes`.\n- `git rebase -i` lets you squash, reorder, reword and drop commits before review (interactive editor). `git commit --fixup <sha>` + `git rebase -i --autosquash` is a tidy way to amend earlier commits.\n\n### Undoing things\n| Situation | Command |\n|---|---|\n| Discard local edits to a file | `git restore file` |\n| Unstage | `git restore --staged file` |\n| Fix the last commit (not pushed) | `git commit --amend` |\n| Undo a pushed commit safely | `git revert <sha>` (new inverse commit) |\n| Move branch back, keep changes | `git reset --soft HEAD~1` |\n| Throw away commits and changes | `git reset --hard <sha>` (dangerous) |\n| \"I lost a commit\" | `git reflog`, then `git switch -c rescue <sha>` |\n\n### Other daily tools\n- `git stash push -m \"wip\"` / `git stash pop` - shelve work in progress.\n- `git log --oneline --graph --decorate --all` - visualise history.\n- `git diff`, `git diff --staged`, `git show <sha>`.\n- `git blame -w -C file` / `git log -S \"text\"` (pickaxe) - find when code changed.\n- `git bisect` - binary-search the commit that introduced a bug.\n- `git cherry-pick <sha>` - apply one commit elsewhere (e.g. hotfix).\n- `git worktree add ../hotfix main` - a second checkout without stashing.\n\n### Commit hygiene\nMessages: short imperative subject (~50 chars) - \"Add deadlock retry to orders upsert\" - blank line, then *why*. Many teams use Conventional Commits (`feat:`, `fix:`). Never commit secrets (`.env`, keys): use `.gitignore`, and if one leaks, **rotate it** - removing it from history is not enough.\n\n### Resolving conflicts\nGit marks conflicting hunks with `<<<<<<<`, `=======`, `>>>>>>>`. Edit to the correct result, `git add` the file, then `git rebase --continue` or `git commit`. `git config --global rerere.enabled true` remembers resolutions for repeated conflicts.",
+  "code_md": "```bash\n# Everyday feature-branch flow\ngit switch main\ngit pull --ff-only                       # fast-forward only: no surprise merge commits\ngit switch -c fix/orders-deadlock-retry\n\ngit add -p                               # stage selected hunks interactively\ngit commit -m \"Retry orders upsert on deadlock with jittered backoff\"\n\ngit fetch origin\ngit rebase origin/main                   # replay my commits on latest main\n# resolve conflicts if any:  edit files -> git add <file> -> git rebase --continue\n\ngit push -u origin fix/orders-deadlock-retry\n# after rebasing an already-pushed branch (your own branch only):\ngit push --force-with-lease --force-if-includes\n```\n\n```bash\n# Undo toolbox\ngit restore app/helper.py                # discard unstaged edits\ngit restore --staged app/helper.py       # unstage, keep edits\ngit commit --amend --no-edit             # add staged changes to last (unpushed) commit\ngit revert 3f2c1ab                       # undo a pushed commit with a new commit\ngit reset --soft HEAD~2                  # un-commit last 2 commits, keep changes staged\ngit reflog                               # history of where HEAD has been\ngit switch -c rescue HEAD@{3}            # recover a \"lost\" commit\n```\n\n```bash\n# Clean up commits before review\ngit commit --fixup 9a1b2c3               # mark a fix for an earlier commit\ngit rebase -i --autosquash origin/main   # folds fixups automatically\n\n# Find the commit that introduced a bug\ngit bisect start\ngit bisect bad                           # current commit is broken\ngit bisect good v1.4.0                   # this tag was fine\n# test each checkout, then mark: git bisect good | git bisect bad\ngit bisect reset\n```\n\n```bash\n# Useful config and inspection\ngit config --global init.defaultBranch main\ngit config --global pull.ff only\ngit config --global rerere.enabled true\ngit log --oneline --graph --decorate -20\ngit log -S \"ON CONFLICT\" -- app/          # commits that added/removed this text\ngit stash push -m \"wip: parser\" && git stash list && git stash pop\n```\n\n```gitignore\n# .gitignore for a Python project\n.venv/\n__pycache__/\n*.pyc\n.env\n*.log\n.pytest_cache/\n```",
+  "use_cases_md": "- Isolating features/fixes on branches and integrating via pull requests with CI.\n- Hotfixing production: branch from the deployed tag, fix, cherry-pick to main.\n- Finding regressions with `bisect` and understanding code history with `log -S`/`blame`.\n- Recovering from mistakes (bad reset, deleted branch) with `reflog`.\n- Keeping review-friendly history with interactive rebase and fixup commits.",
+  "mistakes_md": "- **Rebasing/force-pushing shared branches** - rewrites history under teammates. Fix: only rebase your own branches; use `--force-with-lease`, never plain `--force`, on shared remotes.\n- **Committing secrets** - they stay in history and forks. Fix: `.gitignore` + secret scanning; if leaked, rotate immediately.\n- **Giant mixed commits** (\"misc fixes\"). Fix: small logical commits; `git add -p`.\n- **Long-lived branches** that drift from main - massive conflicts. Fix: merge small PRs often; sync with main daily.\n- **`git reset --hard` with uncommitted work** - unrecoverable (uncommitted changes aren't in reflog). Fix: `git stash` first or commit WIP.\n- **Using `git pull` blindly** - creates accidental merge commits. Fix: `pull --ff-only` or `pull --rebase` on your branch.\n- **Committing generated files** (`.venv`, `__pycache__`, build output). Fix: proper `.gitignore`.",
+  "best_practices_md": "- One branch per change; short-lived; descriptive names (`fix/…`, `feat/…`).\n- Write commit messages that explain why, with an imperative subject.\n- Keep main always deployable; require PR review and passing CI before merging.\n- Prefer `git switch`/`git restore` over overloaded `checkout`.\n- Rebase locally to tidy up before review; don't rewrite published shared history.\n- Tag releases (`git tag -a v1.5.0`) so you can bisect and hotfix from known points.\n- Learn `reflog` - it makes almost every mistake recoverable.",
+  "my_context_md": "- Git is in your daily toolkit; the step up is a disciplined branch + PR + CI flow - CI/CD is a listed gap, and Git hygiene (small PRs, protected main) is the foundation it builds on.\n- With ECSMarketplaceDataUpload's 150+ processors, `git log -S` and `git bisect` are practical tools for finding when a specific processor's column mapping or upsert SQL changed.\n- Your `.gitignore` should exclude virtualenvs, `.env` files and local test artifacts in all your personal projects (FastAPI apps, CLI tools, React/Next.js apps).",
+  "related": [
+    "github-actions-ci",
+    "python-venv-pip",
+    "pytest-essentials",
+    "docker-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "Modern replacements for `git checkout` uses?",
+      "back": "`git switch` (branches) and `git restore` (files)."
+    },
+    {
+      "front": "Safe way to undo a commit that's already pushed?",
+      "back": "`git revert <sha>` - creates a new inverse commit; history isn't rewritten."
+    },
+    {
+      "front": "Why `--force-with-lease` instead of `--force`?",
+      "back": "It refuses to overwrite the remote branch if it changed since your last fetch, protecting others' commits."
+    },
+    {
+      "front": "How to recover a commit after a bad reset?",
+      "back": "`git reflog` to find its hash, then `git switch -c rescue <sha>` (or `git reset --hard <sha>`)."
+    },
+    {
+      "front": "Golden rule of rebasing?",
+      "back": "Don't rebase commits that others have already based work on (shared/public history)."
+    },
+    {
+      "front": "Tool to binary-search for the commit that introduced a bug?",
+      "back": "`git bisect` (start, bad, good <ref>, then mark each step)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "You pushed a commit to main that broke production. Teammates have pulled. Best fix?",
+      "options": [
+        "git reset --hard HEAD~1 && git push --force",
+        "git revert <sha> && git push",
+        "Delete the branch",
+        "git commit --amend"
+      ],
+      "answer_index": 1,
+      "explanation": "Revert adds a new commit undoing the change without rewriting shared history."
+    },
+    {
+      "question": "What does `git reset --soft HEAD~1` do?",
+      "options": [
+        "Moves the branch back one commit and keeps the changes staged",
+        "Deletes the last commit and its changes",
+        "Reverts the last commit with a new commit",
+        "Unstages all files"
+      ],
+      "answer_index": 0,
+      "explanation": "--soft moves HEAD/branch only; index and working tree keep the changes."
+    },
+    {
+      "question": "After `git rebase origin/main` on your already-pushed feature branch, `git push` is rejected. Why?",
+      "options": [
+        "The remote is down",
+        "You need `git pull` first, always",
+        "Rebase rewrote commit hashes, so the push is non-fast-forward",
+        "Branches can't be rebased after pushing"
+      ],
+      "answer_index": 2,
+      "explanation": "Rebased commits are new objects; use `--force-with-lease` on your own branch."
+    },
+    {
+      "question": "Which command stages only some hunks of a modified file?",
+      "options": [
+        "git add .",
+        "git stash -p",
+        "git commit -a",
+        "git add -p"
+      ],
+      "answer_index": 3,
+      "explanation": "`git add -p` (patch mode) prompts for each hunk."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Merge vs rebase: what's the difference and when do you use each?",
+      "difficulty": "medium",
+      "answer_md": "**Merge** creates a merge commit with two parents that ties two histories together. Nothing is rewritten; history shows exactly when branches diverged and joined. Downside: lots of merge commits make history noisy.\n\n**Rebase** takes your branch's commits and replays them on top of a new base, creating **new commits** (new hashes) and a linear history. Downside: it rewrites history, so it's dangerous on branches others use; conflicts may need resolving once per replayed commit.\n\nHow I use them:\n- On **my own feature branch**: `git fetch && git rebase origin/main` to stay current, and `git rebase -i` to squash fixups before review; push with `--force-with-lease`.\n- **Integrating into main**: via the PR's merge button - squash-merge for small PRs (one clean commit per change) or a merge commit if the individual commits are meaningful.\n- **Shared branches**: merge, never rebase.\n\n```bash\ngit switch feat/x\ngit fetch origin\ngit rebase origin/main      # resolve conflicts, git rebase --continue\ngit push --force-with-lease\n```"
+    },
+    {
+      "question": "Explain git reset --soft, --mixed and --hard, and how reflog helps.",
+      "difficulty": "medium",
+      "answer_md": "All three move the current branch pointer to a target commit; they differ in what happens to the index and working tree:\n- `--soft`: only moves the branch. Changes from the undone commits stay **staged**. Use to squash the last few commits into one (`reset --soft HEAD~3 && git commit`).\n- `--mixed` (default): moves the branch and resets the **index**; changes remain in the working tree, unstaged. Use to redo how changes are grouped into commits.\n- `--hard`: moves the branch and overwrites index **and working tree**. Uncommitted changes are destroyed.\n\n**reflog** records every position HEAD and branches have had (commits, resets, rebases, checkouts) for ~90 days by default. If you reset to the wrong place or a rebase went wrong:\n```bash\ngit reflog                      # find the entry before the mistake, e.g. HEAD@{4}\ngit reset --hard HEAD@{4}       # or: git switch -c rescue HEAD@{4}\n```\nCaveat: reflog only knows about committed states - uncommitted work wiped by `reset --hard` isn't recoverable that way, so stash or commit WIP before risky operations."
+    },
+    {
+      "question": "A secret (API key) was committed and pushed. What do you do?",
+      "difficulty": "hard",
+      "answer_md": "1. **Rotate/revoke the secret immediately.** Assume it's compromised the moment it reached a remote - clones, forks, CI caches and logs may already have it. This is the step that actually fixes the security problem.\n2. **Remove it from the code going forward**: load it from environment variables or a secrets manager (e.g. AWS Secrets Manager/SSM), add `.env` to `.gitignore`, commit the fix.\n3. **Purge it from history** if required (policy, public repo): `git filter-repo --replace-text secrets.txt` (or BFG), then force-push all branches and tags, and ask collaborators to re-clone. Hosting providers may also need a support request to clear cached views/PR refs.\n4. **Audit**: check provider logs for usage of the leaked key during the exposure window.\n5. **Prevent recurrence**: pre-commit hooks or CI secret scanning (gitleaks, GitHub secret scanning / push protection), and code review.\n\nKey point for the interview: rewriting history alone is not remediation - rotation is."
+    }
+  ]
+}

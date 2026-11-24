@@ -1,0 +1,5 @@
+{% if run.stdout %}<div class="small muted">Output</div><pre class="block">{{ run.stdout }}</pre>{% endif %}
+{% if run.stderr %}<div class="small warn">Error</div><pre class="block">{{ run.stderr }}</pre>{% endif %}
+{% if run.timed_out %}<div class="warn small">Timed out after {{ run.limit or 5 }}s — check for an infinite loop.</div>{% endif %}
+{% if not run.stdout and not run.stderr and not run.timed_out %}<div class="small faint">Ran with no output (use print() to see values).</div>{% endif %}
+{% if run.ms is not none and not run.timed_out %}<div class="tiny faint">{{ run.ms }} ms</div>{% endif %}

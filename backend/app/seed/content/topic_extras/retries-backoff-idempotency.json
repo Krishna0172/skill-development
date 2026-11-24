@@ -1,0 +1,55 @@
+{
+  "slug": "retries-backoff-idempotency",
+  "why_md": "Distributed systems fail transiently all the time: deadlocks, 429 rate limits, timeouts, flaky networks. LLM APIs in particular rate-limit aggressively. Retrying correctly (only transient errors, exponential backoff with jitter, bounded attempts) and making operations idempotent so retries can't duplicate data is core backend reliability knowledge and a frequent system-design interview topic.",
+  "revision_notes_md": "- Retry only transient errors: timeouts, connection errors, 429, 502/503/504, deadlocks/serialization failures.\n- Never retry 400/401/403/404/422 - they will fail again.\n- Exponential backoff: `base * 2**attempt`, capped; add jitter (full jitter: `random.uniform(0, cap)`).\n- Honour `Retry-After` / rate-limit headers when present.\n- Bound attempts and total time; retry at ONE layer to avoid multiplication.\n- Make writes idempotent: natural keys + `ON CONFLICT`, idempotency keys, upserts.\n- Deadlocks: retry the whole transaction, and lock rows in a consistent order.\n- Log each retry with attempt number and cause.",
+  "exercises_md": "1. Write `retry_call(fn, *, retry_on, attempts=5, base=0.2, cap=5)` with full jitter, honouring a `retry_after` attribute on the exception if present; test it with a function that fails 3 times.\n2. Take an INSERT that could duplicate rows on retry and make it idempotent with a unique constraint plus `ON CONFLICT DO NOTHING` or `DO UPDATE`.",
+  "my_context_md": "ECSMarketplaceDataUpload has a deadlock-retry around its writes, and the repo uses `INSERT ... ON CONFLICT DO UPDATE SET col = COALESCE(EXCLUDED.col, t.col)` - which makes re-running a batch idempotent. `ECSInventoryPriceTracking/app/fetchers/spapi.py` paces SP-API calls with an `asyncio.Lock` and reads rate-limit headers, the client-side half of 429 handling.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "Adding randomness to backoff delays so many clients don't retry in lockstep is called ____.",
+      "answers": [
+        "jitter"
+      ],
+      "explanation": "Prevents thundering herds."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "HTTP status ____ means 'Too Many Requests' and is usually retryable after a delay.",
+      "answers": [
+        "429"
+      ],
+      "explanation": "Check Retry-After."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def backoff(attempt, base=0.5, cap=8.0):\n    return min(cap, base * 2 ** attempt)\n\nprint([backoff(a) for a in range(6)])\n\nRETRYABLE = {429, 502, 503, 504}\nfor status in (200, 422, 429, 503):\n    print(status, status in RETRYABLE)",
+      "answers": [
+        "[0.5, 1.0, 2.0, 4.0, 8.0, 8.0]\n200 False\n422 False\n429 True\n503 True"
+      ],
+      "explanation": "Delays double until capped at 8.0; only transient statuses are retryable (422 is a client error)."
+    },
+    {
+      "type": "debug",
+      "prompt": "This retry wrapper causes duplicate orders and hammers the API during outages. Fix it.",
+      "code": "def create_order(payload):\n    while True:\n        try:\n            return requests.post(URL, json=payload, timeout=5).json()\n        except Exception:\n            time.sleep(1)",
+      "answer": "- Infinite retries with a fixed delay -> no bound, synchronized hammering.\n- Catches everything, including bugs and 4xx-type failures.\n- POST isn't idempotent: a timeout after the server committed creates a duplicate on retry.\n\n```python\ndef create_order(payload, key):\n    for attempt in range(5):\n        try:\n            r = requests.post(URL, json=payload, timeout=5,\n                              headers={\"Idempotency-Key\": key})\n            if r.status_code in (429, 502, 503, 504):\n                raise TransientError(r.status_code)\n            r.raise_for_status()\n            return r.json()\n        except (requests.ConnectionError, requests.Timeout, TransientError):\n            if attempt == 4:\n                raise\n            time.sleep(random.uniform(0, min(10, 0.5 * 2 ** attempt)))\n```",
+      "rubric": [
+        "Bound attempts and use exponential backoff with jitter",
+        "Retry only transient errors",
+        "Idempotency key so retried POSTs don't duplicate"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain why idempotency is a prerequisite for safe retries.",
+      "answer": "A client can't distinguish 'request never arrived' from 'request succeeded but the response was lost' - both look like a timeout. If it retries a non-idempotent operation in the second case, the effect happens twice (duplicate order, double charge). Making the operation idempotent - natural unique keys with `ON CONFLICT`, an idempotency key stored with the result, or set-based updates (`SET status = 'done'` rather than `count = count + 1`) - means a repeat has no additional effect, so retries become safe.",
+      "rubric": [
+        "Timeouts are ambiguous: maybe it succeeded",
+        "Retrying non-idempotent ops duplicates effects",
+        "Techniques: unique keys/ON CONFLICT, idempotency keys, absolute updates"
+      ]
+    }
+  ]
+}

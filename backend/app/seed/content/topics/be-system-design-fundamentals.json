@@ -1,0 +1,159 @@
+{
+  "slug": "be-system-design-fundamentals",
+  "title": "System design fundamentals for backend engineers",
+  "skill": "system-design",
+  "extra_skills": [
+    "backend-architecture",
+    "caching-redis",
+    "message-queues"
+  ],
+  "category": "Backend",
+  "difficulty": "advanced",
+  "tags": [
+    "system-design",
+    "scalability",
+    "load-balancing",
+    "caching",
+    "queues",
+    "replication",
+    "partitioning"
+  ],
+  "summary": "System design is a structured way to turn vague requirements into an architecture: clarify requirements, estimate load, define the API and data model, sketch components, then scale and discuss trade-offs. The recurring building blocks are load balancers, caches, queues, replication, partitioning and idempotency. A worked example — ingesting marketplace reports for 1,000 sellers — shows how they combine.",
+  "why_md": "- Senior backend and AI-engineering interviews almost always include a design round.\n- The same framework helps at work: designing a new ingestion pipeline or LLM service before writing code.\n- Back-of-envelope numbers stop you over-engineering (or under-provisioning).\n- Trade-off reasoning (consistency vs availability, cost vs latency) is what distinguishes senior engineers.",
+  "details_md": "### A repeatable framework\n1. **Requirements**: functional (what it does) and non-functional (latency, throughput, availability, consistency, data retention, cost). Ask questions; write assumptions down.\n2. **Estimates**: requests/sec (peak ≈ 2-10× average), storage/year, bandwidth. 1 day ≈ 86,400 s ≈ 10^5 s.\n3. **API**: main endpoints or events, sync vs async (202 + job).\n4. **Data model**: entities, keys, access patterns, which store (Postgres by default; object storage for files; Redis for hot/ephemeral).\n5. **High-level components**: clients → load balancer → stateless API → DB/cache/queue → workers.\n6. **Scale & deep dives**: bottlenecks, failure modes, hot spots.\n7. **Trade-offs**: what you'd do differently at 10× and what you deliberately didn't build.\n\n### Building blocks\n- **Load balancing** (ALB/nginx): distributes to stateless instances; health checks; L7 routing.\n- **Caching**: client/CDN, app cache (Redis), DB cache. Decide TTL, invalidation, stampede protection.\n- **Queues**: absorb bursts, decouple producers/consumers, enable retries/DLQ; at-least-once ⇒ idempotency.\n- **Replication**: read replicas scale reads and add failover; replicas lag (async), so read-your-writes needs routing to the primary.\n- **Partitioning/sharding**: split data by key (seller_id, time). Postgres declarative partitioning by month keeps big tables manageable; sharding across databases is a last resort.\n- **Idempotency**: natural keys + upserts, idempotency keys, dedupe tables — required whenever retries exist.\n- **Consistency**: strong (single primary, transactions) vs eventual (caches, replicas, async pipelines). Choose per feature.\n\n### Worked example: report ingestion for 1,000 sellers\n*Requirements*: each seller has ~5 marketplaces × ~6 report types daily; files 1-200 MB; data visible within 1 hour; reprocessing must not duplicate.\n*Estimates*: 1,000 × 5 × 6 = 30,000 files/day ≈ 0.35/s average; if 80% land in a 2-hour window, ~3.3/s peak. At ~20 MB average ≈ 600 GB/day raw → S3 with lifecycle rules, not Postgres.\n*Design*: scheduler creates `report_jobs` rows (per seller/marketplace/type/date, unique key) → SQS → fetch workers (per-marketplace rate limits, token cache) store raw files in S3 → S3 event/queue → processing workers (ECS, autoscaled on queue depth) parse with a registry of processors, validate rows, `COPY`/`execute_values` into staging then upsert into partitioned tables → status updates + DLQ for failures → dashboard reads from aggregates/materialized views with Redis cache.\n*Trade-offs*: per-seller fairness (one huge seller shouldn't starve others → per-seller concurrency caps), PgBouncer to cap connections, idempotent upserts so retries are safe, Postgres until write volume proves otherwise.",
+  "code_md": "```python\n# Back-of-envelope estimator — keep numbers explicit in design docs\nsellers, marketplaces, report_types = 1_000, 5, 6\nfiles_per_day = sellers * marketplaces * report_types          # 30,000\navg_mb, rows_per_mb = 20, 5_000\npeak_window_s = 2 * 3600                                       # most reports land in ~2h\n\nprint(\"files/day:\", files_per_day)\nprint(\"avg files/s:\", round(files_per_day / 86_400, 2))         # ~0.35\nprint(\"peak files/s:\", round(files_per_day * 0.8 / peak_window_s, 1))\nprint(\"raw GB/day:\", files_per_day * avg_mb / 1_000)            # 600 GB -> S3\nprint(\"rows/day (M):\", files_per_day * avg_mb * rows_per_mb / 1e6)\n```\n\n```sql\n-- Idempotent job creation: one job per seller/marketplace/report/date\nCREATE TABLE report_jobs (\n  id bigserial PRIMARY KEY,\n  seller_id int NOT NULL, marketplace text NOT NULL, report_type text NOT NULL,\n  report_date date NOT NULL, status text NOT NULL DEFAULT 'queued',\n  s3_key text, attempts int NOT NULL DEFAULT 0, error text,\n  UNIQUE (seller_id, marketplace, report_type, report_date)\n);\nINSERT INTO report_jobs (seller_id, marketplace, report_type, report_date)\nVALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING;\n\n-- Big fact table partitioned by month: cheap pruning and dropping of old data\nCREATE TABLE settlements (\n  seller_id int NOT NULL, order_id text NOT NULL, posted_date date NOT NULL,\n  amount numeric(14,2), PRIMARY KEY (seller_id, order_id, posted_date)\n) PARTITION BY RANGE (posted_date);\n```",
+  "use_cases_md": "- Designing the marketplace report ingestion pipeline described above.\n- Designing an LLM chat backend: sessions, message history, streaming, per-org cost tracking, rate limits.\n- Deciding whether a dashboard needs read replicas, materialized views, or a Redis cache.\n- Planning a per-seller repricing system with SQS fan-out and fairness limits.\n- A RAG service: ingestion queue → chunking/embedding workers → vector store → retrieval API.",
+  "mistakes_md": "- **Jumping to components before requirements and numbers** — you design for the wrong scale.\n- **Microservices/Kafka/sharding by default** for 0.35 files/sec.\n- **Ignoring failure modes**: retries without idempotency, no DLQ, no backpressure.\n- **Storing large files in Postgres** instead of object storage.\n- **Read replicas without considering lag** (user uploads then sees nothing).\n- **No fairness**: one big tenant monopolizes workers.\n- **Not stating trade-offs** — interviewers want to hear what you gave up.",
+  "best_practices_md": "- Clarify requirements, write assumptions, estimate before drawing.\n- Stateless API tier; state in Postgres/S3/Redis.\n- Async (queue + workers + job status) for anything slow.\n- Idempotency at every retry boundary.\n- Start with one Postgres; add replicas/partitioning/caching when numbers demand it.\n- Design for observability: request IDs, metrics per stage, DLQ alerts.\n- Close with bottlenecks, failure scenarios and what changes at 10×.",
+  "my_context_md": "You already operate most of these building blocks: `ECSMarketplaceDataUpload` (registry dispatcher routing 150+ report processors, upload status tracking, deadlock retry), `ForcesightJobSchedulerAndRunner` (Postgres job queue with SKIP LOCKED), `AmazonVendorBankRecon/db.py` (pooling behind PgBouncer), SP-API pacing in `ECSInventoryPriceTracking`, and boto3 with S3/ECS/Lambda/SES. The worked example is essentially your domain — practice explaining it end-to-end with numbers, failure modes and trade-offs, as you would in an interview.",
+  "revision_notes_md": "- Framework: requirements → estimates → API → data model → components → scale → trade-offs.\n- 1 day ≈ 86,400 s ≈ 10^5 s; peak = several × average.\n- Stateless app tier behind a load balancer.\n- Cache: TTL, invalidation, stampedes.\n- Queue: buffering, retries, DLQ, at-least-once ⇒ idempotent.\n- Replicas scale reads, lag ⇒ read-your-writes issues.\n- Partition by time/tenant; shard last.\n- Files → S3; metadata → Postgres.\n- Always state failure modes and trade-offs.",
+  "exercises_md": "1. Write a one-page design doc for 'marketplace report ingestion for 1,000 sellers' with requirements, estimates, diagram (text is fine), data model and three trade-offs.\n2. Recompute the estimates for 20,000 sellers; identify the first component that breaks and how you'd change it.\n3. Design an LLM chat backend for multi-tenant sellers: endpoints, tables, streaming, cost tracking, rate limiting.\n4. Practice a 45-minute mock interview on 'design a URL shortener' and then 'design a webhook delivery system', timing each phase.",
+  "related": [
+    "be-microservices",
+    "be-background-tasks",
+    "be-redis",
+    "caching-strategies",
+    "message-queues",
+    "be-connection-pooling"
+  ],
+  "flashcards": [
+    {
+      "front": "Seven steps of a system design answer?",
+      "back": "Requirements, estimates, API, data model, high-level components, scaling/deep dives, trade-offs."
+    },
+    {
+      "front": "Seconds in a day (rounded for estimates)?",
+      "back": "86,400 ≈ 10^5."
+    },
+    {
+      "front": "Main caveat of read replicas?",
+      "back": "Replication lag — a user may not see their own write; route read-your-writes to the primary."
+    },
+    {
+      "front": "Why is idempotency central in distributed designs?",
+      "back": "Retries and at-least-once delivery mean operations can run more than once; idempotency makes repeats harmless."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "In the report-ingestion design, 30,000 files arrive per day with average 20 MB. Where should raw files be stored?",
+      "options": [
+        "In a BYTEA column in the settlements table",
+        "In Redis with a 30-day TTL",
+        "On the ECS task's local disk",
+        "In S3 (object storage) with lifecycle rules, keeping only metadata/S3 keys in Postgres"
+      ],
+      "answer_index": 3,
+      "explanation": "~600 GB/day of blobs belongs in object storage; Postgres stores parsed rows and pointers."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A user uploads a file, is redirected to a page that reads from a read replica, and sees 'no uploads'. What's the issue?",
+      "options": [
+        "Replication lag — the replica hasn't applied the write yet",
+        "The cache TTL is too long",
+        "The load balancer dropped the request",
+        "The primary rejected the write"
+      ],
+      "answer_index": 0,
+      "explanation": "Async replicas lag; route read-your-writes reads to the primary or wait for the replica's LSN."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "When one large tenant's jobs crowd out everyone else's, the system lacks per-tenant ____.",
+      "answers": [
+        "fairness",
+        "rate limits",
+        "concurrency limits",
+        "isolation",
+        "quotas"
+      ],
+      "explanation": "Per-tenant concurrency caps or fair queuing prevent noisy neighbours."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Splitting a large Postgres table into monthly child tables by `posted_date` is called declarative ____.",
+      "answers": [
+        "partitioning",
+        "range partitioning"
+      ],
+      "explanation": "`PARTITION BY RANGE (posted_date)` enables partition pruning and cheap dropping of old months."
+    },
+    {
+      "type": "output",
+      "prompt": "A back-of-envelope calculation for the ingestion example. What does it print?",
+      "code": "sellers, marketplaces, report_types = 1000, 5, 6\nfiles_per_day = sellers * marketplaces * report_types\navg_mb = 20\npeak_share, peak_hours = 0.8, 2\n\nprint(\"files/day:\", files_per_day)\nprint(\"avg/s:\", round(files_per_day / 86400, 2))\nprint(\"peak/s:\", round(files_per_day * peak_share / (peak_hours * 3600), 1))\nprint(\"GB/day:\", files_per_day * avg_mb // 1000)\nprint(\"TB/year:\", round(files_per_day * avg_mb * 365 / 1e6, 1))\n",
+      "answers": [
+        "files/day: 30000\navg/s: 0.35\npeak/s: 3.3\nGB/day: 600\nTB/year: 219.0"
+      ],
+      "explanation": "30,000/86,400 ≈ 0.35/s; 80% of files in 2 hours gives 24,000/7,200 ≈ 3.3/s; 30,000 × 20 MB = 600 GB/day ≈ 219 TB/year — clearly object storage with lifecycle policies."
+    },
+    {
+      "type": "debug",
+      "prompt": "Review this design sketch for report ingestion. What are the problems?",
+      "code": "API endpoint POST /reports/fetch?seller_id=...\n  -> synchronously downloads the report from the marketplace (1-5 minutes)\n  -> parses it with pandas in the request handler\n  -> INSERTs rows (plain INSERT) into settlements\n  -> returns 200 when done\nCron calls this endpoint for all 1,000 sellers in parallel at 02:00.\n",
+      "answer": "- **Synchronous long work in HTTP**: minutes-long requests hit timeouts (ALB/API Gateway), tie up workers, and retries re-run everything.\n- **Plain INSERT**: client/cron retries after a timeout create duplicates — needs unique keys + upsert.\n- **1,000 parallel calls at 02:00**: bursts overwhelm marketplace rate limits and Postgres connections; no backpressure.\n- **No job state/DLQ**: failures invisible, no partial retry.\n- **Heavy pandas parsing in the API tier**.\n\nBetter: cron creates idempotent `report_jobs` rows → queue → fetch workers with per-marketplace rate limiting store files in S3 → processing workers (autoscaled, per-seller caps) validate and upsert into partitioned tables → status table + DLQ + alerts; API only returns 202 and job status.",
+      "rubric": [
+        "Long synchronous work in request path",
+        "Non-idempotent inserts with retries",
+        "Burst without backpressure: rate limits and DB connections",
+        "Queue + workers + job status + DLQ redesign"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would approach a 45-minute 'design X' interview round.",
+      "answer": "- **5 min requirements**: functional scope, users, scale, latency, consistency, retention; state assumptions.\n- **5 min estimates**: QPS (avg and peak), storage, bandwidth — decide what matters (e.g. 0.35 files/s means no Kafka).\n- **5 min API + data model**: core endpoints/events, tables with keys and access patterns.\n- **10 min high-level design**: draw clients → LB → stateless services → DB/cache/queue/workers/object storage, and walk one request end to end.\n- **15 min deep dives**: the hardest parts — bottlenecks, failures (retries, idempotency, DLQ), scaling (replicas, partitions, caching), multi-tenancy.\n- **5 min trade-offs & wrap-up**: alternatives rejected, what changes at 10×, monitoring.\nThink aloud, check in with the interviewer, keep numbers explicit.",
+      "rubric": [
+        "Starts with requirements and assumptions",
+        "Uses estimates to drive decisions",
+        "API/data model then components with a request walk-through",
+        "Deep dives on failures/scaling and explicit trade-offs"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When would you introduce read replicas, partitioning, or sharding for a Postgres-backed SaaS — in which order and why?",
+      "answer": "First optimize: indexes, query rewrites, materialized views, caching, connection pooling. Then **read replicas** when read load (dashboards, reports) saturates the primary — easy to add, but handle lag. **Partitioning** when single tables get huge (hundreds of millions of rows, time-series): faster pruning, cheaper maintenance, drop old partitions — still one database. **Sharding** across databases only when write volume or total size exceeds a single primary's capacity — it's costly (cross-shard queries, rebalancing, distributed transactions), so shard by a key like tenant/seller_id that keeps most queries local.",
+      "rubric": [
+        "Optimize queries/indexes/caching first",
+        "Replicas for read scaling with lag caveat",
+        "Partitioning for large time-series tables",
+        "Sharding last, by tenant key, with its costs"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Design a system to ingest daily marketplace reports for 1,000 sellers and make them queryable within an hour.",
+      "difficulty": "hard",
+      "answer_md": "**Requirements**: ~30 report types/marketplace combos per seller per day (30k files/day), 1-200 MB files, data visible within 1 h, no duplicates on retries, per-marketplace API rate limits, multi-tenant isolation.\n**Estimates**: 0.35 files/s average, ~3-20/s peak; ~600 GB/day raw → S3; ~hundreds of millions of rows/month → partitioned tables.\n**Design**: a scheduler inserts `report_jobs` with a unique (seller, marketplace, type, date) key and enqueues IDs to SQS. **Fetch workers** request reports from marketplace APIs with per-marketplace token buckets and cached access tokens, store raw files in S3, update status. **Processing workers** (ECS, autoscaled on queue depth, per-seller concurrency caps) pick the right processor via a registry, validate rows (Pydantic), bulk-load into a staging table with COPY, then upsert into monthly-partitioned fact tables in one transaction. Failures retry with backoff; exhausted jobs go to a DLQ and show as `failed` in the UI. PgBouncer caps DB connections. Dashboards read aggregates/materialized views refreshed after loads, cached in Redis by org.\n**Trade-offs**: Postgres over a warehouse until query volume demands it; SQS over Kafka given low throughput; at-least-once + idempotent upserts instead of exactly-once."
+    },
+    {
+      "question": "Strong vs eventual consistency: give an example of each in the same product and justify.",
+      "difficulty": "medium",
+      "answer_md": "In a seller analytics SaaS: **billing/credits** (e.g. per-org LLM usage cost limits) need **strong consistency** — decrement and check within a single Postgres transaction (`UPDATE … SET balance = balance - %s WHERE org_id = %s AND balance >= %s RETURNING balance`) so concurrent requests can't overspend. **Dashboard aggregates** can be **eventually consistent**: computed after ingestion, served from a materialized view or a Redis cache with a 10-minute TTL; showing numbers a few minutes stale is acceptable and lets you serve reads cheaply from replicas/caches. The rule: use strong consistency where an anomaly costs money or correctness (payments, inventory reservations, permissions), and eventual consistency where freshness can lag for big gains in latency, cost and availability — and tell users when data was last updated."
+    }
+  ]
+}

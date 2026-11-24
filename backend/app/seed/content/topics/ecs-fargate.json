@@ -1,0 +1,123 @@
+{
+  "slug": "ecs-fargate",
+  "title": "Amazon ECS on Fargate: Task Definitions, Services and run_task",
+  "skill": "aws-ecs",
+  "extra_skills": [
+    "docker",
+    "boto3",
+    "cloudwatch"
+  ],
+  "category": "Cloud & DevOps",
+  "difficulty": "intermediate",
+  "tags": [
+    "aws",
+    "ecs",
+    "fargate",
+    "containers",
+    "run_task",
+    "task-definition"
+  ],
+  "summary": "Amazon ECS runs Docker containers on AWS; Fargate is the serverless mode where AWS manages the machines and you only specify CPU and memory per task. A task definition describes the containers (image, resources, env, roles, logging), a task is one running copy, and a service keeps N tasks running. For batch jobs you start one-off tasks with run_task, which has no 15-minute limit like Lambda.",
+  "details_md": "### Core objects\n- **Cluster**: a logical grouping of tasks and services (with Fargate, no EC2 instances to manage).\n- **Task definition** (versioned as `family:revision`): one or more container definitions with image, command, environment, secrets, port mappings, log configuration, plus task-level `cpu`/`memory`, `networkMode` (`awsvpc` is required for Fargate), and two IAM roles.\n- **Task**: a running instance of a task definition. On Fargate each task gets its own ENI and private IP in your VPC subnets.\n- **Service**: keeps a desired count of tasks running, replaces failed ones, does rolling deployments, and can register tasks with a load balancer target group and autoscale.\n\n### Two IAM roles (a common confusion)\n- **Task execution role**: used by the *ECS agent* to pull the image from ECR, send logs to CloudWatch, and fetch secrets from Secrets Manager/SSM for injection. Typically `AmazonECSTaskExecutionRolePolicy`.\n- **Task role**: used by *your code* inside the container (boto3 gets these credentials automatically through the container credentials endpoint). Grant S3, DynamoDB, Lambda invoke etc. here.\n\n### Services vs one-off tasks\n- Long-running APIs and workers: **service** (optionally behind an ALB).\n- Batch/ETL jobs: **`run_task`** from code, an **EventBridge schedule**, or Step Functions (`ecs:runTask.sync` waits for completion). The task runs until the main container exits; exit code 0 means success.\n- `run_task` is **asynchronous**: it returns once the task is accepted (status PROVISIONING/PENDING). Check the response's `failures` list (capacity or config problems come back there, not as exceptions), then track completion with `describe_tasks`, a waiter (`tasks_stopped`), or EventBridge \"ECS Task State Change\" events.\n- **Overrides** let one task definition serve many jobs: `containerOverrides` with a different `command` or `environment` per run (e.g. `ORG_ID`, `SETTLEMENT_FILE`).\n\n### Fargate sizing and limits\n- CPU from 0.25 to 16 vCPU with matching memory ranges (up to 120 GB). You pay per vCPU-second and GB-second while the task runs (1-minute minimum).\n- Ephemeral storage 20 GiB by default, configurable up to 200 GiB.\n- Startup takes tens of seconds (ENI attach + image pull), so it isn't for sub-second latency. Smaller images start faster.\n- **Fargate Spot**: up to about 70% cheaper but can be interrupted with a **2-minute warning** (SIGTERM). Good for retryable batch jobs.\n- **Graceful stop**: on stop, ECS sends SIGTERM, waits `stopTimeout` (30 s by default, max 120 s), then SIGKILL. Handle SIGTERM in Python to checkpoint or mark the job as failed.\n\n### Networking\nTasks need a route to ECR, CloudWatch Logs and any AWS APIs they call: a **public subnet with `assignPublicIp=ENABLED`**, a private subnet with a **NAT gateway**, or **VPC endpoints** (ECR api/dkr, S3 gateway endpoint, Logs). \"CannotPullContainerError\" is very often a networking problem. Security groups control access to databases.\n\n### Logging and monitoring\nThe `awslogs` log driver ships stdout/stderr to CloudWatch Logs (`awslogs-group`, `awslogs-stream-prefix`). Container Insights adds CPU/memory metrics. `stoppedReason` and each container's `exitCode` in `describe_tasks` explain failures (e.g. `OutOfMemoryError: Container killed due to memory usage`).\n\n### ECS vs Lambda vs EKS\nLambda: event-driven, max 15 minutes, per-request scaling. ECS Fargate: any duration, bigger CPU/memory/disk, full container control, slower start. EKS: Kubernetes, more power and more operational overhead.",
+  "code_md": "**1) Minimal Fargate task definition** (registered via IaC or `register_task_definition`):\n\n```json\n{\n  \"family\": \"settlement-job\",\n  \"requiresCompatibilities\": [\"FARGATE\"],\n  \"networkMode\": \"awsvpc\",\n  \"cpu\": \"1024\",\n  \"memory\": \"4096\",\n  \"executionRoleArn\": \"arn:aws:iam::123456789012:role/ecsTaskExecutionRole\",\n  \"taskRoleArn\": \"arn:aws:iam::123456789012:role/settlement-job-task-role\",\n  \"runtimePlatform\": {\"cpuArchitecture\": \"X86_64\", \"operatingSystemFamily\": \"LINUX\"},\n  \"containerDefinitions\": [{\n    \"name\": \"app\",\n    \"image\": \"123456789012.dkr.ecr.ap-south-1.amazonaws.com/settlement-job:1.4.2\",\n    \"essential\": true,\n    \"command\": [\"python\", \"-m\", \"jobs.settlement\"],\n    \"environment\": [{\"name\": \"LOG_LEVEL\", \"value\": \"INFO\"}],\n    \"secrets\": [{\"name\": \"DB_PASSWORD\",\n                 \"valueFrom\": \"arn:aws:secretsmanager:ap-south-1:123456789012:secret:db-pass\"}],\n    \"stopTimeout\": 60,\n    \"logConfiguration\": {\"logDriver\": \"awslogs\", \"options\": {\n      \"awslogs-group\": \"/ecs/settlement-job\",\n      \"awslogs-region\": \"ap-south-1\",\n      \"awslogs-stream-prefix\": \"app\"}}\n  }]\n}\n```\n\n```python\n# 2) Launch a one-off task from Python (e.g. from a Lambda) and check failures\nimport boto3\n\necs = boto3.client(\"ecs\", region_name=\"ap-south-1\")\n\nresp = ecs.run_task(\n    cluster=\"etl-cluster\",\n    taskDefinition=\"settlement-job\",            # latest ACTIVE revision of the family\n    launchType=\"FARGATE\",\n    count=1,\n    networkConfiguration={\"awsvpcConfiguration\": {\n        \"subnets\": [\"subnet-aaa\", \"subnet-bbb\"],\n        \"securityGroups\": [\"sg-123\"],\n        \"assignPublicIp\": \"DISABLED\",           # private subnets need NAT or VPC endpoints\n    }},\n    overrides={\"containerOverrides\": [{\n        \"name\": \"app\",\n        \"environment\": [{\"name\": \"ORG_ID\", \"value\": \"7\"},\n                        {\"name\": \"SETTLEMENT_KEY\", \"value\": \"settlements/7/2024-05.csv\"}],\n    }]},\n    startedBy=\"settlement-trigger\",\n)\nif resp[\"failures\"]:                             # NOT raised as an exception\n    raise RuntimeError(f\"run_task failed: {resp['failures']}\")\ntask_arn = resp[\"tasks\"][0][\"taskArn\"]\n```\n\n```python\n# 3) Waiting for completion and reading the exit code\necs.get_waiter(\"tasks_stopped\").wait(cluster=\"etl-cluster\", tasks=[task_arn],\n                                     WaiterConfig={\"Delay\": 15, \"MaxAttempts\": 240})\ntask = ecs.describe_tasks(cluster=\"etl-cluster\", tasks=[task_arn])[\"tasks\"][0]\ncontainer = task[\"containers\"][0]\nprint(task.get(\"stoppedReason\"), container.get(\"exitCode\"), container.get(\"reason\"))\n```\n\n```python\n# 4) Graceful shutdown inside the container (SIGTERM on stop / Spot interruption)\nimport signal, sys\n\nstop_requested = False\n\ndef on_sigterm(signum, frame):\n    global stop_requested\n    stop_requested = True                        # finish the current batch, then exit\n\nsignal.signal(signal.SIGTERM, on_sigterm)\n\nfor batch in batches():\n    if stop_requested:\n        mark_job_status(\"Error\", reason=\"interrupted\")   # record state before exiting\n        sys.exit(1)\n    process(batch)\n```",
+  "use_cases_md": "- Long-running or heavy ETL/reconciliation jobs that exceed Lambda's 15 minutes or memory/disk limits.\n- Event-triggered batch tasks launched from Lambda or EventBridge via `run_task` with per-run overrides.\n- Long-lived APIs and queue workers as ECS services with autoscaling.\n- Scheduled jobs (EventBridge Scheduler targeting ECS) replacing cron servers.\n- Jobs that need system packages or large dependencies best shipped as a container image.",
+  "mistakes_md": "- **Confusing execution role and task role**: the app gets AccessDenied for S3, or the image can't be pulled. Put app permissions on the task role, pull/log/secret permissions on the execution role.\n- **Ignoring `failures` in the run_task response**: the job silently never starts. Check it and alert.\n- **No network path to ECR/Logs** (private subnet with no NAT or endpoints, or public IP disabled in a public subnet): `CannotPullContainerError`, or the task hangs in PENDING. Add NAT, VPC endpoints, or a public IP.\n- **Shell-form CMD/ENTRYPOINT**: SIGTERM goes to `/bin/sh`, not Python, so there's no graceful shutdown. Use exec form.\n- **Using the `latest` tag**: unclear which code is running and rollbacks are hard. Use immutable version or commit-SHA tags.\n- **Secrets in plain `environment`**: visible in the console and API. Use `secrets` with Secrets Manager/SSM.\n- **Undersized memory**: tasks killed with OutOfMemoryError (exit code 137). Size from metrics; process files in chunks.",
+  "best_practices_md": "- One task definition per job type; use overrides for per-run parameters.\n- Immutable image tags (git SHA) and task definitions managed by IaC (Pulumi/CDK/Terraform).\n- Least-privilege task roles; secrets via Secrets Manager/SSM.\n- Make jobs idempotent and record status externally so retries and Spot interruptions are safe.\n- Handle SIGTERM and set `stopTimeout` to cover cleanup.\n- Use VPC endpoints for ECR/S3/Logs to avoid NAT costs and public exposure.\n- Monitor with CloudWatch Logs, Container Insights, and EventBridge task state-change rules for failures.",
+  "my_context_md": "Your pipeline uses `run_task` to start an ECS Fargate task after Snapdeal settlements are processed, which is the \"event-triggered batch task\" pattern: a short trigger hands long-running work to a container that has no 15-minute limit. Two things worth checking in that code: whether the `failures` list in the `run_task` response is inspected, and whether the task's final status is monitored (waiter, `describe_tasks`, or an EventBridge rule on task state changes), because `run_task` only confirms that the task was accepted. Your ECSMarketplaceDataUpload container is built from a Dockerfile; using an exec-form CMD and handling SIGTERM lets the job set an `fs_upload` row to Error instead of leaving it stuck in \"Processing\" when a task is stopped. The cluster, task definitions and roles fit naturally into your Pulumi code.",
+  "related": [
+    "docker-essentials",
+    "aws-lambda-essentials",
+    "message-queues",
+    "github-actions-ci",
+    "s3-presigned-urls"
+  ],
+  "flashcards": [
+    {
+      "front": "Task execution role vs task role?",
+      "back": "Execution role: ECS agent pulls the image, writes logs, fetches secrets. Task role: permissions for your application code."
+    },
+    {
+      "front": "Which network mode does Fargate require?",
+      "back": "awsvpc: each task gets its own ENI and private IP."
+    },
+    {
+      "front": "Does run_task wait for the task to finish?",
+      "back": "No. It returns once the task is accepted; check `failures`, then use describe_tasks, the tasks_stopped waiter, or EventBridge events."
+    },
+    {
+      "front": "What happens when ECS stops a task?",
+      "back": "SIGTERM to containers, wait stopTimeout (default 30 s, max 120 s), then SIGKILL."
+    },
+    {
+      "front": "Common causes of CannotPullContainerError on Fargate?",
+      "back": "No route to ECR (no public IP/NAT/VPC endpoints), wrong image URI or tag, or missing execution role permissions."
+    },
+    {
+      "front": "How do you pass per-run parameters to the same task definition?",
+      "back": "run_task `overrides.containerOverrides` with `command` and/or `environment`."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Your container gets AccessDenied when calling s3:GetObject. Which role needs the permission?",
+      "options": [
+        "Task execution role",
+        "Task role",
+        "ECS service-linked role",
+        "The Lambda that called run_task"
+      ],
+      "answer_index": 1,
+      "explanation": "Application code uses the task role's credentials."
+    },
+    {
+      "question": "run_task returned without an exception, but no task ran. What should you have checked?",
+      "options": [
+        "The image size",
+        "The task definition's family name only",
+        "CloudTrail only",
+        "The `failures` list in the response"
+      ],
+      "answer_index": 3,
+      "explanation": "Placement and capacity problems are reported in `failures`, not raised."
+    },
+    {
+      "question": "A task exits with code 137. Most likely cause?",
+      "options": [
+        "Killed (SIGKILL), often out of memory or after stopTimeout",
+        "Python syntax error",
+        "Network timeout",
+        "Successful completion"
+      ],
+      "answer_index": 0,
+      "explanation": "137 = 128 + 9 (SIGKILL); check stoppedReason for OutOfMemoryError."
+    },
+    {
+      "question": "Which is a good fit for Fargate Spot?",
+      "options": [
+        "A payment API with strict uptime",
+        "A single-instance stateful database",
+        "Idempotent, retryable batch jobs",
+        "Anything that can't handle SIGTERM"
+      ],
+      "answer_index": 2,
+      "explanation": "Spot tasks can be interrupted with a 2-minute warning."
+    }
+  ],
+  "interview": [
+    {
+      "question": "When would you run a job on ECS Fargate instead of Lambda?",
+      "difficulty": "medium",
+      "answer_md": "Choose **Fargate** when:\n- The job can exceed **15 minutes** (large reconciliations, multi-GB files).\n- It needs more than **10 GB memory**, multiple vCPUs for long periods, or large disk (up to 200 GiB ephemeral).\n- It needs system libraries or a big dependency set that doesn't fit in Lambda's 250 MB unzipped limit (though Lambda container images help with that).\n- You want a long-running worker or API with steady load, where per-request Lambda pricing costs more.\n\nChoose **Lambda** when the work is short, event-driven, spiky, and benefits from instant per-request scaling with no idle cost.\n\nA common hybrid: a Lambda reacts to an event (S3 upload, settlement processed), validates it, and calls `ecs.run_task(...)` with overrides for the heavy part. The trade-offs to mention: Fargate starts in tens of seconds rather than milliseconds, you must monitor completion yourself (`run_task` is fire-and-forget), and you handle SIGTERM for graceful shutdown."
+    },
+    {
+      "question": "How would you reliably trigger and monitor a batch job on ECS from your application?",
+      "difficulty": "hard",
+      "answer_md": "1. **Record intent first**: insert a job row (`status = 'QUEUED'`, parameters, idempotency key) so a retry doesn't launch duplicates.\n2. **Launch**: `run_task` with `containerOverrides` (job ID, inputs). Check `resp[\"failures\"]`; on capacity errors retry with backoff. Store the `taskArn` on the job row.\n3. **Inside the task**: set the status to `RUNNING`, process in idempotent chunks with checkpoints, handle SIGTERM to record an interruption, and exit 0 on success or non-zero on failure.\n4. **Monitor completion** without polling loops in Lambda: an **EventBridge rule** on `ECS Task State Change` with `lastStatus = STOPPED` triggers a small Lambda that reads `containers[].exitCode` and `stoppedReason`, updates the job row, and alerts on failure.\n5. **Detect stuck jobs**: a scheduled check for jobs in RUNNING longer than the expected maximum.\n6. **Alternative orchestration**: Step Functions with `arn:aws:states:::ecs:runTask.sync` waits for completion and has built-in retries and catch branches.\n\nLogs go to CloudWatch via `awslogs` with the job ID in every line, so you can jump from a failed job row to its logs."
+    },
+    {
+      "question": "Explain the components of an ECS task definition.",
+      "difficulty": "easy",
+      "answer_md": "A task definition is a versioned JSON blueprint (`family:revision`) for running containers:\n\n- **Task-level settings**: `requiresCompatibilities` (FARGATE/EC2), `networkMode` (`awsvpc` for Fargate), `cpu` and `memory` (valid Fargate combinations), `runtimePlatform` (x86_64/ARM64), `ephemeralStorage`.\n- **Roles**: `executionRoleArn` (pull image, logs, secrets) and `taskRoleArn` (app permissions).\n- **Container definitions** (one or more): `image`, `command`/`entryPoint`, `environment`, `secrets` (from Secrets Manager/SSM), `portMappings`, `essential` (if it stops, the task stops), `healthCheck`, `stopTimeout`, `dependsOn` (sidecar ordering), and `logConfiguration` (usually `awslogs` to CloudWatch).\n- **Volumes**: ephemeral bind mounts or EFS volumes.\n\nEach registration creates a new immutable **revision**; services deploy by moving to a new revision, and `run_task` with only the family name uses the latest ACTIVE revision. Manage them with IaC and immutable image tags so every revision maps to an exact build."
+    }
+  ]
+}

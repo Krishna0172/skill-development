@@ -1,0 +1,68 @@
+{
+  "slug": "sql-joins",
+  "why_md": "- Almost every report and ETL query you write joins several tables; getting the join type wrong silently drops or duplicates rows.\n- Fan-out bugs (one-to-many joins inflating SUMs) are among the most common causes of wrong revenue numbers in e-commerce dashboards.\n- For AI work, text-to-SQL systems generate joins; you need to be able to review model-written SQL and spot a wrong join quickly.\n- Interviewers use joins to check fundamentals: LEFT JOIN + WHERE pitfalls, anti-joins, and NULL behaviour come up constantly.",
+  "revision_notes_md": "- INNER keeps only matched rows; LEFT keeps every left row and fills NULLs on the right.\n- A WHERE condition on the right table of a LEFT JOIN turns it into an INNER join; move it into ON.\n- Anti-join: `LEFT JOIN ... WHERE r.id IS NULL` or `NOT EXISTS` (NULL-safe), not `NOT IN`.\n- One-to-many joins multiply rows: aggregate the child table first, then join.\n- `COUNT(r.id)` counts matches (0 for none); `COUNT(*)` counts the NULL-filled row as 1.\n- CROSS JOIN = every combination; LATERAL lets a subquery reference columns of earlier tables (top-N per group).\n- Planner picks nested loop / hash / merge join; indexes on join keys matter for nested loops.",
+  "exercises_md": "1. Write a query listing every marketplace with its order count for last month, including marketplaces with zero orders. Then add a filter on order status without losing the zero rows.\n2. Take a report that joins orders, order_items and shipments, and prove (with a small test dataset) whether its revenue total is inflated by fan-out. Rewrite it with pre-aggregated subqueries/CTEs.",
+  "my_context_md": "Your services in `python-postgres` are raw SQL on PostgreSQL through psycopg2, and they already use CTEs, joins and `UPDATE ... FROM` (which is a join in disguise). When you review one of those report queries, check each one-to-many join for fan-out before SUMs, and check LEFT JOINs for right-table filters in the WHERE clause.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To keep left-table rows when filtering the right table of a LEFT JOIN, put the right-table condition in the ____ clause instead of WHERE.",
+      "answers": [
+        "on",
+        "on clause",
+        "join condition"
+      ],
+      "explanation": "Conditions in ON are applied while matching, so unmatched left rows still survive with NULLs."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A join that returns every combination of rows from two tables is a ____ JOIN.",
+      "answers": [
+        "cross",
+        "cross join"
+      ],
+      "explanation": "CROSS JOIN produces the Cartesian product (rows_a * rows_b)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE c(id INT, name TEXT);\nCREATE TABLE o(id INT, cid INT, status TEXT);\nINSERT INTO c VALUES (1,'a'),(2,'b'),(3,'c');\nINSERT INTO o VALUES (10,1,'paid'),(11,1,'rto'),(12,2,'rto');\n''')\nq1 = \"SELECT COUNT(*) FROM c LEFT JOIN o ON o.cid=c.id WHERE o.status='paid'\"\nq2 = \"SELECT COUNT(*) FROM c LEFT JOIN o ON o.cid=c.id AND o.status='paid'\"\nprint(db.execute(q1).fetchone()[0], db.execute(q2).fetchone()[0])",
+      "answers": [
+        "1 3"
+      ],
+      "explanation": "q1 filters in WHERE, removing the NULL-extended rows (only customer 1's paid order survives). q2 filters in ON, so all 3 customers remain."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE orders(id INT, total INT);\nCREATE TABLE ship(order_id INT);\nINSERT INTO orders VALUES (1,100),(2,50);\nINSERT INTO ship VALUES (1),(1),(1);\n''')\nr = db.execute('''SELECT SUM(o.total), COUNT(s.order_id)\nFROM orders o LEFT JOIN ship s ON s.order_id = o.id''').fetchone()\nprint(r)",
+      "answers": [
+        "(350, 3)"
+      ],
+      "explanation": "Order 1 has three shipments so its 100 is counted three times (300) plus order 2's 50 = 350. COUNT(s.order_id) ignores the NULL for order 2."
+    },
+    {
+      "type": "debug",
+      "prompt": "This should list products that have never been ordered, but it returns no rows even though such products exist. Why, and how do you fix it?",
+      "code": "SELECT p.sku\nFROM products p\nWHERE p.sku NOT IN (SELECT oi.sku FROM order_items oi);\n-- order_items.sku is nullable and contains some NULLs",
+      "answer": "`NOT IN` against a list that contains a NULL evaluates to NULL (unknown) for every row, so nothing passes the WHERE.\n\nFix with an anti-join that is NULL-safe:\n```sql\nSELECT p.sku\nFROM products p\nWHERE NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.sku = p.sku);\n-- or\nSELECT p.sku FROM products p\nLEFT JOIN order_items oi ON oi.sku = p.sku\nWHERE oi.sku IS NULL;\n```",
+      "rubric": [
+        "NULL in the subquery makes NOT IN unknown for all rows",
+        "Use NOT EXISTS or LEFT JOIN ... IS NULL",
+        "Alternative: filter NULLs in the subquery"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the 'fan-out' problem with joins and how you avoid it, as you would to a junior developer.",
+      "answer": "When you join a parent table (orders) to a child table with many rows per parent (items, shipments), each parent row is repeated once per child. Any aggregate over parent columns, like `SUM(orders.total)`, now counts the same order multiple times.\n\nAvoid it by aggregating each child table to the parent grain **before** joining:\n```sql\nWITH s AS (SELECT order_id, COUNT(*) AS shipments FROM shipments GROUP BY order_id)\nSELECT o.id, o.total, COALESCE(s.shipments, 0)\nFROM orders o LEFT JOIN s ON s.order_id = o.id;\n```\nOr use `EXISTS` when you only need to filter. Sanity-check row counts: the result should have one row per order.",
+      "rubric": [
+        "Joining one-to-many repeats parent rows",
+        "SUM/COUNT over parent columns becomes inflated",
+        "Pre-aggregate the child to the parent grain (or use EXISTS)",
+        "Verify the result grain / row counts"
+      ]
+    }
+  ]
+}

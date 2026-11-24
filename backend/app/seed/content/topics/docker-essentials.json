@@ -1,0 +1,123 @@
+{
+  "slug": "docker-essentials",
+  "title": "Docker Essentials: Images, Layers, Dockerfiles and Compose",
+  "skill": "docker",
+  "extra_skills": [
+    "aws-ecs",
+    "linux-shell",
+    "ci-cd"
+  ],
+  "category": "Cloud & DevOps",
+  "difficulty": "beginner",
+  "tags": [
+    "docker",
+    "containers",
+    "dockerfile",
+    "multi-stage",
+    "docker-compose",
+    "ecr"
+  ],
+  "summary": "Docker packages your app and everything it needs (OS libraries, Python, dependencies) into an image that runs the same way anywhere. A Dockerfile is the recipe; each instruction creates a cached layer, so ordering matters for fast builds. A container is a running instance of an image, isolated with its own filesystem and processes but sharing the host kernel.",
+  "details_md": "### Images, layers and containers\n- An **image** is a stack of read-only **layers**, one per filesystem-changing instruction (`RUN`, `COPY`, `ADD`), plus metadata (`CMD`, `ENV`, `EXPOSE`).\n- A **container** adds a thin writable layer on top; anything written there is lost when the container is removed unless you use a **volume**.\n- Containers are isolated with Linux **namespaces** (PID, network, mount) and limited with **cgroups** (CPU, memory). They are not VMs; they share the host kernel.\n- Images are identified by `repository:tag` (mutable) and by **digest** (`sha256:...`, immutable).\n\n### Build cache: order instructions by change frequency\nDocker reuses a cached layer if the instruction and its inputs are unchanged; once one layer changes, every later layer is rebuilt. So:\n1. Base image, OS packages (rarely change)\n2. `COPY requirements.txt` + `pip install` (change sometimes)\n3. `COPY . .` the source code (changes constantly)\n\nCopying all source before installing dependencies means every code edit reinstalls all packages.\n\n### Writing good Python Dockerfiles\n- Use slim official bases (`python:3.12-slim`); Alpine (musl) often breaks or slows down wheels for pandas/numpy/psycopg2.\n- `pip install --no-cache-dir`; pin versions in `requirements.txt`.\n- `ENV PYTHONUNBUFFERED=1` (logs appear immediately in CloudWatch/docker logs) and `PYTHONDONTWRITEBYTECODE=1`.\n- **Multi-stage builds**: compile or build wheels in a \"builder\" stage with build tools, then copy only the results into a clean runtime stage, so the image is smaller and has less attack surface.\n- Run as a **non-root user** (`USER app`).\n- A **`.dockerignore`** keeps `.git`, `.venv`, test data and secrets out of the build context.\n- **Exec form** `CMD [\"python\", \"-m\", \"app\"]` makes Python PID 1 so it receives SIGTERM. Shell form (`CMD python -m app`) wraps it in `/bin/sh -c`, which doesn't forward signals.\n- `ENTRYPOINT` is the fixed executable; `CMD` gives default arguments that `docker run image <args>` (or an ECS command override) replaces.\n\n### Secrets\nNever `COPY .env` or put secrets in `ENV`/`ARG`; they're stored in the image layers and visible via `docker history`. Inject them at runtime (environment from a secrets manager), or use BuildKit `RUN --mount=type=secret` for build-time needs.\n\n### Platforms\nImages are CPU-architecture specific. Building on an Apple Silicon Mac produces `arm64` images that fail on x86 Fargate/Lambda with \"exec format error\". Use `docker buildx build --platform linux/amd64` (or target arm64 deliberately for Graviton).\n\n### Docker Compose for local development\n`compose.yaml` defines multiple services (app, PostgreSQL, Redis), networks (services reach each other by service name, e.g. host `db`), volumes for persistent data, and environment. `docker compose up -d`, `logs -f`, `down -v`. `depends_on` with `condition: service_healthy` waits for a healthcheck.\n\n### Registry workflow (ECR)\nAuthenticate with `aws ecr get-login-password | docker login ...`, `docker tag`, `docker push`, then reference the image URI (ideally with an immutable tag such as the git SHA) in the ECS task definition or Lambda function.",
+  "code_md": "```dockerfile\n# 1) Production-style multi-stage Dockerfile for a Python ETL job\n# ---- builder: has compilers, builds wheels ----\nFROM python:3.12-slim AS builder\nRUN apt-get update && apt-get install -y --no-install-recommends build-essential \\\n    && rm -rf /var/lib/apt/lists/*\nWORKDIR /build\nCOPY requirements.txt .\nRUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt\n\n# ---- runtime: small, no compilers ----\nFROM python:3.12-slim\nENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1\nRUN useradd --create-home --uid 10001 app\nWORKDIR /app\nCOPY --from=builder /wheels /wheels\nRUN pip install --no-cache-dir /wheels/* && rm -rf /wheels   # deps layer: cached until requirements change\nCOPY --chown=app:app src/ ./src/                             # code changes only rebuild from here\nUSER app\nCMD [\"python\", \"-m\", \"src.main\"]                             # exec form: receives SIGTERM\n```\n\n```text\n# 2) .dockerignore: keep the build context small and secret-free\n.git\n.venv\n__pycache__/\n*.pyc\n.env\ntests/data/\n*.xlsx\n```\n\n```bash\n# 3) Build for the right platform, run locally, push to ECR\ndocker buildx build --platform linux/amd64 -t upload-job:$(git rev-parse --short HEAD) .\ndocker run --rm -e LOG_LEVEL=DEBUG --env-file .env.local upload-job:abc1234\n\nACCOUNT=123456789012; REGION=ap-south-1\nREPO=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/upload-job\naws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com\ndocker tag upload-job:abc1234 $REPO:abc1234\ndocker push $REPO:abc1234\n\n# Debugging\ndocker ps -a                       # running and exited containers\ndocker logs -f <container>         # stdout/stderr\ndocker exec -it <container> bash   # shell inside a running container\ndocker history upload-job:abc1234  # layers and their sizes\n```\n\n```yaml\n# 4) compose.yaml: app + PostgreSQL for local development\nservices:\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: devpass\n      POSTGRES_DB: shop\n    ports: [\"5432:5432\"]\n    volumes: [\"pgdata:/var/lib/postgresql/data\"]   # data survives container restarts\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U app -d shop\"]\n      interval: 5s\n      retries: 10\n  app:\n    build: .\n    environment:\n      DATABASE_URL: postgresql://app:devpass@db:5432/shop   # 'db' = service name\n    depends_on:\n      db:\n        condition: service_healthy\nvolumes:\n  pgdata:\n```",
+  "use_cases_md": "- Packaging ETL jobs and APIs for ECS Fargate or Lambda container images.\n- Reproducible local environments (PostgreSQL, Redis) with Docker Compose.\n- Consistent CI builds and test runs (the same image in CI and production).\n- Shipping system dependencies (libpq, fonts, ffmpeg) that are hard to install on hosts.\n- Running throwaway databases for integration tests.",
+  "mistakes_md": "- **`COPY . .` before installing dependencies**: every code change reinstalls everything. Copy and install requirements first.\n- **Secrets baked into images** (`COPY .env`, `ENV PASSWORD=...`): leaked through registries and `docker history`. Inject at runtime.\n- **Running as root**: a container escape or bug has more impact. Add a non-root `USER`.\n- **Shell-form CMD**: signals aren't forwarded, so no graceful shutdown and stops wait for SIGKILL. Use exec form.\n- **Building arm64 on a Mac and deploying to x86**: \"exec format error\". Build with `--platform`.\n- **Using `:latest` in deployments**: non-reproducible. Tag with versions or git SHAs.\n- **Alpine for scientific Python**: slow musl builds and missing wheels. Use `-slim` (Debian).\n- **Storing data in the container filesystem**: lost on removal. Use volumes or external storage (S3, RDS).",
+  "best_practices_md": "- Order Dockerfile instructions from least to most frequently changing.\n- Multi-stage builds, slim bases, `--no-cache-dir`, and clean apt lists to keep images small.\n- One process per container; log to stdout/stderr.\n- Pin base image versions (or digests) and dependency versions; rebuild regularly for security patches.\n- Scan images (ECR scanning, Trivy) in CI.\n- Use a `.dockerignore` and BuildKit secret mounts for build-time credentials.\n- Add a `HEALTHCHECK` (or ECS/ALB health checks) for long-running services.",
+  "my_context_md": "Your ECSMarketplaceDataUpload container is built from a Dockerfile, so these rules apply directly. Dependency layers (pandas, psycopg2, and the Excel engines that `read_and_validate()` needs) should come before the code `COPY`, so most builds only rebuild the code layer. Build for the architecture your ECS task definition uses. An exec-form CMD lets the Python process receive ECS's SIGTERM. Credentials should come from the task role and ECS secrets, not from the image. Docker Compose with a `postgres` service is also a practical way to start on your listed gap of automated tests: integration tests for upsert SQL can run against a disposable local database instead of a shared one.",
+  "related": [
+    "ecs-fargate",
+    "aws-lambda-essentials",
+    "github-actions-ci",
+    "python-venv-pip",
+    "pytest-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "Image vs container?",
+      "back": "Image: immutable stack of layers (the template). Container: a running instance with a writable layer on top."
+    },
+    {
+      "front": "Why copy requirements.txt before the source code?",
+      "back": "So the dependency-install layer stays cached when only code changes."
+    },
+    {
+      "front": "CMD vs ENTRYPOINT?",
+      "back": "ENTRYPOINT is the fixed executable; CMD provides default args that `docker run image args` or an ECS override replaces."
+    },
+    {
+      "front": "Why use exec-form CMD [\"python\", \"app.py\"]?",
+      "back": "Python runs as PID 1 and receives SIGTERM directly; shell form wraps it in /bin/sh, which doesn't forward signals."
+    },
+    {
+      "front": "What does a multi-stage build achieve?",
+      "back": "Build tools stay in a builder stage; only artifacts are copied into a small runtime image."
+    },
+    {
+      "front": "Fix for 'exec format error' after deploying an image built on an M-series Mac?",
+      "back": "Build for the target arch: `docker buildx build --platform linux/amd64 ...`"
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which Dockerfile ordering gives the best cache reuse for a Python app?",
+      "options": [
+        "COPY . . then pip install -r requirements.txt",
+        "Order doesn't matter",
+        "pip install first, then FROM",
+        "COPY requirements.txt, pip install, then COPY . ."
+      ],
+      "answer_index": 3,
+      "explanation": "Dependencies change less often than code; their layer is reused across code edits."
+    },
+    {
+      "question": "Where does data written inside a container's filesystem go when the container is removed?",
+      "options": [
+        "It is saved into the image",
+        "It is lost unless stored in a volume",
+        "It is uploaded to the registry",
+        "It moves to the host's /tmp"
+      ],
+      "answer_index": 1,
+      "explanation": "The writable layer is deleted with the container."
+    },
+    {
+      "question": "In Compose, how does the app container reach PostgreSQL defined as service `db`?",
+      "options": [
+        "localhost:5432",
+        "host.docker.internal only",
+        "db:5432",
+        "The container ID"
+      ],
+      "answer_index": 2,
+      "explanation": "Compose creates a network where service names resolve via DNS."
+    },
+    {
+      "question": "Why is `ENV DB_PASSWORD=secret` in a Dockerfile a problem?",
+      "options": [
+        "It's stored in the image metadata and visible to anyone who can pull it",
+        "ENV is not supported",
+        "It slows builds",
+        "It only works on Linux"
+      ],
+      "answer_index": 0,
+      "explanation": "Image config and layers are readable; inject secrets at runtime."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you make Docker images small and builds fast?",
+      "difficulty": "medium",
+      "answer_md": "**Fast builds (cache):**\n- Order instructions from least to most frequently changing: base, OS packages, `COPY requirements.txt` + `pip install`, then `COPY` source.\n- Use a `.dockerignore` so irrelevant changes (`.git`, data files) don't invalidate `COPY` and the context uploads quickly.\n- In CI, reuse cache (`docker buildx build --cache-from type=registry,...` or the GitHub Actions cache backend).\n\n**Small images:**\n- Slim base (`python:3.12-slim`) rather than full images; avoid Alpine for pandas/numpy because of musl.\n- **Multi-stage**: compile wheels in a builder stage with `build-essential`, copy only wheels or a venv into the runtime stage.\n- `pip install --no-cache-dir`; combine `apt-get update && apt-get install ... && rm -rf /var/lib/apt/lists/*` in a single RUN (files deleted in a later layer still take space in the earlier one).\n- Install only production dependencies.\n\nSmaller images pull faster, which directly reduces ECS Fargate task start time and cold starts for Lambda container images, and they have fewer packages to patch. `docker history <image>` shows which layers are large."
+    },
+    {
+      "question": "What is the difference between a container and a virtual machine?",
+      "difficulty": "easy",
+      "answer_md": "A **virtual machine** emulates hardware; each VM runs its own full guest OS kernel on a hypervisor. It's strong isolation, but heavy: GBs of disk, slower boot, more memory overhead.\n\nA **container** is a regular process on the host, isolated by Linux kernel features:\n- **Namespaces** give it its own view of process IDs, network interfaces, mounts, hostname and users.\n- **cgroups** limit its CPU, memory and I/O.\n- A layered image provides its root filesystem.\n\nAll containers on a host **share the host kernel**, so they start in milliseconds, are lightweight (MBs), and pack densely. The trade-off is weaker isolation than VMs, since a kernel vulnerability can affect all containers, which is why you run as non-root and keep images patched.\n\nIn practice, both are combined: AWS Fargate runs each task inside a lightweight VM boundary (Firecracker for Lambda, and similar isolation for Fargate), so you get container ergonomics with VM-level isolation between customers."
+    },
+    {
+      "question": "Your container ignores `docker stop` and is killed after 10 seconds. Why, and how do you fix it?",
+      "difficulty": "medium",
+      "answer_md": "`docker stop` (and ECS stopping a task) sends **SIGTERM** to PID 1, waits for a grace period (10 s for Docker, `stopTimeout` for ECS), then sends **SIGKILL**.\n\nCommon causes:\n1. **Shell-form CMD**: `CMD python -m app` runs `/bin/sh -c \"python -m app\"`. The shell is PID 1 and doesn't forward SIGTERM to Python. Fix with exec form: `CMD [\"python\", \"-m\", \"app\"]`. If you need a shell script as entrypoint, end it with `exec python -m app`.\n2. **The app doesn't handle SIGTERM**: the kernel ignores signals sent to PID 1 unless the process has installed a handler, and Python installs no SIGTERM handler by default. Register one:\n```python\nimport signal, sys\ndef shutdown(sig, frame):\n    flush_and_mark_status()\n    sys.exit(0)\nsignal.signal(signal.SIGTERM, shutdown)\n```\n3. Child processes become zombies: use `docker run --init` (tini) or add `tini` as the entrypoint when the app spawns subprocesses.\n\nGraceful shutdown matters for ETL jobs: it's your chance to commit or roll back the current batch and record an accurate status instead of leaving work half-done."
+    }
+  ]
+}

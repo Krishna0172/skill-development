@@ -1,0 +1,151 @@
+{
+  "slug": "ai-context-tokens-cost",
+  "title": "Context windows, tokens and cost",
+  "skill": "llm-applications",
+  "extra_skills": [
+    "caching-redis"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "tokens",
+    "context-window",
+    "chat-history",
+    "summarization",
+    "cost-tracking",
+    "prompt-caching"
+  ],
+  "summary": "Everything an LLM sees and produces is measured in tokens: the context window caps prompt + output, latency grows with output tokens, and cost is input tokens x input price + output tokens x output price. Chat backends must budget tokens, trim or summarise history, and track usage per tenant.",
+  "why_md": "- Long chat sessions eventually exceed the context window and fail or get expensive.\n- Cost scales with tokens resent every turn - history and RAG context dominate.\n- Per-org cost tracking and budgets are standard SaaS requirements.\n- Interview staples: 'how do you handle long conversations?', 'how would you cut LLM cost?'",
+  "details_md": "### Tokens\nModels read sub-word tokens, not characters. For English text a rough rule is ~4 characters per token, but code, JSON, numbers and non-English text tokenise less efficiently. Count exactly with the model's tokenizer (e.g. `tiktoken` for OpenAI-family models, the Hugging Face tokenizer for open models, or a provider token-counting endpoint); the authoritative number is the `usage` block returned by each call.\n\n### Context window\nThe context window is the maximum tokens per request: system prompt + tools + history + retrieved context + the output you reserve (`max_tokens`). Exceeding it gives a 400 error or silent truncation depending on the provider. Bigger windows are not free: cost and latency rise, and models can miss details buried in the middle of long contexts. Look up current limits per model in provider docs.\n\n### Managing chat history\nThe API is stateless, so every turn resends history. Strategies:\n- **Sliding window**: keep the system prompt + last N turns (or as many as fit a token budget). Simple; forgets old facts.\n- **Summarisation**: when history exceeds a threshold, replace older turns with an LLM-written summary stored on the session. Keeps key facts; adds a call and can lose detail.\n- **Retrieval memory**: embed old messages and retrieve relevant ones per turn.\n- **Trim tool results and RAG chunks**: often the biggest token consumers.\nAlways keep the system prompt and the newest user message; drop whole turns, never half a tool-call exchange.\n\n### Cost\n`cost = prompt_tokens x input_price + completion_tokens x output_price`, with prices quoted per million (or thousand) tokens and output usually pricier. Some providers discount cached input tokens and batch APIs. Prices change - store them in a table with effective dates rather than constants, compute cost from the response `usage`, and use `Decimal`/`NUMERIC` for money.\n\n### Caching\n- **Provider prompt caching**: repeated identical prompt *prefixes* (system prompt, tool definitions, schema) can be cached and billed cheaper/faster. Put stable content first and variable content last.\n- **Application caching**: cache full responses for identical deterministic requests (e.g. the same text-to-SQL question for the same org and schema version) in Redis/Postgres keyed by a hash.\n- **Model routing**: smaller models for simple tasks.\n",
+  "code_md": "```python\n# Token-budgeted history: keep system + newest turns that fit\ndef count_tokens(text: str) -> int:\n    # replace with the model's tokenizer (e.g. tiktoken) in real code\n    return max(1, len(text) // 4)\n\ndef fit_history(system: dict, history: list[dict], budget: int, reserve_output: int) -> list[dict]:\n    available = budget - reserve_output - count_tokens(system[\"content\"])\n    kept = []\n    for msg in reversed(history):                 # newest first\n        cost = count_tokens(msg[\"content\"]) + 4    # small per-message overhead\n        if cost > available:\n            break\n        kept.append(msg)\n        available -= cost\n    return [system, *reversed(kept)]\n```\n\n```sql\n-- Cost tracking per org with effective-dated prices (NUMERIC, not float)\nCREATE TABLE llm_prices (\n  model text NOT NULL,\n  effective_from timestamptz NOT NULL,\n  input_per_mtok numeric(12,6) NOT NULL,\n  output_per_mtok numeric(12,6) NOT NULL,\n  PRIMARY KEY (model, effective_from)\n);\n\nINSERT INTO llm_usage (org_id, session_id, model, prompt_tokens, completion_tokens, cost_usd)\nSELECT %(org_id)s, %(session_id)s, %(model)s, %(pt)s, %(ct)s,\n       (%(pt)s * p.input_per_mtok + %(ct)s * p.output_per_mtok) / 1000000\nFROM llm_prices p\nWHERE p.model = %(model)s AND p.effective_from <= now()\nORDER BY p.effective_from DESC\nLIMIT 1;\n\n-- Monthly spend per org\nSELECT org_id, date_trunc('month', created_at) AS month, SUM(cost_usd) AS usd\nFROM llm_usage GROUP BY 1, 2 ORDER BY 2 DESC, 3 DESC;\n```",
+  "use_cases_md": "- Chat sessions in an LLM product: budgeted history plus a rolling summary column on the session.\n- Per-org monthly budgets: block or downgrade the model when spend crosses a threshold.\n- Text-to-SQL: cache the schema prefix (prompt caching) and cache answers per (org, question hash, schema version).\n- Nightly review summarisation via a cheaper model or batch API.",
+  "mistakes_md": "- **Estimating cost from character counts** instead of the returned `usage`.\n- **Float money** - rounding drift in invoices; use Decimal/NUMERIC.\n- **Hard-coded prices** - wrong after the next price change.\n- **Unbounded history** - session eventually 400s on context length, cost grows quadratically over a conversation.\n- **Dropping half a tool exchange** when trimming - invalid message sequence.\n- **Variable content at the start of the prompt** - defeats prefix caching.",
+  "best_practices_md": "- Budget = window - reserved output - system/tools; fill with newest history and top-ranked context.\n- Count with the real tokenizer; reconcile with `usage`.\n- Store usage per call; compute cost from an effective-dated price table.\n- Summarise old turns past a threshold; store summary on the session.\n- Stable prefix first for prompt caching; cache deterministic answers.\n- Set per-org budgets and alerts.",
+  "my_context_md": "`GetLlmData` already tracks USD cost per org - this topic is the mechanics underneath it: tokens from each response's `usage`, multiplied by per-model input/output prices. Worth checking in that service: are prices hard-coded or in a table with effective dates, is cost stored as NUMERIC, and does history sent per message have any token budget?",
+  "revision_notes_md": "- ~4 chars/token for English (rough); count with the real tokenizer.\n- Context window = system + tools + history + RAG + reserved output.\n- Stateless API -> resend history every turn -> cost grows.\n- Strategies: sliding window, summarisation, retrieval memory, trim tool/RAG output.\n- Cost = in_tokens x in_price + out_tokens x out_price (output usually pricier).\n- Use usage from the response; Decimal/NUMERIC; effective-dated prices.\n- Prompt caching rewards a stable prefix.\n- Cache deterministic answers; route simple tasks to small models.",
+  "exercises_md": "1. Implement `fit_history` with `tiktoken` (or a local tokenizer) and unit-test that system + latest user message are always kept.\n2. Create `llm_prices` and `llm_usage` tables locally and write the monthly per-org spend query.\n3. Add rolling summarisation: when a session exceeds 3,000 tokens, summarise older turns with a local Ollama model and store the summary.\n4. Measure: how many tokens does your text-to-SQL schema prompt use? Reduce it by 50% with a table subset.",
+  "related": [
+    "ai-llm-apis",
+    "ai-tokenization",
+    "ai-memory-management",
+    "ai-latency-cost-optimization",
+    "caching-strategies"
+  ],
+  "flashcards": [
+    {
+      "front": "What counts toward the context window?",
+      "back": "System prompt, tool definitions, history, retrieved context and the output tokens generated."
+    },
+    {
+      "front": "Cost formula for one LLM call?",
+      "back": "prompt_tokens x input price + completion_tokens x output price (prices per million tokens)."
+    },
+    {
+      "front": "Why put stable content at the start of the prompt?",
+      "back": "Provider prompt caching matches on identical prefixes; stable-first maximises cache hits."
+    },
+    {
+      "front": "Two strategies for long chat history?",
+      "back": "Sliding window by token budget; summarising older turns (also: retrieval-based memory)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What's the most reliable source of token counts for billing?",
+      "options": [
+        "len(text) / 4",
+        "Word count x 1.3",
+        "The `usage` block in the API response",
+        "The max_tokens parameter"
+      ],
+      "answer_index": 2,
+      "explanation": "usage reports what the provider actually counted and billed."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A chat session fails with 'context length exceeded' after many turns. Best fix?",
+      "options": [
+        "Retry with backoff",
+        "Trim history to a token budget and/or summarise older turns",
+        "Raise temperature",
+        "Lower max_tokens to 1"
+      ],
+      "answer_index": 1,
+      "explanation": "The input is too long; retries won't help. Budget the history."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Providers can discount repeated identical prompt prefixes via prompt ____.",
+      "answers": [
+        "caching",
+        "cache"
+      ],
+      "explanation": "Prompt caching."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Store LLM cost in PostgreSQL with the ____ type rather than float.",
+      "answers": [
+        "numeric",
+        "decimal"
+      ],
+      "explanation": "NUMERIC/DECIMAL avoids float rounding errors."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (cost arithmetic and a token budget)",
+      "code": "from decimal import Decimal, ROUND_HALF_UP\n\nIN_PER_M = Decimal(\"0.50\")    # USD per 1M input tokens (example)\nOUT_PER_M = Decimal(\"1.50\")   # USD per 1M output tokens (example)\n\ncalls = [(1200, 300), (8000, 500), (800, 100)]\ntotal = sum((Decimal(p) * IN_PER_M + Decimal(c) * OUT_PER_M) / 1_000_000 for p, c in calls)\nprint(total)\nprint(total.quantize(Decimal(\"0.0001\"), rounding=ROUND_HALF_UP))\n\nwindow, reserve, system = 8192, 1024, 600\nturns = [1400, 1500, 2000, 1200, 700]   # tokens, oldest -> newest\navail, kept = window - reserve - system, 0\nfor t in reversed(turns):\n    if t > avail:\n        break\n    avail -= t\n    kept += 1\nprint(kept, avail)",
+      "answers": [
+        "0.00635\n0.0064\n4 1168"
+      ],
+      "explanation": "Input tokens 10,000 x 0.50/1M = 0.005; output 900 x 1.50/1M = 0.00135; total 0.00635 -> 0.0064 rounded half-up. Budget = 8192 - 1024 - 600 = 6568. Newest first: 700 (5868 left), 1200 (4668), 2000 (2668), 1500 (1168); the oldest turn (1400) doesn't fit, so 4 turns are kept with 1168 tokens unused."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong with this cost tracking and how do you fix it?",
+      "code": "PRICE_PER_TOKEN = 0.000002   # set in 2023\n\ndef record(org_id, prompt_text, answer_text):\n    tokens = len(prompt_text.split()) + len(answer_text.split())\n    cost = tokens * PRICE_PER_TOKEN\n    cur.execute(f\"INSERT INTO llm_usage (org_id, cost) VALUES ({org_id}, {cost})\")",
+      "answer": "- Word counts aren't tokens; use `usage.prompt_tokens` / `completion_tokens` from the response.\n- Input and output are priced differently; one constant is wrong.\n- Hard-coded, stale price; store per-model effective-dated prices.\n- Float money; use Decimal/NUMERIC.\n- f-string SQL; use parameters.\n\n```python\ndef record(cur, org_id, model, usage):\n    cur.execute(\n        '''INSERT INTO llm_usage (org_id, model, prompt_tokens, completion_tokens, cost_usd)\n           SELECT %s, %s, %s, %s, (%s * input_per_mtok + %s * output_per_mtok) / 1000000\n           FROM llm_prices WHERE model = %s AND effective_from <= now()\n           ORDER BY effective_from DESC LIMIT 1''',\n        (org_id, model, usage.prompt_tokens, usage.completion_tokens,\n         usage.prompt_tokens, usage.completion_tokens, model))\n```",
+      "rubric": [
+        "Use usage token counts, not word counts",
+        "Separate input/output pricing per model, not hard-coded",
+        "Use Decimal/NUMERIC for money",
+        "Parameterise the SQL"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd keep a long-running chat session within the context window without losing important information.",
+      "answer": "Define a budget: window minus reserved output minus system prompt and tools. Always include the system prompt and the newest user message. Fill the rest with the most recent turns, dropping whole turns (and whole tool-call exchanges) from the oldest end. When dropped content would matter, maintain a rolling summary: once history passes a threshold, ask a (cheap) model to summarise older turns - user goals, decisions, entities like order ids - store it on the session and inject it after the system prompt. For long-lived facts, optionally embed past messages and retrieve the relevant ones. Measure with the real tokenizer and reconcile with response usage.",
+      "rubric": [
+        "Token budget with reserved output",
+        "Keep system + newest message; drop whole oldest turns",
+        "Rolling summary (or retrieval memory) for older context",
+        "Use real tokenizer/usage"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "List three ways to reduce LLM cost in a text-to-SQL chat product without hurting quality much.",
+      "answer": "1. Send only relevant schema tables (retrieve by question) instead of the full DDL.\n2. Order prompts as stable prefix (system, rules, schema) then variable parts to benefit from provider prompt caching.\n3. Cache answers for identical (org, normalised question, schema version).\n4. Budget/summarise history; trim tool results.\n5. Route simple turns (greetings, clarifications) to a smaller model; cap max_tokens.",
+      "rubric": [
+        "Reduce input tokens (schema subset, history budget)",
+        "Caching (prompt prefix and/or response)",
+        "Model routing or output caps"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you implement per-organisation cost tracking and budgets for an LLM feature?",
+      "difficulty": "medium",
+      "answer_md": "Log every call: org_id, user, session, model, prompt/completion tokens from `usage`, cached tokens if reported, latency, feature name. Compute cost at write time from an **effective-dated price table** (`model, effective_from, input_per_mtok, output_per_mtok`) using NUMERIC, so historical rows keep the price that applied. Aggregate with `GROUP BY org_id, date_trunc('month', created_at)` (or a materialised daily rollup).\n\nBudgets: keep `org_budgets(monthly_limit_usd)`; before each call check month-to-date spend (cached, e.g. in Redis, updated after each call). Soft limit -> alert; hard limit -> block or route to a cheaper model. Reconcile monthly against the provider's billing export."
+    },
+    {
+      "question": "Why does conversation cost grow faster than linearly with the number of turns?",
+      "difficulty": "easy",
+      "answer_md": "The API is stateless, so turn *n* resends all previous *n-1* turns as input. If each turn adds roughly *t* tokens, input for turn *n* is about *n·t*, and the total over *N* turns is about *t·N²/2* - quadratic. Example: 20 turns of 300 tokens each send roughly 60,000 input tokens in total, not 6,000. Fixes: token-budgeted sliding window, summarising old turns, trimming tool/RAG outputs, and prompt caching for the stable prefix."
+    }
+  ],
+  "category": "AI"
+}

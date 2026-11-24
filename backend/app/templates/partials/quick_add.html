@@ -1,0 +1,24 @@
+<form method="post" action="/tracker/quick-add" class="form-grid">
+  <div class="between"><strong>Log a learning activity</strong><span class="tiny faint">under a minute</span></div>
+  <div class="grid g3">
+    <label class="field">Minutes<input type="number" name="minutes" min="1" max="960" value="30" required></label>
+    <label class="field">Type
+      <select name="kind">{% for k in ["learning", "practice", "revision", "project", "reading", "other"] %}<option>{{ k }}</option>{% endfor %}</select>
+    </label>
+    <label class="field">Date<input type="date" name="day" value="{{ today().isoformat() }}" max="{{ today().isoformat() }}"></label>
+  </div>
+  <label class="field">Topic studied
+    <select name="topic_id"><option value="">—</option>
+      {% for t in quick_topics %}<option value="{{ t.id }}">{{ t.title }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field">Concepts learned / what I did<textarea name="notes" rows="2" placeholder="e.g. ROW_NUMBER vs RANK, solved 2 window-function challenges"></textarea></label>
+  <div class="grid g3">
+    <label class="field">Difficulty<select name="difficulty"><option value="">—</option>{% for i in range(1, 6) %}<option>{{ i }}</option>{% endfor %}</select></label>
+    <label class="field">Confidence<select name="confidence"><option value="">—</option>{% for i in range(1, 6) %}<option>{{ i }}</option>{% endfor %}</select></label>
+    <label class="field">Problems?<input name="problems" placeholder="optional"></label>
+  </div>
+  <label class="field">Next action<input name="next_action" placeholder="e.g. retry LAG exercise tomorrow"></label>
+  <input type="hidden" name="next" value="{{ path }}">
+  <button class="btn primary">Save activity</button>
+</form>

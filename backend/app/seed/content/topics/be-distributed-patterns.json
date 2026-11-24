@@ -1,0 +1,192 @@
+{
+  "slug": "be-distributed-patterns",
+  "title": "Distributed patterns: outbox, saga, CQRS, idempotency, CAP",
+  "skill": "system-design",
+  "extra_skills": [
+    "backend-architecture",
+    "message-queues"
+  ],
+  "category": "Backend",
+  "difficulty": "advanced",
+  "tags": [
+    "outbox",
+    "saga",
+    "cqrs",
+    "idempotency",
+    "eventual-consistency",
+    "cap"
+  ],
+  "summary": "Once data and logic span services, you lose single-database transactions. These patterns restore correctness: the transactional outbox for reliable events, sagas for multi-step workflows, CQRS for separate read/write models, idempotency keys for safe retries, and an honest view of eventual consistency and CAP.",
+  "why_md": "- The dual-write problem (update DB and publish a message) silently loses or duplicates events in real systems.\n- Retries are unavoidable; without idempotency they double-charge or double-ship.\n- Senior interviews and system-design rounds revolve around these trade-offs.\n- The same ideas apply to AI pipelines: agent steps and tool calls need idempotency and compensation.",
+  "details_md": "### Why transactions break across services\nA single Postgres transaction gives atomicity for its own tables only. When an order service must save an order *and* tell the payment service, you cannot wrap both in one ACID transaction (two-phase commit exists but is slow and fragile). We accept **eventual consistency** and use patterns that make failures recoverable.\n\n### CAP and eventual consistency\nDuring a **partition** (network split) a distributed store must choose **Consistency** (reject or delay requests so all nodes agree) or **Availability** (answer, maybe with stale data). It is a trade-off only *during partitions*; PACELC adds that even without partitions you trade latency vs consistency. Eventual consistency: replicas converge if updates stop. Design UIs and APIs for it (show 'processing', read-your-writes via routing to primary).\n\n### Idempotency\nAn operation is idempotent if repeating it has the same effect as once. Delivery guarantees are usually **at-least-once**, so consumers and APIs must tolerate duplicates. Techniques:\n- **Idempotency key** (client-generated UUID in a header). Store key -> response with a UNIQUE constraint; a retry returns the stored result instead of redoing the work.\n- Natural idempotency: `INSERT ... ON CONFLICT DO NOTHING`, `UPDATE ... SET status='paid'`, setting rather than incrementing.\n- **Inbox table** / processed-message ids to deduplicate consumers.\n\n### Transactional outbox\nProblem: `save order` then `publish OrderCreated` - a crash between them loses the event; publishing first risks a ghost event. Solution: in the **same DB transaction** insert the order and a row in an `outbox` table. A separate relay (polling publisher, or CDC such as Debezium reading the WAL) reads unsent rows, publishes to the broker, and marks them sent. Delivery is at-least-once, so consumers deduplicate. Multiple relay workers can claim rows with `SELECT ... FOR UPDATE SKIP LOCKED`.\n\n### Saga\nA saga is a sequence of **local transactions**, each publishing an event or command for the next; if one step fails, previously completed steps run **compensating actions** (refund, release stock).\n- **Choreography**: services react to each other's events; simple but the flow is implicit and hard to follow.\n- **Orchestration**: a coordinator (state machine) tells each service what to do and tracks state; clearer and testable, with a central component to operate.\nCompensations must be idempotent and may be semantic (cancel order) rather than a true rollback. Sagas lack isolation, so design for intermediate states (order 'PENDING') and use countermeasures such as reservations or versioning.\n\n### CQRS\nCommand Query Responsibility Segregation separates the **write model** (validates commands, enforces invariants, normalised) from one or more **read models** (denormalised projections optimised for queries, perhaps in Elasticsearch or Redis). Reads are updated from events, so they are eventually consistent. Use it where read and write shapes or loads differ greatly. It adds complexity: do not apply it to simple CRUD. **Event sourcing** (storing events as the source of truth) is a separate, optional companion.\n\n### Combining them\nOrder service: HTTP `POST /orders` with an idempotency key -> one transaction writes order + outbox -> relay publishes `OrderCreated` -> saga orchestrator reserves stock, charges payment, on failure compensates -> projections update the read model for the dashboard.",
+  "code_md": "```python\n# 1) Idempotency key: the retry returns the first result (sqlite shows the idea; use Postgres in prod)\nimport sqlite3, json\ncon = sqlite3.connect(\":memory:\")\ncon.execute(\"CREATE TABLE idem (key TEXT PRIMARY KEY, response TEXT)\")\ncon.execute(\"CREATE TABLE orders (id INTEGER PRIMARY KEY, sku TEXT)\")\n\ndef create_order(key: str, sku: str) -> dict:\n    row = con.execute(\"SELECT response FROM idem WHERE key = ?\", (key,)).fetchone()\n    if row:\n        return json.loads(row[0])                      # replay stored response\n    cur = con.execute(\"INSERT INTO orders (sku) VALUES (?)\", (sku,))\n    resp = {\"order_id\": cur.lastrowid}\n    con.execute(\"INSERT INTO idem VALUES (?, ?)\", (key, json.dumps(resp)))\n    con.commit()\n    return resp\n```\n\n```sql\n-- 2) Transactional outbox in PostgreSQL\nBEGIN;\nINSERT INTO orders (id, customer_id, total) VALUES (:id, :cust, :total);\nINSERT INTO outbox (id, aggregate_id, type, payload)\nVALUES (gen_random_uuid(), :id, 'OrderCreated', :payload::jsonb);\nCOMMIT;\n\n-- Relay worker: claim a batch without blocking other relays\nSELECT id, type, payload FROM outbox\nWHERE sent_at IS NULL\nORDER BY created_at\nLIMIT 100\nFOR UPDATE SKIP LOCKED;\n-- publish to broker, then: UPDATE outbox SET sent_at = now() WHERE id = ANY(:ids);\n```\n\n```python\n# 3) Orchestrated saga with compensation (sketch)\ndef place_order(order):\n    done = []\n    try:\n        reserve_stock(order);   done.append(release_stock)\n        charge_payment(order);  done.append(refund_payment)\n        confirm_order(order)\n    except Exception:\n        for compensate in reversed(done):      # undo in reverse order\n            compensate(order)                  # each must be idempotent\n        mark_order_failed(order)\n        raise\n```",
+  "use_cases_md": "- Checkout: reserve inventory, charge card, create shipment, each in a different service (saga).\n- Publishing `OrderCreated` to a queue exactly when the order row commits (outbox).\n- Payment API where the mobile app retries on timeouts but must not charge twice (idempotency key).\n- A reporting dashboard with a denormalised read model rebuilt from events (CQRS).\n- Marketplace data upload pipelines where redelivered messages must not duplicate rows (inbox / `ON CONFLICT`).",
+  "mistakes_md": "- **Dual writes** (DB commit then publish) with no outbox: lost or phantom events.\n- **Assuming exactly-once delivery**: brokers give at-least-once; make consumers idempotent.\n- **Idempotency check without a UNIQUE constraint** (read-then-write race): two concurrent retries both pass.\n- **Non-idempotent compensations** that fail on a second run.\n- **CQRS for simple CRUD**: complexity without benefit.\n- **Ignoring intermediate saga states**: users see inconsistent data.\n- **Misreading CAP** as 'pick any two' at all times; it applies during partitions.\n- **Never cleaning the outbox/idempotency tables**: they grow without bound.",
+  "best_practices_md": "- Write state change and outbox row in one local transaction; relay with `FOR UPDATE SKIP LOCKED` or CDC.\n- Make every consumer and API idempotent; enforce with UNIQUE constraints and store results with an expiry.\n- Prefer orchestration for complex sagas; model them as persisted state machines with timeouts.\n- Design compensations as idempotent business actions.\n- Use CQRS only where read and write needs diverge; monitor projection lag.\n- Add correlation ids across events and keep ordering per aggregate (partition key).\n- Test failure paths: crash between steps, duplicates, out-of-order events.",
+  "my_context_md": "The learner's `ForcesightJobSchedulerAndRunner` already claims jobs with `SELECT ... FOR UPDATE SKIP LOCKED` (src/lock.py, job_repo.py): the same primitive powers an outbox relay. His `ECSMarketplaceDataUpload` has upload status tracking and deadlock retry, which is where idempotent re-processing and a processed-files table would make retries safe, and `INSERT ... ON CONFLICT DO UPDATE` is already his idempotent-write tool.",
+  "revision_notes_md": "- No cross-service ACID: accept eventual consistency, add patterns.\n- CAP: during a partition choose C or A; PACELC adds latency vs consistency otherwise.\n- At-least-once delivery => idempotent consumers and APIs.\n- Idempotency key stored with UNIQUE constraint; replay the saved response.\n- Outbox: business row + outbox row in one transaction; relay publishes (SKIP LOCKED or CDC); consumers dedupe.\n- Saga: local transactions + compensations; choreography (events) vs orchestration (coordinator).\n- Sagas are not isolated: model PENDING states.\n- CQRS: separate write model and denormalised read models fed by events; eventual consistency.\n- Clean up outbox and idempotency tables.",
+  "exercises_md": "1. Implement the idempotency-key function in Postgres (psycopg2) using a UNIQUE key and `INSERT ... ON CONFLICT DO NOTHING`; fire two concurrent requests with the same key and confirm one order.\n2. Create `orders` and `outbox` tables; write a relay script that claims rows with `FOR UPDATE SKIP LOCKED`, 'publishes' to a print statement, and marks them sent; run two relays.\n3. Write a three-step saga (reserve, charge, ship) with a failure injected at step 3 and verify the compensations run in reverse order and are idempotent.\n4. Draw read and write models for an orders dashboard and write the projection update function that consumes `OrderCreated`.",
+  "related": [
+    "be-microservices",
+    "message-queues",
+    "retries-backoff-idempotency",
+    "be-postgres-locking-deadlocks",
+    "transactions-isolation",
+    "be-system-design-fundamentals",
+    "postgres-upsert"
+  ],
+  "flashcards": [
+    {
+      "front": "What problem does the outbox pattern solve?",
+      "back": "The dual-write problem: atomically saving state and publishing an event by writing both in one DB transaction and relaying later."
+    },
+    {
+      "front": "Saga: choreography vs orchestration?",
+      "back": "Choreography: services react to events. Orchestration: a coordinator directs steps and tracks state."
+    },
+    {
+      "front": "How do you make a POST retry-safe?",
+      "back": "Client idempotency key stored with a UNIQUE constraint; return the stored response on retry."
+    },
+    {
+      "front": "What does CAP say?",
+      "back": "During a network partition you must choose consistency or availability."
+    },
+    {
+      "front": "What is CQRS?",
+      "back": "Separating the write model from denormalised, event-fed read models."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which pattern fixes 'the DB commit succeeded but publishing the event failed'?",
+      "options": [
+        "Transactional outbox",
+        "CQRS",
+        "Sharding",
+        "Read replicas"
+      ],
+      "answer_index": 0,
+      "explanation": "Outbox writes the event in the same transaction."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In a saga, what happens when step 3 fails?",
+      "options": [
+        "Everything is rolled back by a 2PC",
+        "Compensating actions undo completed steps",
+        "The broker retries forever",
+        "Nothing"
+      ],
+      "answer_index": 1,
+      "explanation": "Compensations undo earlier local transactions."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What guarantee do most message brokers provide by default?",
+      "options": [
+        "Exactly-once end-to-end",
+        "At-least-once delivery",
+        "At-most-never",
+        "Ordered globally"
+      ],
+      "answer_index": 1,
+      "explanation": "Duplicates are possible, so consumers must be idempotent."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is the best protection against two concurrent retries both passing an idempotency check?",
+      "options": [
+        "A SELECT before INSERT",
+        "A UNIQUE constraint on the key",
+        "Longer timeouts",
+        "Logging"
+      ],
+      "answer_index": 1,
+      "explanation": "The database enforces uniqueness atomically."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "An operation that has the same effect when run twice as once is called ____.",
+      "answers": [
+        "idempotent"
+      ],
+      "explanation": "Idempotent."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The CAP theorem trade-off applies during a network ____.",
+      "answers": [
+        "partition"
+      ],
+      "explanation": "Network partition."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print after two calls with the same key?",
+      "code": "import sqlite3\ncon = sqlite3.connect(':memory:')\ncon.execute('CREATE TABLE done (k TEXT PRIMARY KEY)')\ncon.execute('CREATE TABLE pay (n INTEGER)')\ndef pay(k):\n    try:\n        con.execute('INSERT INTO done VALUES (?)', (k,))\n    except sqlite3.IntegrityError:\n        return 'duplicate'\n    con.execute('INSERT INTO pay VALUES (1)')\n    return 'charged'\nprint(pay('a'), pay('a'), pay('b'))\nprint(con.execute('SELECT COUNT(*) FROM pay').fetchone()[0])",
+      "answers": [
+        "charged duplicate charged\n2"
+      ],
+      "explanation": "The UNIQUE key blocks the duplicate; two charges happen."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this compensation order print?",
+      "code": "done = []\ndef step(name, fail=False):\n    if fail:\n        raise RuntimeError(name)\n    done.append(name)\ntry:\n    step('reserve'); step('charge'); step('ship', fail=True)\nexcept RuntimeError as e:\n    print('failed at', e)\n    for s in reversed(done):\n        print('undo', s)",
+      "answers": [
+        "failed at ship\nundo charge\nundo reserve"
+      ],
+      "explanation": "Completed steps are undone in reverse order."
+    },
+    {
+      "type": "debug",
+      "prompt": "Orders sometimes exist without an OrderCreated event. What is wrong and how do you fix it?",
+      "code": "def create_order(db, broker, data):\n    db.execute('INSERT INTO orders ...', data)\n    db.commit()\n    broker.publish('OrderCreated', data)   # crash here loses the event",
+      "answer": "Dual write: a crash between commit and publish loses the event. Use a transactional outbox: insert the order and an outbox row in the same transaction, and have a relay publish unsent rows (at-least-once) with consumers deduplicating.",
+      "rubric": [
+        "Identify the dual-write problem",
+        "Outbox row in same transaction",
+        "Relay + idempotent consumers"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain eventual consistency and how you design an API around it.",
+      "answer": "Eventual consistency means replicas and projections converge after updates stop, but reads may be stale meanwhile. Design for it by returning accepted/pending states (202 plus a status resource), making operations idempotent, offering read-your-writes where needed (read from primary), and showing users that processing is in progress.",
+      "rubric": [
+        "Replicas converge, temporary staleness",
+        "Pending states/202 and polling",
+        "Idempotency and read-your-writes"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Orchestrated vs choreographed saga: trade-offs?",
+      "answer": "Choreography is decentralised: each service reacts to events, so there is no central coordinator but the end-to-end flow is implicit, hard to monitor and prone to cyclic dependencies. Orchestration uses a coordinator that holds the state machine and issues commands, making the flow explicit, observable and testable, at the cost of a central component that must be reliable and not contain business logic of services.",
+      "rubric": [
+        "Choreography decentralised/implicit",
+        "Orchestration central/explicit",
+        "Pros and cons of each"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you guarantee a payment is charged only once when clients retry?",
+      "difficulty": "hard",
+      "answer_md": "Require an `Idempotency-Key` header. In one transaction insert the key into a table with a UNIQUE constraint (status in_progress); if it already exists return the stored response or 409 while in progress. After charging, store the response with the key, and pass the same key to the payment provider. Expire keys after a window. The constraint, not an application-level check, prevents races."
+    },
+    {
+      "question": "Explain the transactional outbox and its failure modes.",
+      "difficulty": "hard",
+      "answer_md": "Write the entity change and an outbox row in one local transaction. A relay (polling with `FOR UPDATE SKIP LOCKED`, or CDC reading the WAL) publishes rows then marks them sent. Failure modes: relay crashes after publish but before marking sent, causing duplicates (so consumers must be idempotent); ordering problems with multiple relays (partition by aggregate id); outbox growth (clean up) and lag (monitor)."
+    },
+    {
+      "question": "When would you not use CQRS?",
+      "difficulty": "medium",
+      "answer_md": "For simple CRUD where reads and writes share a model and load; CQRS adds projections, eventual consistency and operational complexity. Use it when read and write workloads or shapes diverge substantially (complex invariants on writes, heavy denormalised reads, different scaling needs), and prefer simpler options like indexes, materialised views or read replicas first."
+    }
+  ]
+}

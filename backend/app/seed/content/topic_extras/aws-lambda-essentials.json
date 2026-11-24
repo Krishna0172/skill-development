@@ -1,0 +1,70 @@
+{
+  "slug": "aws-lambda-essentials",
+  "why_md": "- Lambda is the default glue for event-driven backends: S3 uploads, schedules, queue consumers, small APIs.\n- Its execution model (cold starts, reused containers, 15-minute cap, concurrency) shapes how you write Python for it.\n- Lambda + PostgreSQL needs care: unbounded concurrency can exhaust database connections.\n- AI apps often run lightweight inference/orchestration steps on Lambda; interviews ask Lambda vs ECS trade-offs.",
+  "revision_notes_md": "- Max timeout 15 minutes; memory 128 MB–10 GB (CPU scales with memory); /tmp up to 10 GB.\n- Code outside the handler runs once per execution environment (cold start) and is reused on warm invocations.\n- Create boto3 clients / DB connections at module level; don't rely on state persisting.\n- Sync invoke (API Gateway, RequestResponse): caller handles errors. Async (S3, EventBridge, Event): Lambda retries twice, then DLQ/on-failure destination.\n- SQS event source: batch fails → messages return to the queue; use partial batch responses (`batchItemFailures`).\n- Reserved concurrency caps (and guarantees) a function's concurrency — protects downstream DBs.\n- Provisioned concurrency / SnapStart reduce cold starts.\n- Secrets from Secrets Manager/Parameter Store, cached in module scope with a TTL.",
+  "exercises_md": "1. Write a Lambda handler for an S3 `ObjectCreated` event that reads the CSV with boto3 and upserts rows into PostgreSQL; put client creation at module level and log cold vs warm invocations.\n2. Configure (in IaC or the console) reserved concurrency and an on-failure destination for an async Lambda, then trigger a failure and trace where the event ends up.",
+  "my_context_md": "boto3 is used for Lambda in `python-postgres`, and `AmazonVendorBankRecon/db.py` caches the Secrets Manager DB secret with a TTL and pools connections behind PgBouncer — exactly the patterns a Lambda needs (module-level, reused across warm invocations; PgBouncer absorbs connection bursts from concurrent containers).",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "The maximum timeout of a single AWS Lambda invocation is ____ minutes.",
+      "answers": [
+        "15",
+        "fifteen"
+      ],
+      "explanation": "Lambda functions can run for at most 900 seconds (15 minutes)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To stop a Lambda from opening more than 20 concurrent database connections, set its ____ concurrency to 20.",
+      "answers": [
+        "reserved"
+      ],
+      "explanation": "Reserved concurrency caps how many instances of the function can run at once."
+    },
+    {
+      "type": "output",
+      "prompt": "This simulates one Lambda execution environment handling three invocations. What does it print?",
+      "code": "INIT_COUNT = 0\ndef init():\n    global INIT_COUNT\n    INIT_COUNT += 1\n    return {\"client\": \"s3\"}\nCLIENT = init()          # module level: runs once per container (cold start)\ncalls = []\ndef handler(event, context=None):\n    calls.append(event[\"id\"])\n    return {\"init\": INIT_COUNT, \"seen\": len(calls)}\nfor i in range(3):\n    r = handler({\"id\": i})\nprint(r)",
+      "answers": [
+        "{'init': 1, 'seen': 3}"
+      ],
+      "explanation": "Module-level code runs once per execution environment; warm invocations reuse it. Module-level state (calls) also persists between invocations in the same container — don't rely on it, but beware leaking it."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An SQS-triggered Lambda processes batches of 10. One bad message makes the function raise. What happens by default?",
+      "options": [
+        "Only the bad message is retried",
+        "The whole batch becomes visible again and all 10 messages are retried",
+        "The bad message is deleted automatically",
+        "Lambda moves the batch to the DLQ immediately"
+      ],
+      "answer_index": 1,
+      "explanation": "Without ReportBatchItemFailures, a failed invocation returns the whole batch to the queue. Return `batchItemFailures` to retry only failed messages."
+    },
+    {
+      "type": "debug",
+      "prompt": "This Lambda is slow and occasionally exhausts PostgreSQL connections under load. What's wrong?",
+      "code": "import boto3, json, psycopg2\n\ndef handler(event, context):\n    sm = boto3.client(\"secretsmanager\")\n    secret = json.loads(sm.get_secret_value(SecretId=\"prod/db\")[\"SecretString\"])\n    conn = psycopg2.connect(**secret)\n    cur = conn.cursor()\n    cur.execute(\"INSERT INTO events(payload) VALUES (%s)\", (json.dumps(event),))\n    conn.commit()\n    return {\"ok\": True}",
+      "answer": "- The boto3 client, the secret fetch and the DB connection are created on **every** invocation: extra latency and a Secrets Manager call per request.\n- Connections are never closed and each concurrent container opens new ones; with high concurrency this exhausts `max_connections`.\n\nFix: initialise once per container and cap concurrency.\n```python\nsm = boto3.client(\"secretsmanager\")\n_conn = None\n\ndef get_conn():\n    global _conn\n    if _conn is None or _conn.closed:\n        secret = json.loads(sm.get_secret_value(SecretId=\"prod/db\")[\"SecretString\"])\n        _conn = psycopg2.connect(**secret, connect_timeout=5)\n    return _conn\n\ndef handler(event, context):\n    conn = get_conn()\n    with conn, conn.cursor() as cur:\n        cur.execute(\"INSERT INTO events(payload) VALUES (%s)\", (json.dumps(event),))\n    return {\"ok\": True}\n```\nPlus reserved concurrency and a pooler (RDS Proxy / PgBouncer).",
+      "rubric": [
+        "Clients/secrets/connections created per invocation",
+        "Reuse at module level across warm invocations",
+        "Connections not closed + unbounded concurrency exhaust DB",
+        "Reserved concurrency and a pooler (RDS Proxy/PgBouncer)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "When would you choose Lambda over ECS Fargate for a backend job, and when not?",
+      "answer": "**Lambda** fits short, event-driven, spiky work: S3 upload triggers, SQS consumers, scheduled cleanups, light APIs. Benefits: no servers, scale to zero, pay per ms, built-in retries for async events.\n\n**Not Lambda** when:\n- Runtime may exceed 15 minutes (large report processing, long scrapes).\n- You need lots of memory/CPU for long, or a big runtime (Selenium/Chrome, heavy ML libraries) beyond package/image limits.\n- Steady high traffic where always-on containers are cheaper.\n- Many concurrent DB connections without a pooler.\n\n**ECS Fargate** suits long-running batch jobs (`run_task`), workers and services with steady load, using the same Docker image locally and in prod. A common pattern: Lambda reacts to the event and starts an ECS task for the heavy part.",
+      "rubric": [
+        "Lambda: short, event-driven, spiky, scale to zero",
+        "Limits: 15 min, memory/package size, DB connections",
+        "Fargate for long-running/heavy/steady workloads",
+        "Hybrid: Lambda triggers ECS run_task"
+      ]
+    }
+  ]
+}

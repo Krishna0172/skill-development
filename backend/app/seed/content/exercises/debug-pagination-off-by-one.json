@@ -1,0 +1,225 @@
+{
+  "slug": "debug-pagination-off-by-one",
+  "title": "Debug: pagination skips the first page",
+  "category": "debugging",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "python",
+  "concepts": [
+    "off-by-one errors",
+    "slicing",
+    "ceiling division"
+  ],
+  "related_topics": [
+    "rest-api-design"
+  ],
+  "problem_md": "Your internal API paginates SKU lists with **1-based** page numbers:\n\n```python\ndef get_page(items: list, page: int, per_page: int) -> dict:\n    # returns {\"items\": [...], \"page\": page, \"total_pages\": int, \"has_next\": bool}\n```\n\nExpected behaviour:\n- Page 1 holds `items[0:per_page]`, page 2 the next `per_page`, and so on. A page past the end returns `\"items\": []`.\n- `total_pages` is the number of pages needed to show every item (`0` for an empty list).\n- `has_next` is `True` when there is a page after this one.\n- `page < 1` or `per_page < 1` raises `ValueError`.\n\n**Observed bugs** (with 25 items, `per_page=10`):\n- `get_page(items, 1, 10)` returns items 11–20 — the first ten items are never shown.\n- `total_pages` is reported as `2`, so the UI hides the last 5 items.\n\nFix the function.",
+  "examples": [
+    {
+      "input": "get_page(list(range(1, 26)), 1, 10)",
+      "output": "{'items': [1, ..., 10], 'page': 1, 'total_pages': 3, 'has_next': True}"
+    },
+    {
+      "input": "get_page(list(range(1, 26)), 3, 10)",
+      "output": "{'items': [21, 22, 23, 24, 25], 'page': 3, 'total_pages': 3, 'has_next': False}"
+    }
+  ],
+  "hints": [
+    "Work through page 1 by hand: which index should the slice start at, and which does the code use?",
+    "With 1-based pages, the start index is `(page - 1) * per_page`. And `25 // 10` rounds *down* — you need to round up.",
+    "Ceiling division without floats: `-(-len(items) // per_page)` or `(len(items) + per_page - 1) // per_page` (or `math.ceil`)."
+  ],
+  "starter_code": "def get_page(items: list, page: int, per_page: int) -> dict:\n    if page < 1 or per_page < 1:\n        raise ValueError(\"page and per_page must be >= 1\")\n    start = page * per_page\n    end = start + per_page\n    total_pages = len(items) // per_page\n    return {\n        \"items\": items[start:end],\n        \"page\": page,\n        \"total_pages\": total_pages,\n        \"has_next\": page < total_pages,\n    }\n",
+  "solution_code": "def get_page(items: list, page: int, per_page: int) -> dict:\n    if page < 1 or per_page < 1:\n        raise ValueError(\"page and per_page must be >= 1\")\n    start = (page - 1) * per_page\n    end = start + per_page\n    total_pages = (len(items) + per_page - 1) // per_page\n    return {\n        \"items\": items[start:end],\n        \"page\": page,\n        \"total_pages\": total_pages,\n        \"has_next\": page < total_pages,\n    }\n",
+  "solution_md": "Two classic off-by-one bugs:\n\n1. **Start index** — `page * per_page` treats `page` as 0-based. For 1-based pages it must be `(page - 1) * per_page`. This is the same formula as SQL's `OFFSET (page - 1) * limit`.\n2. **Page count** — `len // per_page` floors, losing the final partial page. Use ceiling division: `(n + per_page - 1) // per_page` (integer-only, no float rounding risk). For `n = 0` it gives `0`, as required.\n\n`has_next = page < total_pages` was already right — it just inherited the wrong `total_pages`.\n\n**Testing lesson:** off-by-one bugs live at boundaries. Good test cases are: first page, last (partial) page, exact multiple (`20` items / `10`), empty list, and a page past the end.\n\n**Real APIs:** offset pagination gets slow and inconsistent on large, changing tables (rows shift between requests). Cursor/keyset pagination (`WHERE id > :last_id ORDER BY id LIMIT :n`) avoids both problems.",
+  "tests": {
+    "function": "get_page",
+    "cases": [
+      {
+        "args": [
+          [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25
+          ],
+          1,
+          10
+        ],
+        "kwargs": {},
+        "expected": {
+          "items": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10
+          ],
+          "page": 1,
+          "total_pages": 3,
+          "has_next": true
+        }
+      },
+      {
+        "args": [
+          [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25
+          ],
+          3,
+          10
+        ],
+        "kwargs": {},
+        "expected": {
+          "items": [
+            21,
+            22,
+            23,
+            24,
+            25
+          ],
+          "page": 3,
+          "total_pages": 3,
+          "has_next": false
+        }
+      },
+      {
+        "args": [
+          [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20
+          ],
+          2,
+          10
+        ],
+        "kwargs": {},
+        "expected": {
+          "items": [
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20
+          ],
+          "page": 2,
+          "total_pages": 2,
+          "has_next": false
+        }
+      },
+      {
+        "args": [
+          [],
+          1,
+          10
+        ],
+        "kwargs": {},
+        "expected": {
+          "items": [],
+          "page": 1,
+          "total_pages": 0,
+          "has_next": false
+        }
+      },
+      {
+        "args": [
+          [
+            "a",
+            "b"
+          ],
+          5,
+          10
+        ],
+        "kwargs": {},
+        "expected": {
+          "items": [],
+          "page": 5,
+          "total_pages": 1,
+          "has_next": false
+        }
+      },
+      {
+        "args": [
+          [
+            "a"
+          ],
+          0,
+          10
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

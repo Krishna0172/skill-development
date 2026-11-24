@@ -1,0 +1,190 @@
+{
+  "slug": "py-cpython-bytecode-gc",
+  "title": "CPython internals: bytecode, refcounting, GC and interning",
+  "skill": "python-internals",
+  "extra_skills": [
+    "python-performance"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "cpython",
+    "bytecode",
+    "dis",
+    "reference counting",
+    "gc",
+    "interning",
+    "gil",
+    "free-threading"
+  ],
+  "summary": "CPython compiles your code to bytecode run by a stack-based virtual machine, frees most objects instantly through reference counting, and uses a cyclic garbage collector for reference cycles. Knowing these mechanisms explains performance quirks, memory leaks and `is` surprises.",
+  "why_md": "- Explains why `del x` sometimes frees memory immediately and sometimes not, and why cycles leak without the cyclic GC.\n- `dis` shows what the interpreter really runs, which settles performance debates with evidence.\n- Senior interviews ask about refcounting vs GC, interning, the GIL and weak references.",
+  "details_md": "### From source to bytecode\nCPython (the reference implementation) parses source to an AST, compiles it to **bytecode** (a list of small instructions per code object), and the **evaluation loop** executes it on a stack-based VM. Bytecode is cached in `__pycache__/*.pyc` for imported modules (keyed by interpreter version), so imports start faster; the script you run directly is not cached. Each function carries a code object: `f.__code__` exposes `co_varnames`, `co_consts`, `co_names` and `co_code`. Bytecode is an implementation detail and changes between versions. Since 3.11 the interpreter is *adaptive*: hot instructions are specialised in place (for example attribute loads and binary operations on ints), which is why 3.11+ is noticeably faster.\n\n### Reading bytecode with dis\n`import dis; dis.dis(func)` prints instructions such as `LOAD_FAST`, `LOAD_CONST`, `BINARY_OP`, `CALL`, `RETURN_VALUE`. Use it to see, for example, that a comprehension or `x += 1` compiles to a handful of operations, or that constants are folded at compile time (`60 * 60` becomes `3600`).\n\n### Reference counting\nEvery object has a reference count. Binding a name, putting it in a container or passing it as an argument increments it; unbinding decrements it. When it reaches zero the object is deallocated **immediately**, and `__del__` / weakref callbacks run. `sys.getrefcount(x)` reports the count (one higher than you expect because the argument itself is a reference). Benefits: deterministic cleanup and low latency. Costs: bookkeeping on every assignment and **reference cycles** (a refers to b refers to a) never reach zero.\n\n### The cyclic garbage collector\nThe `gc` module detects unreachable cycles among *container* objects. It is **generational** (three generations, young objects are scanned more often); allocation counts trigger collections. Control it with `gc.collect()`, `gc.disable()`, `gc.get_threshold()`, `gc.freeze()` (useful before forking). Since Python 3.4 objects with `__del__` in cycles are collected safely. `weakref` lets you refer to an object without keeping it alive (caches, observers), breaking cycles by design.\n\n### Memory is not always returned to the OS\nObjects are allocated by pymalloc arenas for small sizes; freed memory is reused by Python but may not shrink the process RSS. Memory growth is more often a real leak (a global list, an unbounded cache) than a GC failure; use `tracemalloc` to find it.\n\n### Interning and identity\nCPython caches small ints (-5 to 256) and interns identifier-like string constants, so `is` can look like it works. This is an implementation detail: compare values with `==`. `sys.intern(s)` explicitly interns a string, making equal strings share one object, which speeds dict lookups on repeated keys.\n\n### The GIL and free-threading\nThe **Global Interpreter Lock** lets only one thread execute Python bytecode at a time, which keeps refcounts safe and simplifies the interpreter. It limits CPU-bound multi-threading but is released during blocking I/O and many C extensions. Python 3.13 added an *experimental* free-threaded build (PEP 703, a separate build, often `python3.13t`) that can run without the GIL; ecosystem and per-thread performance trade-offs are still evolving. For CPU-bound parallelism the portable answer is still `multiprocessing` or native extensions.",
+  "code_md": "```python\n# 1. look at bytecode (output depends on the Python version)\nimport dis\ndef total(price, qty):\n    return price * qty + 3600 // 60\ndis.dis(total)\nprint(total.__code__.co_varnames)\n```\n\n```python\n# 2. reference counting: deterministic destruction\nimport sys, weakref\nclass Conn:\n    def __del__(self):\n        print(\"closed\")\nc = Conn()\nr = weakref.ref(c)\nprint(sys.getrefcount(c))     # includes the temporary argument reference\ndel c                         # prints \"closed\" immediately in CPython\nprint(r())                    # None\n```\n\n```python\n# 3. a reference cycle needs the cyclic GC\nimport gc\nclass Node:\n    pass\na, b = Node(), Node()\na.other, b.other = b, a\ndel a, b\nprint(gc.collect() >= 2)       # cycle found and freed\n```\n\n```python\n# 4. interning\nimport sys\ns1 = \"\".join([\"py\", \"thon!\"])\ns2 = \"\".join([\"py\", \"thon!\"])\nprint(s1 == s2, s1 is s2, sys.intern(s1) is sys.intern(s2))\n```",
+  "use_cases_md": "- Diagnosing a memory leak: a growing global cache or reference cycles holding large DataFrames; use `tracemalloc`, `gc.get_objects()`, `objgraph`.\n- Using `weakref.WeakValueDictionary` for caches that should not keep objects alive.\n- Comparing the cost of two implementations by reading `dis` output and then benchmarking with `timeit`.\n- Interning repeated strings (marketplace ids, status codes) with `sys.intern` in large ingestion jobs.\n- Choosing between threads, processes and asyncio given the GIL.",
+  "mistakes_md": "- **Using `is` for value comparison** on ints/strs (works by caching accident).\n- **Relying on `__del__`** for resource cleanup; use context managers (`with`) and `try/finally`.\n- **Assuming `del x` frees the object**: it only removes one reference.\n- **Blaming the GC for a leak** that is really a global container holding references.\n- **Disabling the GC** without understanding cycle risk.\n- **Assuming threads speed up CPU-bound Python** (GIL) or that bytecode is stable across versions.",
+  "best_practices_md": "- Manage resources with context managers, not destructors.\n- Use `weakref` for caches and parent back-references to avoid cycles.\n- Use `==` for values; `is` only for singletons like `None`.\n- Profile memory with `tracemalloc` before tuning GC settings.\n- Use `dis` and `timeit` together; never guess performance.\n- Use processes (or native code) for CPU-bound parallel work; threads/asyncio for I/O.",
+  "my_context_md": "- The `ThreadedConnectionPool` in `AmazonVendorBankRecon/db.py` hands connections out and back via `@contextmanager db_transaction()`: this explicit return is why you do not depend on `__del__` or refcount timing to release connections.\n- `ForcesightJobSchedulerAndRunner/src/runner.py` uses a `ThreadPoolExecutor`; with the GIL, threads help only while jobs are blocked on I/O such as PostgreSQL calls, not for CPU-heavy pandas-style work.",
+  "revision_notes_md": "- CPython: source, AST, bytecode (`__pycache__`), stack-based eval loop; 3.11+ adaptive specialisation.\n- `dis.dis(f)`, `f.__code__` (`co_varnames`, `co_consts`); bytecode is version-specific.\n- Refcount to 0 means immediate free (deterministic); `sys.getrefcount` reads +1.\n- Cycles need the generational cyclic GC: `gc.collect()`, `gc.disable()`, `gc.freeze()`.\n- `weakref` references do not keep objects alive.\n- Small ints (-5..256) cached; identifier-like strings interned; `sys.intern` for explicit.\n- Never use `is` for value equality.\n- GIL: one thread runs bytecode at a time; released on I/O.\n- 3.13 free-threaded build is experimental; use multiprocessing for CPU-bound parallelism.",
+  "exercises_md": "1. Use `dis.dis` on a function with a loop and on its comprehension equivalent; list the instructions that differ.\n2. Create a reference cycle with `__del__`, disable GC, show the object leaks (`gc.get_objects()` count), then `gc.collect()`.\n3. Implement a cache with `weakref.WeakValueDictionary` and demonstrate entries disappearing when the last strong reference is dropped.\n4. Use `tracemalloc` to measure memory for 1M small objects vs `__slots__` version.",
+  "related": [
+    "py-internals-memory",
+    "python-threading-gil",
+    "py-descriptors-properties",
+    "py-profiling-debugging",
+    "py-performance"
+  ],
+  "flashcards": [
+    {
+      "front": "What happens when a refcount reaches zero?",
+      "back": "The object is deallocated immediately (and `__del__`/weakref callbacks run)."
+    },
+    {
+      "front": "Why do reference cycles need the cyclic GC?",
+      "back": "Objects in a cycle keep each other's refcount above zero; `gc` finds unreachable cycles."
+    },
+    {
+      "front": "What does `dis.dis(f)` show?",
+      "back": "The bytecode instructions of f (version-specific)."
+    },
+    {
+      "front": "What is `sys.intern` for?",
+      "back": "Makes equal strings share one object, speeding comparisons and saving memory."
+    },
+    {
+      "front": "What does the GIL do?",
+      "back": "Allows only one thread to run Python bytecode at a time; released on blocking I/O."
+    },
+    {
+      "front": "Free-threaded build status in 3.13?",
+      "back": "Experimental, optional separate build (PEP 703) that can run without the GIL."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What happens first when an object's reference count drops to zero in CPython?",
+      "options": [
+        "Nothing until the next GC run",
+        "A warning is issued",
+        "It is moved to generation 2",
+        "It is deallocated immediately"
+      ],
+      "answer_index": 3,
+      "explanation": "Reference counting frees objects deterministically at zero."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which problem does the `gc` module solve?",
+      "options": [
+        "Freeing objects whose refcount is zero",
+        "Reference cycles",
+        "Reducing bytecode size",
+        "Interning strings"
+      ],
+      "answer_index": 1,
+      "explanation": "Cycles never reach refcount zero; the cyclic collector finds them."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which comparison is correct for two strings from user input?",
+      "options": [
+        "a == b",
+        "a is b",
+        "id(a) == id(b)",
+        "a.__eq__ is b"
+      ],
+      "answer_index": 0,
+      "explanation": "Use `==`; identity depends on interning/caching details."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The standard-library module that disassembles bytecode is ____.",
+      "answers": [
+        "dis"
+      ],
+      "explanation": "`dis.dis(func)`."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`sys.____` explicitly interns a string so equal strings share one object.",
+      "answers": [
+        "intern"
+      ],
+      "explanation": "`sys.intern(s)`."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import weakref\nclass A:\n    pass\na = A()\nr = weakref.ref(a)\nprint(r() is a)\ndel a\nprint(r())\n",
+      "answers": [
+        "True\nNone"
+      ],
+      "explanation": "CPython frees the object as soon as the last strong reference is deleted, so the weak reference returns None."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sys, gc\ns1 = \"\".join([\"py\", \"thon!\"])\ns2 = \"\".join([\"py\", \"thon!\"])\nprint(s1 == s2, s1 is s2, sys.intern(s1) is sys.intern(s2))\nclass Node:\n    pass\na, b = Node(), Node()\na.other, b.other = b, a\ndel a, b\nprint(gc.collect() >= 2)\ndef f(a, b, c):\n    x = a + b\n    return x\nprint(f.__code__.co_varnames, f.__code__.co_argcount)\n",
+      "answers": [
+        "True False True\nTrue\n('a', 'b', 'c', 'x') 3"
+      ],
+      "explanation": "Equal but distinct runtime-built strings; interning unifies them; the unreachable cycle is found by gc; co_varnames lists locals."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "import gc\ngc.disable()\nclass Node:\n    def __init__(self):\n        self.parent = None\n        self.children = []\n\ndef build():\n    root = Node()\n    child = Node()\n    child.parent = root\n    root.children.append(child)\n\nfor _ in range(1_000_000):\n    build()\n",
+      "answer": "Each `build()` creates a reference cycle (root <-> child). With the cyclic GC disabled the cycles are never reclaimed, so memory grows without bound. Fix: leave GC enabled (or call `gc.collect()` periodically), and break the cycle by making `parent` a weak reference (`weakref.ref(root)`) or avoiding the back-reference.",
+      "rubric": [
+        "Identifies the parent/children reference cycle",
+        "Notes gc.disable() prevents collection",
+        "Suggests weakref or re-enabling/collecting"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how CPython manages memory: reference counting and the cyclic GC.",
+      "answer": "Every object holds a reference count updated as names, containers and call frames reference it. At zero the object is freed immediately, giving deterministic cleanup but costing bookkeeping on each assignment. Reference counting cannot free cycles, since members keep each other alive, so CPython adds a generational cyclic collector that periodically scans container objects, finds groups unreachable from roots and frees them. Weak references avoid keeping objects alive. Small-object allocation uses pymalloc arenas, so freed memory may be reused by Python without returning to the OS.",
+      "rubric": [
+        "Refcount drops to zero means immediate free",
+        "Cycles are the weakness",
+        "Generational cyclic GC cleans cycles",
+        "weakref and allocator note"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is the GIL, what does it protect and when does it hurt?",
+      "answer": "The Global Interpreter Lock is a mutex ensuring only one thread executes Python bytecode at a time. It protects interpreter internals, especially reference counts, from races and keeps the implementation simple. It hurts CPU-bound multi-threaded code since threads cannot run Python code in parallel; it is released during blocking I/O and in many C extensions, so threads still help I/O-bound work. For CPU-bound work use `multiprocessing`, native extensions, or (experimentally in 3.13) a free-threaded build.",
+      "rubric": [
+        "One thread runs bytecode at a time",
+        "Protects refcounts/internals",
+        "Hurts CPU-bound threading; I/O is fine",
+        "Processes/native/free-threaded alternatives"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How does Python's garbage collection work?",
+      "difficulty": "medium",
+      "answer_md": "CPython uses two mechanisms. Primary: reference counting, where each object tracks how many references point to it and is freed the moment the count hits zero. Secondary: a generational cyclic collector in the `gc` module that finds groups of container objects that reference only each other and are unreachable from the program, and frees them. New objects start in the youngest generation; survivors are promoted and scanned less often. You can tune with `gc.set_threshold`, trigger with `gc.collect()`, and avoid cycles with `weakref`."
+    },
+    {
+      "question": "Why does `a = 256; b = 256; a is b` return True but not for large ints?",
+      "difficulty": "easy",
+      "answer_md": "CPython preallocates and reuses int objects from -5 to 256 as an optimisation, so equal small ints are the same object. Larger ints are created on demand and are usually distinct objects (though the compiler may merge identical constants within one code object). This is an implementation detail and not guaranteed, so always compare numbers with `==`."
+    },
+    {
+      "question": "What is the GIL and how do you achieve parallelism despite it?",
+      "difficulty": "medium",
+      "answer_md": "The GIL serialises bytecode execution across threads in CPython. I/O-bound programs still benefit from threads or `asyncio` because the lock is released while waiting. For CPU-bound parallelism use `multiprocessing` or `concurrent.futures.ProcessPoolExecutor` (separate interpreters, own GIL), push work to native code (NumPy, Cython, Rust extensions release the GIL), or evaluate the experimental free-threaded build introduced in 3.13. Choosing depends on whether the work is I/O- or CPU-bound."
+    },
+    {
+      "question": "What is `weakref` used for?",
+      "difficulty": "medium",
+      "answer_md": "A weak reference refers to an object without increasing its refcount, so the object can still be freed; accessing it returns None afterwards. Use cases: caches (`WeakValueDictionary`) that should not keep entries alive, observer lists, and parent back-references in trees to avoid reference cycles. Not every type supports weak references (e.g. plain `int`, `list` instances do not, but user classes without `__slots__` do)."
+    }
+  ]
+}

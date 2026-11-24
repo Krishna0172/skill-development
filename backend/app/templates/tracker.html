@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, stat, empty, kv %}
+{% block title %}Tracker{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Tracker</h1><p>Every study session, review, exercise and daily log. Click a day on the calendar to see or edit it. Overlapping time is only counted once.</p></div>
+</div>
+<div class="grid g4 mb">
+  {{ stat("Last 12 months", (year_minutes / 60)|round(1) ~ " h") }}
+  {{ stat("Active days", active_days) }}
+  {{ stat("Current streak", streak.current ~ " days") }}
+  {{ stat("Longest streak", streak.longest ~ " days") }}
+</div>
+{% call card("Activity · last 12 months") %}
+  {{ charts.heatmap(heat, tip=heat_tip, href=heat_href, selected=d.isoformat()) }}
+{% endcall %}
+
+<div class="between mt mb">
+  <a class="btn sm" href="/tracker?day={{ prev }}">← {{ prev|date }}</a>
+  <h2 style="margin:0">{{ "Today" if is_today else d|date }}</h2>
+  {% if next %}<a class="btn sm" href="/tracker?day={{ next }}">{{ next|date }} →</a>{% else %}<span></span>{% endif %}
+</div>
+
+<div class="grid g-side">
+  <div class="stack">
+    {% call card("Sessions · " ~ day.total_minutes|minutes, flush=True) %}
+      {% if day.sessions %}
+      <table class="table">
+        {% for s in day.sessions %}
+          <tr>
+            <td class="num small" style="white-space:nowrap">{{ s.started_at[11:16] }}–{{ s.ended_at[11:16] if s.ended_at else "running" }}</td>
+            <td>{{ badge(s.kind) }}</td>
+            <td style="width:50%">{{ s.title or s.topic or "—" }}{% if s.skill %}<div class="tiny faint">{{ s.skill }}</div>{% endif %}{% if s.notes %}<div class="small muted">{{ s.notes[:140] }}</div>{% endif %}</td>
+            <td style="text-align:right">
+              <details class="pop"><summary class="btn sm ghost">Edit</summary>
+                <div class="pop-body card" style="right:0"><div class="body form-grid" style="min-width:280px">
+                  <form method="post" action="/tracker/sessions/{{ s.id }}" class="form-grid">
+                    <div class="grid g2"><label class="field">Start<input type="time" name="start" value="{{ s.started_at[11:16] }}" required></label>
+                      <label class="field">End<input type="time" name="end" value="{{ s.ended_at[11:16] if s.ended_at else '' }}"></label></div>
+                    <select name="kind">{% for k in kinds %}<option value="{{ k }}" {{ 'selected' if k == s.kind }}>{{ k|label }}</option>{% endfor %}</select>
+                    <input name="title" value="{{ s.title or '' }}" placeholder="Title">
+                    <textarea name="notes" rows="2" placeholder="Notes">{{ s.notes or '' }}</textarea>
+                    <button class="btn primary">Save</button>
+                  </form>
+                  <form method="post" action="/tracker/sessions/{{ s.id }}/delete"><button class="btn danger sm">Delete session</button></form>
+                </div></div>
+              </details>
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+      {% else %}<div class="body small faint">No sessions on this day.</div>{% endif %}
+      <details class="fold" style="margin:12px 16px"><summary>+ Add a session with exact times</summary>
+        <form method="post" action="/tracker/sessions" class="form-grid">
+          <input type="hidden" name="day" value="{{ d.isoformat() }}">
+          <div class="grid g3"><label class="field">Start<input type="time" name="start" required></label><label class="field">End<input type="time" name="end" required></label>
+            <label class="field">Kind<select name="kind">{% for k in kinds %}<option value="{{ k }}">{{ k|label }}</option>{% endfor %}</select></label></div>
+          <select name="topic_id"><option value="">No topic</option>{% for tid, title in topics %}<option value="{{ tid }}">{{ title }}</option>{% endfor %}</select>
+          <input name="title" placeholder="Title (optional)">
+          <textarea name="notes" rows="2" placeholder="Notes"></textarea>
+          <div><button class="btn">Add session</button></div>
+        </form>
+      </details>
+    {% endcall %}
+
+    {% call card("End-of-day log") %}
+      <form method="post" action="/tracker/log" class="form-grid" id="log">
+        <input type="hidden" name="day" value="{{ d.isoformat() }}">
+        <label class="field">What I studied<textarea name="studied_md" rows="2">{{ log.studied_md or '' }}</textarea></label>
+        <label class="field">What I accomplished<textarea name="accomplished_md" rows="2">{{ log.accomplished_md or '' }}</textarea></label>
+        <label class="field">Problems / blockers<textarea name="problems_md" rows="2">{{ log.problems_md or '' }}</textarea></label>
+        <label class="field">Plan for tomorrow<textarea name="tomorrow_md" rows="2">{{ log.tomorrow_md or '' }}</textarea></label>
+        <div class="row"><span class="small muted">Energy</span>{% for n in range(1, 6) %}<label class="row small"><input type="radio" name="energy" value="{{ n }}" {{ 'checked' if log.energy == n }}> {{ n }}</label>{% endfor %}</div>
+        <div><button class="btn primary">Save log</button></div>
+      </form>
+    {% endcall %}
+  </div>
+
+  <div class="stack">
+    {% call card("Summary") %}
+      {% for k, v in day.minutes_by_kind.items() %}{{ kv(k|label, v|minutes) }}{% endfor %}
+      {{ kv("Reviews", day.reviews.total ~ (" · " ~ day.reviews.remembered ~ " remembered" if day.reviews.total else "")) }}
+      {{ kv("Exercises", day.exercises.completed ~ " solved / " ~ day.exercises.attempted ~ " attempted") }}
+      {% if day.topics_studied %}<div class="small muted mt">Topics</div><div class="small">{{ day.topics_studied|join(", ") }}</div>{% endif %}
+    {% endcall %}
+    {% if day.minutes_by_skill %}{% call card("By skill") %}{{ charts.hbars(day.minutes_by_skill, "skill", "minutes", name="min") }}{% endcall %}{% endif %}
+    {% if day.quizzes %}
+      {% call card("Assessments & quizzes", flush=True) %}<ul class="list">{% for q in day.quizzes %}<li class="small between"><span>{{ q.mode|label }}{% if q.topic %}: {{ q.topic }}{% endif %}</span><strong class="{{ 'good' if q.passed else 'warn' }}">{{ q.score_pct|round|int }}%</strong></li>{% endfor %}</ul>{% endcall %}
+    {% endif %}
+    {% if day.exercises["items"] %}
+      {% call card("Exercise attempts", flush=True) %}<ul class="list">{% for e in day.exercises["items"] %}<li class="small between"><a href="/practice/{{ e.exercise_id }}">{{ e.title }}</a>{{ badge(e.outcome) }}</li>{% endfor %}</ul>{% endcall %}
+    {% endif %}
+    {% if day.events %}
+      {% call card("Activity", flush=True) %}<ul class="list">{% for e in day.events[:25] %}<li class="small"><span class="faint num">{{ e.at[11:16] }}</span> {{ e.summary }}</li>{% endfor %}</ul>{% endcall %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

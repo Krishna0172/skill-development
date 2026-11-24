@@ -1,0 +1,33 @@
+{
+  "slug": "scenario-rerunnable-nightly-sync",
+  "title": "Make a nightly sync job safely re-runnable",
+  "category": "scenario",
+  "language": "text",
+  "difficulty": "medium",
+  "skill": "transactions-concurrency",
+  "concepts": [
+    "idempotency",
+    "transactions and batch commits",
+    "watermarks/checkpoints",
+    "staging table swap",
+    "advisory locks",
+    "deterministic outputs"
+  ],
+  "related_topics": [
+    "retries-backoff-idempotency",
+    "transactions-isolation",
+    "postgres-upsert",
+    "message-queues"
+  ],
+  "problem_md": "A nightly job (runs at 02:00 on ECS) builds the `daily_channel_sales` summary used by the dashboard. It does:\n\n```python\nrows = fetch_all(\"SELECT channel_id, order_date, total_amount FROM orders WHERE order_date = %s\", [yesterday])\ntotals = aggregate_in_python(rows)\nfor t in totals:\n    execute(\"INSERT INTO daily_channel_sales (channel_id, day, revenue, orders) VALUES (%s, %s, %s, %s)\", t)\n    execute(\"UPDATE channel_totals SET lifetime_revenue = lifetime_revenue + %s WHERE channel_id = %s\", ...)\nconn.commit()\nsend_slack_summary()\n```\n\nIncidents so far:\n- The task was OOM-killed halfway one night; the on-call engineer re-ran it manually -> **lifetime revenue was\n  inflated**, and `daily_channel_sales` got duplicate rows for that day.\n- A late marketplace report for yesterday arrived at 09:00; nobody re-ran the job, so the dashboard was wrong all day.\n- During a deploy, the scheduler started a second copy while the first was still running.\n\n**Redesign the job so it can be run any number of times, for any date, concurrently triggered, and always produce\nthe correct result.** Cover idempotency of each write, transaction boundaries, concurrency control, backfills/late\ndata, and side effects like the Slack message.",
+  "examples": [],
+  "hints": [
+    "A re-runnable job should *compute and replace* results for its date, not *increment* them. Which of the writes is an increment?",
+    "For one date: delete-and-insert inside one transaction, or upsert on a unique key `(channel_id, day)`. Lifetime totals can be derived (SUM over daily rows) instead of accumulated.",
+    "Two concurrent copies: a PostgreSQL advisory lock or a job-run table with a unique 'running' row. Side effects like Slack need their own 'already sent' record."
+  ],
+  "starter_code": "## What makes the current job unsafe\n\n## Idempotent writes\n\n## Transaction boundaries\n\n## Concurrency control\n\n## Late data and backfills\n\n## Side effects (notifications) and observability\n",
+  "solution_code": "",
+  "solution_md": "## What makes it unsafe\n\n1. **Increments** (`lifetime_revenue = lifetime_revenue + x`): applying the same input twice changes the result.\n2. **Plain INSERT** without a unique key: re-runs append duplicates.\n3. The job is parameterised by \"yesterday\" implicitly, so you can't re-run it for an arbitrary date.\n4. No concurrency guard, and the Slack side effect fires on every run.\n5. Aggregating in Python pulls all rows over the network and holds them in memory (the OOM) - the database can\n   aggregate far more efficiently.\n\n## Idempotent writes\n\nPrinciple: **a run for date D recomputes D's results from source data and replaces them.** Running it 1 or 10 times\ngives the same final state.\n\n```sql\nALTER TABLE daily_channel_sales ADD CONSTRAINT uq_daily UNIQUE (channel_id, day);\n\nINSERT INTO daily_channel_sales (channel_id, day, revenue, orders, computed_at)\nSELECT channel_id, order_date, SUM(total_amount), COUNT(*), now()\nFROM orders\nWHERE order_date = %(day)s AND status <> 'CANCELLED'\nGROUP BY channel_id, order_date\nON CONFLICT (channel_id, day) DO UPDATE\nSET revenue = EXCLUDED.revenue, orders = EXCLUDED.orders, computed_at = EXCLUDED.computed_at;\n```\n\nRows that should *disappear* (a channel whose only order got cancelled) aren't removed by an upsert, so the\nsimplest fully-correct pattern is **delete + insert for that day in one transaction**:\n\n```sql\nBEGIN;\nDELETE FROM daily_channel_sales WHERE day = %(day)s;\nINSERT INTO daily_channel_sales (...) SELECT ... WHERE order_date = %(day)s GROUP BY ...;\nCOMMIT;\n```\n\nReaders never see the gap because of MVCC - they see the old rows until commit.\n\n**Lifetime totals**: don't accumulate. Either compute on read (`SELECT channel_id, SUM(revenue) FROM daily_channel_sales GROUP BY channel_id`\n- a small table) or recompute `channel_totals` from `daily_channel_sales` at the end of each run.\n\n## Transaction boundaries\n\nOne transaction per **unit of work** (one date). If the task dies mid-way, the transaction rolls back and the day\nkeeps its previous correct values; re-running is always safe. For big backfills, loop over dates with one\ntransaction each (not one giant transaction for a year).\n\n## Concurrency control\n\n```sql\nSELECT pg_try_advisory_xact_lock(hashtext('daily_channel_sales'), %(day_as_int)s);\n```\n\nIf it returns false, another run is handling that date -> exit (or wait with `pg_advisory_xact_lock`). The lock is\nreleased automatically at commit/rollback, even if the process crashes. Also configure the scheduler to disallow\noverlapping runs, but don't rely on it alone. A `job_runs` table (`job, run_date, status, started_at, finished_at,\nerror`) gives history and a place to record the claim.\n\n## Late data and backfills\n\n- Make the date a parameter: `python -m jobs.daily_sales --day 2024-03-14` or `--from/--to`. Default = yesterday.\n- Late reports: the ingestion pipeline knows which dates an upload touched (`MIN/MAX(order_date)` of the file).\n  After a successful upload, enqueue a recompute for those dates - event-driven correction rather than waiting\n  for the next night. Alternatively, each nightly run recomputes a **rolling window** (e.g. the last 7 days), which\n  absorbs late data cheaply because each day is idempotent.\n\n## Side effects and observability\n\n- Notifications aren't idempotent by nature. Record them: `notifications_sent(job, run_date, channel) UNIQUE`;\n  insert with `ON CONFLICT DO NOTHING` and only send if the insert happened. Or send only from the scheduled run,\n  not from manual backfills (`--notify` flag).\n- Log the date, rows read/written and duration; store them in `job_runs`. Alert if yesterday's run hasn't succeeded\n  by 04:00. A quick data check after the write (e.g. today's revenue within 3x of the 7-day average) catches bad\n  inputs before the dashboard shows them.",
+  "tests": null
+}

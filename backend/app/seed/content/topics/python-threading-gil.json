@@ -1,0 +1,121 @@
+{
+  "slug": "python-threading-gil",
+  "title": "Threads, Processes & the GIL",
+  "skill": "async-concurrency",
+  "extra_skills": [
+    "python"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "python",
+    "threading",
+    "gil",
+    "multiprocessing",
+    "concurrent-futures",
+    "locks"
+  ],
+  "summary": "The GIL (Global Interpreter Lock) lets only one thread execute Python bytecode at a time in standard CPython. So threads speed up I/O-bound work (network, disk, subprocesses) because the GIL is released while waiting, but not CPU-bound pure-Python work - use processes for that. `concurrent.futures` gives you one simple API for both thread and process pools.",
+  "details_md": "### What the GIL is\nCPython's memory management (reference counting) isn't thread-safe on its own, so the interpreter has a single lock that a thread must hold to run Python bytecode. A running thread is asked to release it periodically (every ~5 ms, `sys.getswitchinterval()`), and it is released around blocking I/O and inside many C extensions (NumPy, hashlib, zlib, Pillow's heavy operations) while they do non-Python work.\n\nConsequences:\n- **I/O-bound** threads (HTTP calls, S3 downloads, DB queries, `subprocess` waits) run effectively in parallel.\n- **CPU-bound** pure Python (loops, parsing, JSON on huge payloads) gets no speedup and can even slow down due to contention.\n\n### Free-threaded Python\nPEP 703 introduced an optional **free-threaded build** (`python3.13t`, experimental in 3.13; officially supported but still optional in 3.14 under PEP 779). The default CPython build still has the GIL, and many C extensions need updates to run without it. Write code assuming the GIL exists but **never rely on it for correctness** - use locks for shared state either way.\n\n### Thread safety\nThe GIL does not make your code thread-safe. `counter += 1` is read-modify-write: a thread switch between steps loses updates. Single operations like `list.append` or `dict[key] = value` are atomic in CPython, but compound logic (`if key not in d: d[key] = ...`) is not. Tools:\n- `threading.Lock` / `RLock` - mutual exclusion (`with lock:`).\n- `threading.Event` - a boolean flag threads can set/wait on (cancellation, readiness).\n- `threading.Condition`, `Semaphore`, `Barrier`.\n- `queue.Queue` - thread-safe producer/consumer handoff; often the cleanest design.\n\n### concurrent.futures\n- `ThreadPoolExecutor(max_workers=n)` for I/O-bound tasks.\n- `ProcessPoolExecutor` for CPU-bound tasks - separate interpreters, each with its own GIL, true parallelism. Arguments and results are **pickled** (no lambdas/open connections; large data copying is expensive).\n- `executor.submit(fn, *args)` returns a `Future`; `as_completed(futures)` yields them as they finish; `executor.map` preserves order.\n- Use the executor as a context manager to wait for and shut down workers.\n\n### Threads can't be killed\nThere's no safe way to forcibly stop a Python thread. Cancellation is **cooperative**: the worker checks a `threading.Event` between steps (or uses timeouts) and exits. For subprocesses, keep the `Popen` handle and call `terminate()`/`kill()`.\n\n### Daemon threads\n`daemon=True` threads are killed abruptly at interpreter exit (no `finally`, no flush). Fine for heartbeats, not for writes.\n\n### Choosing a model\n| Workload | Tool |\n|---|---|\n| Few blocking I/O calls in sync code | `ThreadPoolExecutor` |\n| Thousands of concurrent network calls | asyncio |\n| CPU-heavy Python | `ProcessPoolExecutor` / multiprocessing |\n| CPU-heavy NumPy/pandas vectorised | often already fast; C code may release the GIL |\n| Long external commands (ffmpeg) | `subprocess` - already a separate process |\n\n### Thread pools and connections\nDatabase connections are not generally safe to share across threads at the same time (psycopg2 connections can be shared but operations serialise and transactions interleave). Give each thread its own connection, or use `ThreadedConnectionPool` with `getconn/putconn`.",
+  "code_md": "```python\n# I/O-bound: download many URLs with a thread pool\nfrom concurrent.futures import ThreadPoolExecutor, as_completed\nimport requests\n\ndef download(url: str) -> tuple[str, int]:\n    r = requests.get(url, timeout=30)      # GIL released while waiting on the socket\n    return url, len(r.content)\n\nurls = [\"https://example.com\"] * 8\nwith ThreadPoolExecutor(max_workers=4) as pool:\n    futures = {pool.submit(download, u): u for u in urls}\n    for fut in as_completed(futures):\n        try:\n            url, size = fut.result()\n            print(url, size)\n        except requests.RequestException as e:\n            print(\"failed\", futures[fut], e)\n```\n\n```python\n# CPU-bound: processes give real parallelism\nfrom concurrent.futures import ProcessPoolExecutor\n\ndef checksum(n: int) -> int:               # pure-Python CPU work\n    return sum(i * i % 7 for i in range(n))\n\nif __name__ == \"__main__\":                 # required on Windows/macOS (spawn)\n    with ProcessPoolExecutor() as pool:\n        print(list(pool.map(checksum, [5_000_000] * 4)))\n```\n\n```python\n# Race condition and the fix with a Lock\nimport threading\n\ncounter = 0\nlock = threading.Lock()\n\ndef inc_unsafe():\n    global counter\n    for _ in range(100_000):\n        counter += 1                       # read-modify-write: not atomic\n\ndef inc_safe():\n    global counter\n    for _ in range(100_000):\n        with lock:\n            counter += 1\n\nthreads = [threading.Thread(target=inc_safe) for _ in range(4)]\nfor t in threads: t.start()\nfor t in threads: t.join()\nprint(counter)   # 400000 reliably with the lock\n```\n\n```python\n# Cooperative cancellation with threading.Event (+ killing a subprocess)\nimport subprocess, threading, time\n\ndef job(cancel: threading.Event, status: dict):\n    proc = subprocess.Popen([\"ping\", \"127.0.0.1\", \"-n\", \"100\"],   # long external command\n                            stdout=subprocess.DEVNULL)\n    while proc.poll() is None:\n        if cancel.is_set():\n            proc.terminate()               # stop the child process\n            status[\"state\"] = \"cancelled\"\n            return\n        time.sleep(0.2)\n    status[\"state\"] = \"done\"\n\ncancel, status = threading.Event(), {}\nt = threading.Thread(target=job, args=(cancel, status))\nt.start(); time.sleep(1); cancel.set(); t.join()\nprint(status)    # {'state': 'cancelled'}\n```",
+  "use_cases_md": "- Parallel S3 downloads/uploads or third-party API calls from synchronous code.\n- Running blocking jobs (downloads, ffmpeg) in the background of a web app while the API stays responsive.\n- CPU-heavy transforms (image processing, parsing, hashing) across cores with processes.\n- Producer/consumer pipelines with `queue.Queue` (one reader thread, several writer threads).\n- Timeouts and cancellation of long-running work via `Event`.",
+  "mistakes_md": "- **Using threads for CPU-bound Python and expecting speedup** - the GIL serialises it. Fix: `ProcessPoolExecutor` or vectorised NumPy/pandas.\n- **Assuming the GIL makes code thread-safe** - compound operations race. Fix: locks or a queue-based design.\n- **Sharing one DB connection/cursor across threads** - interleaved transactions and errors. Fix: one connection per thread or a threaded pool.\n- **Trying to kill threads** - no safe API. Fix: cooperative cancellation with `threading.Event`, timeouts, or use subprocesses you can terminate.\n- **Forgetting `if __name__ == \"__main__\":` with multiprocessing on Windows** - infinite respawn errors. Fix: guard the entry point.\n- **Unbounded thread creation** (one thread per request/item) - resource exhaustion. Fix: a bounded pool.\n- **Ignoring exceptions in futures** - they're stored silently until `.result()` is called. Fix: always check results.",
+  "best_practices_md": "- Classify the work first: I/O-bound -> threads or asyncio; CPU-bound -> processes.\n- Use `concurrent.futures` over raw `threading.Thread` for task-style work.\n- Prefer message passing (`queue.Queue`) over shared mutable state; lock what you must share.\n- Size pools deliberately (I/O: tens of workers; CPU: `os.cpu_count()`), and respect downstream limits (DB connections, API rate limits).\n- Make every long task cancellable and give it a timeout.\n- Keep pickled payloads small for process pools; pass file paths/keys instead of huge objects.",
+  "my_context_md": "- Your FastAPI downloader apps run jobs via `loop.run_in_executor` (a thread pool) and use `threading.Event` for cancellation - exactly the cooperative-cancellation pattern, since executor threads can't be force-stopped.\n- The in-memory job dict those apps use is shared between the event loop thread and worker threads; individual `dict[key] = value` writes are atomic in CPython, but multi-step updates (read-check-write of a job's status) should be protected with a `threading.Lock`.\n- Your CLI tools call ffmpeg via `subprocess` - that work runs in a separate OS process, so it's unaffected by the GIL; the Python side just waits on I/O.\n- In ECSMarketplaceDataUpload, `requests` downloads of presigned S3 URLs are I/O-bound (thread-friendly), while pandas parsing of large XLSX files is mostly CPU-bound.",
+  "related": [
+    "python-asyncio",
+    "python-context-managers",
+    "fastapi-essentials",
+    "server-sent-events",
+    "psycopg2-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "What does the GIL prevent?",
+      "back": "More than one thread executing Python bytecode at the same time in a CPython process."
+    },
+    {
+      "front": "Threads or processes for I/O-bound work?",
+      "back": "Threads (or asyncio) - the GIL is released while waiting on I/O."
+    },
+    {
+      "front": "Threads or processes for CPU-bound pure Python?",
+      "back": "Processes (`ProcessPoolExecutor`) - each has its own interpreter and GIL."
+    },
+    {
+      "front": "How do you stop a running thread?",
+      "back": "Cooperatively: it checks a `threading.Event` (or similar flag) and exits. Threads can't be safely killed."
+    },
+    {
+      "front": "Is `counter += 1` thread-safe in CPython?",
+      "back": "No - it's read-modify-write; protect it with a Lock."
+    },
+    {
+      "front": "What does Python 3.13t / free-threaded build change?",
+      "back": "It's an optional CPython build without the GIL (experimental in 3.13, supported-but-optional in 3.14); default builds still have the GIL."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "You need to resize 50,000 images with pure-Python logic on an 8-core machine. Best choice?",
+      "options": [
+        "ThreadPoolExecutor(max_workers=8)",
+        "ProcessPoolExecutor()",
+        "asyncio.gather",
+        "A single thread"
+      ],
+      "answer_index": 1,
+      "explanation": "CPU-bound Python is serialised by the GIL in threads; processes achieve real parallelism."
+    },
+    {
+      "question": "Why can a ThreadPoolExecutor speed up 100 `requests.get()` calls?",
+      "options": [
+        "requests is written in Rust",
+        "The GIL is disabled for network code",
+        "Threads use multiple CPU cores for Python bytecode",
+        "The GIL is released while threads wait on network I/O"
+      ],
+      "answer_index": 3,
+      "explanation": "Blocking socket operations release the GIL so other threads can run during the wait."
+    },
+    {
+      "question": "What's the recommended way to let a user cancel a long-running background thread?",
+      "options": [
+        "Set a threading.Event that the worker checks periodically",
+        "Call thread.kill()",
+        "Raise an exception in the main thread",
+        "Mark the thread daemon=True"
+      ],
+      "answer_index": 0,
+      "explanation": "Python threads can't be killed safely; cooperative cancellation via an Event is the standard approach."
+    },
+    {
+      "question": "Which object is designed for thread-safe producer/consumer handoff?",
+      "options": [
+        "list",
+        "collections.deque with manual locks only",
+        "queue.Queue",
+        "dict"
+      ],
+      "answer_index": 2,
+      "explanation": "queue.Queue handles locking internally and supports blocking get/put with timeouts and task_done/join."
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the GIL and how does it affect your choice of concurrency model?",
+      "difficulty": "medium",
+      "answer_md": "The Global Interpreter Lock is a mutex in CPython that allows only one thread at a time to execute Python bytecode. It exists mainly because reference counting and many internals aren't thread-safe without it, and it keeps single-threaded code fast.\n\nImplications:\n- **I/O-bound** work (HTTP, S3, DB, disk, subprocess waits): the GIL is released during blocking system calls, so threads overlap their waits nicely. Threads or asyncio both work; asyncio scales to more concurrent connections, threads are simpler with blocking libraries like `requests`/psycopg2/boto3.\n- **CPU-bound** pure Python: threads don't parallelise; use `ProcessPoolExecutor`/multiprocessing (separate interpreters, pickled data) or push the hot loop into vectorised NumPy/pandas or C extensions that release the GIL.\n- **Correctness**: the GIL doesn't make compound operations atomic - still use locks/queues.\n\nThere's now an optional free-threaded CPython build (3.13t experimental, 3.14 officially supported but not default), but ecosystem support is still maturing, so in production I'd still choose by I/O vs CPU."
+    },
+    {
+      "question": "Design a background job system inside a single FastAPI process where users can start, monitor and cancel long-running downloads.",
+      "difficulty": "hard",
+      "answer_md": "For a single-process app (no external queue), a reasonable design:\n\n```python\nimport threading, uuid\nfrom concurrent.futures import ThreadPoolExecutor\n\nexecutor = ThreadPoolExecutor(max_workers=4)\njobs: dict[str, dict] = {}\nlock = threading.Lock()\n\ndef run_job(job_id, url, cancel: threading.Event):\n    try:\n        for pct in download_with_progress(url):     # yields progress\n            if cancel.is_set():\n                set_state(job_id, status=\"cancelled\"); return\n            set_state(job_id, progress=pct)\n        set_state(job_id, status=\"done\")\n    except Exception as e:\n        set_state(job_id, status=\"error\", error=str(e))\n\ndef set_state(job_id, **kw):\n    with lock:\n        jobs[job_id].update(kw)\n\n@app.post(\"/jobs\")\ndef start(req: JobIn):\n    job_id, cancel = uuid.uuid4().hex, threading.Event()\n    jobs[job_id] = {\"status\": \"running\", \"progress\": 0, \"cancel\": cancel}\n    executor.submit(run_job, job_id, req.url, cancel)\n    return {\"job_id\": job_id}\n\n@app.delete(\"/jobs/{job_id}\")\ndef cancel(job_id: str):\n    jobs[job_id][\"cancel\"].set()\n```\nMonitoring via polling or SSE that reads the job state. Limits: bounded pool to cap concurrency; cooperative cancellation (terminate subprocesses explicitly); state is lost on restart and doesn't work across multiple workers/replicas - at that point move to a real queue (SQS/Redis + workers) and store job state in a database."
+    },
+    {
+      "question": "Give an example of a race condition in Python and how to fix it.",
+      "difficulty": "medium",
+      "answer_md": "A classic check-then-act race on a shared cache:\n```python\ncache = {}\ndef get_token(org_id):\n    if org_id not in cache:              # thread A and B both see \"missing\"\n        cache[org_id] = fetch_token(org_id)   # both call the API\n    return cache[org_id]\n```\nEven with the GIL, a thread switch can happen between the check and the write, so two threads fetch tokens (wasted calls, or worse, one overwriting a newer token). Similarly `counter += 1` can lose increments.\n\nFixes:\n1. **Lock** the critical section:\n```python\nlock = threading.Lock()\ndef get_token(org_id):\n    with lock:\n        if org_id not in cache:\n            cache[org_id] = fetch_token(org_id)\n        return cache[org_id]\n```\n(For high throughput, use per-key locks so one slow fetch doesn't block other orgs.)\n2. **Avoid shared mutable state**: give each worker its own data and merge results, or communicate through `queue.Queue`.\n3. Push atomicity to the database: `INSERT ... ON CONFLICT`, `UPDATE ... WHERE status = 'Processing'` with row counts, or `SELECT ... FOR UPDATE` - essential when multiple processes/containers are involved, where Python locks don't help."
+    }
+  ]
+}

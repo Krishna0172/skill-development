@@ -1,0 +1,150 @@
+{
+  "slug": "ai-evaluation-observability",
+  "title": "Evaluating and tracing LLM applications",
+  "skill": "ai-evaluation",
+  "extra_skills": [
+    "ai-production",
+    "python-testing"
+  ],
+  "category": "AI",
+  "difficulty": "advanced",
+  "tags": [
+    "evaluation",
+    "eval-sets",
+    "tracing",
+    "observability",
+    "feedback",
+    "regression-testing"
+  ],
+  "summary": "You can't improve an LLM feature you can't measure. Offline eval sets catch regressions before deploy, online signals (votes, retries, errors) show real-world quality, and tracing every prompt, tool call, token count and latency makes failures debuggable and costs attributable.",
+  "why_md": "- 'How do you know it works?' is the key question in every AI engineering interview.\n- Prompt or model changes silently change behaviour; only an eval set catches it.\n- Traces with tokens and cost per org turn an opaque model call into a normal, observable backend dependency.",
+  "details_md": "### Offline evaluation\nAn **eval set** is a versioned list of inputs with expected outcomes, built from real (anonymised) traffic, known failures and edge cases — 50-300 cases is a useful start.\nScoring methods, cheapest first:\n- **Exact / programmatic checks**: JSON validates, label matches, SQL executes, result rows equal the expected result (execution accuracy for text-to-SQL).\n- **Heuristics**: contains required facts, length limits, cites a source ID.\n- **LLM-as-judge**: a model grades answers against a rubric or reference. Useful for free text; calibrate it against human labels and keep the judge prompt versioned.\n- **Human review** for a sample, especially for new features.\n\nRun the eval set in CI (or before every prompt/model change) and compare with the baseline: a **regression test** for prompts. Track per-category scores, not just one average.\n\n### Online signals\n- Explicit feedback: thumbs up/down, comments.\n- Implicit: user rephrases the question, retries, abandons, copies the answer, the generated SQL errors.\n- Guardrail triggers and refusal rate.\nTie each signal to the trace (prompt version, model, route) so you can slice by version — that's how you A/B test prompts.\n\n### Tracing\nA trace is one request; spans are its steps (route, retrieve, model call, tool call, validation). Record per span: inputs/outputs (redacted), prompt template version, model, parameters, tokens in/out, cost, latency, errors. Tools: OpenTelemetry with your own backend, or LLM-specific tracing tools (LangSmith, Langfuse, Phoenix and similar) — or a Postgres table to start.\n\n### Metrics that matter\n- Quality: eval score, thumbs-up rate, task success (SQL ran and user didn't retry).\n- Latency: p50/p95/p99, time to first token.\n- Cost: tokens and USD per request, per org, per feature.\n- Reliability: error/timeout rate, validation-retry rate.\n\n### Closing the loop\nDownvoted and failing traces become new eval cases. Over time the eval set reflects real failure modes and every fix is protected against regression.",
+  "code_md": "```python\n# Minimal eval runner for text-to-SQL: execution accuracy against expected results.\nimport json, statistics, time\n\ndef run_eval(cases: list[dict], generate_sql, execute) -> dict:\n    results = []\n    for case in cases:\n        t0 = time.perf_counter()\n        try:\n            sql = generate_sql(case[\"question\"])\n            rows = execute(sql)\n            ok = sorted(rows) == sorted(map(tuple, case[\"expected_rows\"]))\n            err = None\n        except Exception as exc:\n            ok, err = False, type(exc).__name__\n        results.append({\"id\": case[\"id\"], \"ok\": ok, \"error\": err,\n                        \"ms\": (time.perf_counter() - t0) * 1000, \"tag\": case.get(\"tag\", \"general\")})\n    score = sum(r[\"ok\"] for r in results) / len(results)\n    return {\"score\": score, \"p50_ms\": statistics.median(r[\"ms\"] for r in results), \"results\": results}\n\n# In CI: fail the build if score drops more than 2 points below the stored baseline.\n# baseline = json.load(open(\"eval/baseline.json\"))[\"score\"]\n# assert report[\"score\"] >= baseline - 0.02\n```\n\n```sql\n-- Simple trace store; one row per span. Enough to start before adopting a tracing tool.\nCREATE TABLE llm_span (\n    id             bigserial PRIMARY KEY,\n    trace_id       uuid NOT NULL,\n    org_id         bigint NOT NULL,\n    span_name      text NOT NULL,          -- route | retrieve | llm_call | tool:run_sql | validate\n    prompt_version text,\n    model          text,\n    input_tokens   int, output_tokens int,\n    cost_usd       numeric(12,6),\n    latency_ms     int,\n    error          text,\n    created_at     timestamptz DEFAULT now()\n);\n-- Thumbs-up rate by prompt version (votes joined to traces)\nSELECT s.prompt_version, avg((v.vote = 1)::int) AS up_rate, count(*)\nFROM message_vote v JOIN llm_span s ON s.trace_id = v.trace_id AND s.span_name = 'llm_call'\nGROUP BY 1 ORDER BY 1;\n```",
+  "use_cases_md": "- **Text-to-SQL regression suite**: 150 real questions with expected result rows, run on every prompt change.\n- **Prompt A/B test**: route 10% of traffic to prompt v2, compare thumbs-up rate and SQL error rate.\n- **Cost attribution**: tokens and USD per org per feature from span data.\n- **Incident debugging**: find the trace for a complaint and see exactly which retrieved chunks and prompt were used.",
+  "mistakes_md": "- **'Vibe checking'** a few prompts by hand and shipping.\n- **Only an average score** – a gain in one category can hide a collapse in another; slice by tag.\n- **Uncalibrated LLM judges** – judges have biases (length, position); validate against human labels.\n- **Votes without context** – a downvote is useless unless linked to prompt version, model and trace.\n- **Logging raw prompts with PII** into tracing tools without redaction or retention limits.\n- **Eval set that never grows** – add every production failure as a case.",
+  "best_practices_md": "- Version prompts, eval sets and judge prompts in git.\n- Prefer programmatic checks; use LLM judges for free text with a rubric.\n- Run evals in CI and before model upgrades; gate on regressions.\n- Trace every step with trace_id, prompt_version, model, tokens, cost, latency, error.\n- Link feedback to traces; slice metrics by version, route and org.\n- Turn downvotes and failures into new eval cases.",
+  "my_context_md": "`GetLlmData` already stores most of an observability backbone: chat sessions, message history, **user votes**, **per-org USD cost**, and the original/dynamic SQL generated by the model. What's typically missing is the link between them — a prompt/model version on each message so votes can be compared across versions, latency and token counts per call, and an offline eval set built from real questions whose SQL can be checked by execution. Your pytest experience (job-runner locking tests, `ECSInventoryPriceTracking` tests) is the basis for running such an eval in CI.",
+  "revision_notes_md": "- Offline: versioned eval set; programmatic checks > heuristics > LLM judge > human.\n- Text-to-SQL metric: execution accuracy (result rows match).\n- Run evals in CI; compare to baseline; slice by category.\n- Online: votes, retries/rephrases, SQL errors, refusals — tied to traces.\n- Trace = request; spans = steps; record version, model, tokens, cost, latency, error.\n- Key metrics: quality, p95 latency/TTFT, cost per request/org, error rate.\n- Calibrate LLM judges against humans.\n- Failures -> new eval cases (closed loop).",
+  "exercises_md": "1. Build a 30-question text-to-SQL eval set against a local sales schema with expected result rows; write the runner and a pytest gate.\n2. Create the `llm_span` table and a decorator that records latency, tokens and errors for any function.\n3. Write the SQL for thumbs-up rate by prompt version and by org for the last 7 days.\n4. Write an LLM-judge rubric for answer summaries and compare its scores to your own labels on 20 examples.",
+  "related": [
+    "ai-monitoring",
+    "ai-rag-evaluation",
+    "ai-model-evaluation",
+    "pytest-essentials",
+    "py-logging",
+    "ai-latency-cost-optimization"
+  ],
+  "flashcards": [
+    {
+      "front": "What is an eval set?",
+      "back": "A versioned set of inputs with expected outcomes (from real traffic + failures) used to score and regression-test prompts/models."
+    },
+    {
+      "front": "Execution accuracy (text-to-SQL)?",
+      "back": "Run generated SQL and compare result rows with the expected result, instead of comparing SQL text."
+    },
+    {
+      "front": "What must a trace span record?",
+      "back": "Step name, prompt version, model, tokens in/out, cost, latency, error (plus redacted inputs/outputs) with a trace_id."
+    },
+    {
+      "front": "Risk of LLM-as-judge?",
+      "back": "Biases (length, position, self-preference) and drift; calibrate against human labels and version the judge prompt."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "For a text-to-SQL feature, which evaluation is most reliable?",
+      "options": [
+        "Compare generated SQL strings to reference SQL exactly",
+        "Ask users if they liked it",
+        "Execute the SQL and compare result rows to expected results",
+        "Count tokens"
+      ],
+      "answer_index": 2,
+      "explanation": "Different SQL texts can be equivalent; execution accuracy checks what matters."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Thumbs-down votes are stored per message but nothing else. What's the main limitation?",
+      "options": [
+        "Votes can't be counted",
+        "They can't be attributed to a prompt version, model or route, so you can't tell what to fix",
+        "Votes slow down the database",
+        "Votes are always unreliable"
+      ],
+      "answer_index": 1,
+      "explanation": "Feedback must link to the trace/version to be actionable."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Using a model to grade another model's answers against a rubric is called LLM-as-a-____.",
+      "answers": [
+        "judge"
+      ],
+      "explanation": "LLM-as-a-judge scales free-text grading but must be calibrated."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Running the eval set on every prompt change to catch quality drops is ____ testing.",
+      "answers": [
+        "regression"
+      ],
+      "explanation": "Prompt changes are code changes; regression tests protect earlier fixes."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this eval runner print?",
+      "code": "cases = [\n    {\"q\": \"orders in march\", \"expected\": [120]},\n    {\"q\": \"returns in march\", \"expected\": [7]},\n    {\"q\": \"top sku\", \"expected\": [\"A1\"]},\n    {\"q\": \"refunds total\", \"expected\": [300]},\n]\nfake_results = {\"orders in march\": [120], \"returns in march\": [9],\n                \"top sku\": [\"A1\"], \"refunds total\": None}\n\npassed, failures = 0, []\nfor c in cases:\n    got = fake_results[c[\"q\"]]\n    if got is None:\n        failures.append((c[\"q\"], \"error\"))\n    elif got == c[\"expected\"]:\n        passed += 1\n    else:\n        failures.append((c[\"q\"], \"wrong\"))\nprint(f\"accuracy {passed}/{len(cases)} = {passed / len(cases):.0%}\")\nfor q, why in failures:\n    print(\"FAIL\", q, why)\n",
+      "answers": [
+        "accuracy 2/4 = 50%\nFAIL returns in march wrong\nFAIL refunds total error"
+      ],
+      "explanation": "2 of 4 pass; 'returns in march' is wrong (9 vs 7) and 'refunds total' errored (None)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this vote aggregation by prompt version print?",
+      "code": "from collections import defaultdict\n\nvotes = [(\"v1\", 1), (\"v1\", -1), (\"v1\", 1), (\"v2\", 1),\n         (\"v2\", 1), (\"v2\", 1), (\"v2\", -1), (\"v1\", -1)]\nstats = defaultdict(lambda: [0, 0])\nfor version, vote in votes:\n    stats[version][0] += vote == 1\n    stats[version][1] += 1\nfor version in sorted(stats):\n    up, total = stats[version]\n    print(version, f\"{up}/{total}\", f\"{up / total:.2f}\")\n",
+      "answers": [
+        "v1 2/4 0.50\nv2 3/4 0.75"
+      ],
+      "explanation": "v1 has 2 ups of 4 votes, v2 has 3 of 4. True/False add as 1/0."
+    },
+    {
+      "type": "debug",
+      "prompt": "This eval gate never fails even when quality drops. What's wrong and how do you fix it?",
+      "code": "def test_prompt_quality():\n    report = run_eval(load_cases(), generate_sql, execute)\n    print(\"score\", report[\"score\"])\n    assert report[\"results\"]           # at least one result\n",
+      "answer": "The assertion only checks that results exist, not that the score meets a threshold; printing the score doesn't fail CI. It also ignores per-category regressions.\n\n```python\ndef test_prompt_quality():\n    report = run_eval(load_cases(), generate_sql, execute)\n    baseline = json.load(open(\"eval/baseline.json\"))\n    assert report[\"score\"] >= baseline[\"score\"] - 0.02, report[\"score\"]\n    for tag, base in baseline[\"by_tag\"].items():\n        assert report[\"by_tag\"][tag] >= base - 0.05, tag\n```",
+      "rubric": [
+        "Assertion doesn't check the score",
+        "Compare against a stored baseline with tolerance",
+        "Check per-category scores",
+        "Fail CI instead of printing"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd set up evaluation and observability for an LLM chat feature from day one.",
+      "answer": "Tracing: trace_id per request, spans for route/retrieve/LLM/tool/validate with prompt version, model, tokens, cost, latency, errors; PII redacted. Offline: eval set of 50-100 real questions with programmatic checks (execution accuracy) plus a calibrated judge for free text, run in CI against a baseline. Online: votes and implicit signals linked to traces; dashboards for quality, p95 latency, cost per org, error rate. Loop: failures become eval cases; prompt changes A/B tested by version.",
+      "rubric": [
+        "Tracing with version/tokens/cost/latency",
+        "Offline eval set in CI with baseline",
+        "Online feedback linked to traces",
+        "Failures feed back into eval set"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you know a prompt change made things better?",
+      "difficulty": "medium",
+      "answer_md": "Offline first: run the versioned eval set with old and new prompts, compare overall and per-category scores (execution accuracy for SQL, rubric/judge scores for text), and inspect diffs on the cases that changed. If it passes, roll out gradually: send a percentage of traffic to the new prompt version and compare online metrics — thumbs-up rate, retry/rephrase rate, SQL error rate, latency and tokens/cost per request — sliced by version. Only then promote it. Every message stores its prompt version so this comparison is a SQL `GROUP BY`."
+    },
+    {
+      "question": "What would you put in a trace for an agent request?",
+      "difficulty": "medium",
+      "answer_md": "One trace per user request with a `trace_id`, user/org, and route. Spans for: each model call (prompt template version, model, parameters, input/output tokens, cost, latency, finish reason), each tool call (name, validated arguments, result size, error, latency), retrieval (query, chunk IDs, scores), and guardrail checks (which fired). Plus the final outcome (answer, refusal, step-limit stop) and later the user's vote. Redact PII, sample full payloads if volume is high, and keep metadata for everything. This allows debugging a single bad answer and aggregating cost/latency per step."
+    }
+  ]
+}

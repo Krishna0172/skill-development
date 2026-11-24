@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty %}
+{% block title %}Projects{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Projects</h1><p>Your work services and personal builds: architecture, what you contributed, what you learned and what's still pending.</p></div>
+  <div class="actions">
+    <details class="pop"><summary class="btn primary">+ New project</summary>
+      <div class="pop-body card"><form method="post" action="/projects/new" class="body form-grid" style="min-width:300px">
+        <input name="name" placeholder="Project name" required>
+        <select name="kind"><option value="personal">Personal</option><option value="professional">Work</option></select>
+        <textarea name="summary" rows="2" placeholder="One-line summary"></textarea>
+        <button class="btn primary">Create</button>
+      </form></div></details>
+  </div>
+</div>
+<div class="chips mb"><a class="chip {{ 'on' if not status }}" href="/projects">All</a>{% for s in statuses %}<a class="chip {{ 'on' if s == status }}" href="/projects?status={{ s }}">{{ s|label }}</a>{% endfor %}</div>
+{% for kind, heading, rows in groups %}
+  {% if rows %}
+    <h2 class="section-title">{{ heading }} <span class="faint">({{ rows|length }})</span></h2>
+    <div class="grid g3 mb">
+      {% for p in rows %}
+        <a class="card" href="/projects/{{ p.id }}" style="color:inherit;text-decoration:none"><div class="body">
+          <div class="between"><h3>{{ p.name }}</h3>{{ badge(p.status) }}</div>
+          {% if p.organization or p.role %}<div class="tiny faint">{{ p.organization }}{% if p.organization and p.role %} · {% endif %}{{ p.role }}</div>{% endif %}
+          <p class="small muted" style="margin:6px 0 8px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden">{{ p.summary }}</p>
+          {% if p.tech %}<div class="row tiny faint" style="flex-wrap:wrap">{{ p.tech[:6]|join(" · ") }}</div>{% endif %}
+          {% if p.items_total %}<div class="mt">{{ progress(100 * p.items_done / p.items_total, "good", thin=True) }}<div class="tiny faint mt" style="margin-top:4px">{{ p.items_done }}/{{ p.items_total }} items done</div></div>{% endif %}
+        </div></a>
+      {% endfor %}
+    </div>
+  {% endif %}
+{% endfor %}
+{% if not groups[0][2] and not groups[1][2] %}{{ empty("No projects" ~ (" with status " ~ status|label if status else ""), "Create one to document what you've built.") }}{% endif %}
+{% endblock %}

@@ -1,0 +1,197 @@
+{
+  "slug": "ai-llm-evals-hands-on",
+  "title": "LLM evals hands-on: golden sets, judges and regression gates",
+  "skill": "ai-evaluation",
+  "extra_skills": [
+    "llm-applications",
+    "python-testing"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "evals",
+    "golden-set",
+    "llm-as-judge",
+    "regression",
+    "ci"
+  ],
+  "summary": "LLM output cannot be unit-tested with assert equality, but it can be measured. This topic shows how to build a golden set, choose graders (exact, programmatic, LLM-as-judge), avoid judge pitfalls, and wire evals into CI as a regression gate.",
+  "why_md": "- Without evals every prompt, model or retrieval change is a guess; with them you can ship changes confidently.\n- 'How do you know your LLM feature works?' is a core AI-engineering interview question.\n- Evals are the AI equivalent of your test suite and fit naturally with pytest and CI habits.\n- They also control cost: you can verify a cheaper model is good enough on your own data.",
+  "details_md": "### What to evaluate\nAn **eval** = a dataset of inputs (and often expected outputs or criteria) + a way to run your system on them + graders that produce scores + an aggregate report. Evaluate the *whole pipeline* you ship (prompt, retrieval, tools, post-processing), not only the raw model.\n\n### Building a golden set\n- Start small: **30-100 real examples** beat 1000 synthetic ones. Source them from production logs, support tickets, user votes and known failures.\n- Cover the **distribution**: common cases, edge cases, adversarial inputs, and cases where the right answer is \"I can't answer\".\n- Label with care: have a second person review a sample; fix ambiguous items. Bad labels cap what any eval can tell you.\n- Tag each case (category, difficulty) so you can report per-slice scores.\n- Keep a separate, rarely used **held-out** set so you do not overfit prompts to the golden set.\n- Version it in git; every production bug becomes a new case.\n\n### Graders, from cheapest to most flexible\n1. **Exact / programmatic**: string match, regex, JSON schema validity, SQL execution-result equality, tool-call name/arguments. Fast, deterministic, preferred wherever possible.\n2. **Reference-based similarity**: embedding similarity or token overlap against a reference. Useful but crude.\n3. **LLM-as-judge**: another model scores an answer against a rubric. Needed for open-ended quality (helpfulness, faithfulness, tone).\n4. **Human review**: the ground truth to calibrate the others; use on samples.\n\n### LLM-as-judge pitfalls\n- **Position bias**: when comparing A vs B the judge may favour the first. Randomise order or run both orders.\n- **Verbosity/self-preference bias**: judges tend to prefer longer answers and answers from their own model family.\n- **Vague rubrics** give noisy scores. Use specific criteria, small scales (pass/fail or 1-3), and ask for a short reason *before* the score.\n- **Nondeterminism**: use low temperature, and repeat important judgements.\n- **Unvalidated judge**: always measure agreement with human labels on 30-50 items (e.g. percent agreement or Cohen's kappa) before trusting it.\n- **Judge sees the answer key**: leaking the reference can cause rubber-stamping; give the judge only what a fair grader needs.\n\n### Metrics and statistics\nReport pass rate per category, not just an average. With small sets, differences of a few points are noise: look at *which cases flipped*, run multiple samples for stochastic systems, and compute simple confidence intervals. Track cost and latency alongside quality.\n\n### Regression gates in CI\nRun the eval on every PR that touches prompts, models, retrieval or tools. Store a baseline score; fail the build if the pass rate drops more than a threshold, or if any \"must-not-fail\" case (safety, tenant isolation) fails. Cache results by (input, prompt-hash, model) to save cost, and run the expensive full eval nightly while a smaller smoke set runs per PR.\n\n### Online signals\nOffline evals miss real traffic. Add user feedback (thumbs), implicit signals (retries, edits), sampled human review, and drift monitoring, then feed failures back into the golden set.",
+  "code_md": "A minimal eval harness (system under test is any callable):\n```python\nimport json\nfrom dataclasses import dataclass\n\n@dataclass\nclass Case:\n    id: str\n    input: str\n    expected: str\n    tag: str = \"general\"\n\ndef run_eval(cases, system, grade):\n    results = []\n    for c in cases:\n        out = system(c.input)\n        results.append({\"id\": c.id, \"tag\": c.tag, \"pass\": grade(out, c.expected)})\n    return results\n\ndef summarize(results):\n    by_tag = {}\n    for r in results:\n        by_tag.setdefault(r[\"tag\"], []).append(r[\"pass\"])\n    return {t: sum(v) / len(v) for t, v in by_tag.items()}\n```\nProgrammatic graders:\n```python\nimport json\ndef exact(out, exp): return out.strip().lower() == exp.strip().lower()\ndef valid_json_with_keys(out, keys):\n    try:\n        data = json.loads(out)\n    except json.JSONDecodeError:\n        return False\n    return all(k in data for k in keys)\n```\nLLM-as-judge prompt (provider-neutral), reason first, then a verdict:\n```text\nYou are grading an answer against a rubric.\nRubric: the answer must (1) use only facts in <context>, (2) answer the question.\n<question>{q}</question> <context>{ctx}</context> <answer>{a}</answer>\nWrite one sentence of reasoning, then on a new line: VERDICT: PASS or VERDICT: FAIL.\n```\nRegression gate for CI (pytest style):\n```python\nBASELINE = 0.90\ndef test_no_regression():\n    results = run_eval(load_cases(\"golden.jsonl\"), my_system, exact)\n    rate = sum(r[\"pass\"] for r in results) / len(results)\n    assert rate >= BASELINE - 0.02, f\"pass rate dropped to {rate:.2f}\"\n```\nJudge calibration against humans:\n```python\nagree = sum(j == h for j, h in zip(judge_labels, human_labels)) / len(human_labels)\n```",
+  "use_cases_md": "- **Prompt change safety**: re-run 80 golden questions before shipping a new system prompt.\n- **Model swap**: verify a cheaper model keeps the pass rate on your data.\n- **RAG quality**: score faithfulness (answer supported by retrieved text) and retrieval hit-rate separately.\n- **Agent/tool checks**: grade whether the right tool and arguments were chosen.\n- **Nightly dashboards** of pass rate per category, cost and latency.",
+  "mistakes_md": "- **Evaluating on a handful of cherry-picked examples**: Fix: 30-100 realistic cases including failures.\n- **Tuning the prompt until the golden set passes** and calling it done (overfitting). Fix: held-out set.\n- **Trusting an unvalidated LLM judge**. Fix: compare to human labels first.\n- **One average score**: hides regressions in a slice. Fix: per-tag reporting and must-pass cases.\n- **Judge sees both orders unbalanced** (position bias). Fix: randomise or swap order.\n- **Ignoring noise**: a 1-point change on 20 cases is meaningless. Fix: more cases, repeat runs, inspect flipped cases.\n- **No link to production**: Fix: add real failures to the set.",
+  "best_practices_md": "- Prefer deterministic graders; use LLM judges only for what needs them.\n- Keep rubrics specific with small scales; ask for reasoning then verdict.\n- Calibrate judges against human labels periodically.\n- Version datasets, prompts and results together; record model and prompt hash.\n- Gate CI on pass-rate delta plus a list of must-pass cases.\n- Track cost and latency with quality.\n- Turn every production incident into a test case.",
+  "my_context_md": "Your LLM chat backend (GetLlmData / ECSLlmQueryProcess) records user votes and stores the original and dynamic SQL per message. Votes and corrected SQL are a practical seed for a golden set of question -> verified SQL pairs. You already write pytest tests in ECSInventoryPriceTracking, so a pytest-based regression gate matches your habits.",
+  "revision_notes_md": "- Eval = dataset + runner + graders + report; test the whole pipeline.\n- 30-100 real, labelled, tagged cases; add every production bug; keep a held-out set.\n- Grader order: exact/programmatic > similarity > LLM judge > human.\n- Judge pitfalls: position, verbosity, self-preference, vague rubric, nondeterminism.\n- Calibrate judge vs humans (agreement / kappa).\n- Report per-slice and track cost/latency.\n- Small sets are noisy: inspect flipped cases, repeat runs.\n- CI gate: baseline minus tolerance + must-pass cases; smoke per PR, full nightly.\n- Online feedback feeds the golden set.",
+  "exercises_md": "1. Create `golden.jsonl` with 20 cases for any small LLM-ish function (even a keyword classifier) and implement `run_eval` + `summarize` with per-tag scores.\n2. Add a programmatic grader for JSON validity and required keys, plus 3 deliberately broken outputs to test it.\n3. Write a pytest regression gate with a baseline and tolerance, then break the system on purpose to see it fail.\n4. Label 20 items yourself, produce 'judge' labels with any simple rule, and compute percent agreement; explain which cases disagree.",
+  "related": [
+    "ai-evaluation-observability",
+    "ai-rag-evaluation",
+    "pytest-essentials",
+    "ai-text-to-sql-systems"
+  ],
+  "flashcards": [
+    {
+      "front": "What are the parts of an eval?",
+      "back": "A dataset of cases, a runner for your system, graders producing scores, and an aggregate report."
+    },
+    {
+      "front": "Order of grader preference?",
+      "back": "Exact/programmatic first, then similarity, then LLM-as-judge, with human review for calibration."
+    },
+    {
+      "front": "Name three LLM-judge biases.",
+      "back": "Position bias, verbosity bias and self-preference bias (also vague-rubric noise)."
+    },
+    {
+      "front": "How do you trust a judge?",
+      "back": "Measure agreement with human labels on a sample before relying on it."
+    },
+    {
+      "front": "What is a regression gate?",
+      "back": "A CI check that fails if the eval score drops below a baseline (minus tolerance) or a must-pass case fails."
+    },
+    {
+      "front": "Why keep a held-out set?",
+      "back": "To detect overfitting of prompts to the golden set you iterate on."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is the best first source of golden-set examples?",
+      "options": [
+        "Randomly generated text",
+        "The model's own outputs only",
+        "Real production inputs, tickets and known failures",
+        "Copying public benchmarks"
+      ],
+      "answer_index": 2,
+      "explanation": "Real distribution plus known failures give the most relevant eval."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A judge LLM prefers whichever answer appears first. This is called:",
+      "options": [
+        "Position bias",
+        "Verbosity bias",
+        "Temperature drift",
+        "Label leakage"
+      ],
+      "answer_index": 0,
+      "explanation": "Position bias; randomise or swap order."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which grader should you use for 'is the output valid JSON with key order_id'?",
+      "options": [
+        "LLM-as-judge",
+        "Human only",
+        "Embedding similarity",
+        "Programmatic check"
+      ],
+      "answer_index": 3,
+      "explanation": "Deterministic checks are cheaper and exact."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Before trusting an LLM judge you should measure its ____ with human labels.",
+      "answers": [
+        "agreement",
+        "agreement rate",
+        "correlation",
+        "kappa"
+      ],
+      "explanation": "Agreement with humans validates the judge."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "An eval that fails the CI build when the score falls below a threshold is a ____ gate.",
+      "answers": [
+        "regression",
+        "regression test"
+      ],
+      "explanation": "A regression gate."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "results = [\n    {\"tag\": \"easy\", \"pass\": True}, {\"tag\": \"easy\", \"pass\": True},\n    {\"tag\": \"hard\", \"pass\": False}, {\"tag\": \"hard\", \"pass\": True},\n    {\"tag\": \"hard\", \"pass\": False},\n]\nby = {}\nfor r in results:\n    by.setdefault(r[\"tag\"], []).append(r[\"pass\"])\nfor tag in sorted(by):\n    print(tag, round(sum(by[tag]) / len(by[tag]), 2))\nprint(\"overall\", round(sum(r[\"pass\"] for r in results) / len(results), 2))",
+      "answers": [
+        "easy 1.0\nhard 0.33\noverall 0.6"
+      ],
+      "explanation": "Per-tag pass rates plus the overall rate show how an average can hide a weak slice."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "baseline = 0.90\ntolerance = 0.02\ndef gate(rate):\n    return \"PASS\" if rate >= baseline - tolerance else \"FAIL\"\nfor r in [0.95, 0.89, 0.87]:\n    print(r, gate(r))",
+      "answers": [
+        "0.95 PASS\n0.89 PASS\n0.87 FAIL"
+      ],
+      "explanation": "The threshold is 0.88: 0.95 passes, 0.89 passes, 0.87 fails."
+    },
+    {
+      "type": "debug",
+      "prompt": "This eval always reports a high score even when the system is wrong. Why?",
+      "code": "def grade(output, expected):\n    return expected in output\n\n# the system sometimes returns the whole question plus all options\nscore = sum(grade(system(c.q), c.expected) for c in cases) / len(cases)",
+      "answer": "`expected in output` is a lenient substring check; verbose or option-dumping outputs that merely contain the expected text pass. Use a stricter grader: normalise and compare the extracted final answer (exact match), or parse structured output, and add negative cases that must fail.",
+      "rubric": [
+        "Spots the substring containment is too lenient",
+        "Suggests exact/extracted-answer comparison or structured output",
+        "Suggests adding cases that should fail"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the main pitfalls of LLM-as-judge and how you mitigate them.",
+      "answer": "Judges show position bias, prefer longer or same-family answers, and give noisy scores for vague rubrics. Mitigate by randomising order or running both orders, using specific rubrics with small scales and reasoning-then-verdict, low temperature, repeated judgements for key cases, and calibrating against human labels on a sample. Prefer deterministic graders wherever possible.",
+      "rubric": [
+        "Names at least two biases",
+        "Specific rubric / order randomisation / low temperature",
+        "Calibration against human labels"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Design a regression gate for a RAG chatbot prompt change.",
+      "answer": "Maintain a golden set of 50-100 questions tagged by type with reference answers and source documents. On each PR touching prompts or retrieval, run retrieval hit-rate (programmatic) and faithfulness/answer-correctness (LLM judge calibrated on humans). Compare with the stored baseline per tag; fail if overall drops by more than the tolerance or any must-pass case (e.g. refusing out-of-scope, no leaking restricted docs) fails. Cache by (input, prompt-hash, model), run a small smoke set per PR and the full set nightly, and report cost and latency.",
+      "rubric": [
+        "Golden set with tags and references",
+        "Separate retrieval and generation metrics",
+        "Baseline + tolerance + must-pass cases in CI",
+        "Cost control (cache/smoke vs nightly)"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the weakest evidence that a prompt change is an improvement?",
+      "options": [
+        "Pass rate up on 80 cases with no per-tag regression",
+        "It passed 3 hand-picked examples",
+        "Held-out set also improved",
+        "Flipped cases were inspected"
+      ],
+      "answer_index": 1,
+      "explanation": "Three cherry-picked examples are noise."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you know an LLM feature is good enough to ship?",
+      "difficulty": "medium",
+      "answer_md": "Define success criteria with the product owner, build a golden set from real inputs with tagged slices, choose graders (programmatic where possible, calibrated LLM judge for open-ended), set thresholds and must-pass safety cases, and run the eval before release. After launch monitor feedback and sampled reviews, and feed failures back into the set."
+    },
+    {
+      "question": "What are the limits of LLM-as-judge?",
+      "difficulty": "medium",
+      "answer_md": "Judges are biased (position, verbosity, self-preference), noisy and can share blind spots with the system being judged. They need specific rubrics, calibration against human labels and spot checks. For verifiable tasks (SQL results, JSON, tool calls) deterministic graders are better."
+    },
+    {
+      "question": "How do you keep eval cost under control in CI?",
+      "difficulty": "medium",
+      "answer_md": "Use a small smoke subset per PR and the full set nightly, cache results keyed by input, prompt hash and model, use deterministic graders where possible, use a cheaper judge model after validating agreement with a stronger one, and run only when relevant paths (prompts, retrieval, tools) change."
+    }
+  ]
+}

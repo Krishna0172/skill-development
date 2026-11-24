@@ -1,0 +1,122 @@
+{
+  "slug": "sql-group-by",
+  "title": "GROUP BY, Aggregates, HAVING and FILTER",
+  "skill": "sql-aggregations",
+  "extra_skills": [
+    "sql",
+    "postgresql"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "sql",
+    "group-by",
+    "aggregation",
+    "having",
+    "filter",
+    "grouping-sets"
+  ],
+  "summary": "GROUP BY collapses rows that share the same values into one row per group, and aggregate functions (COUNT, SUM, AVG, MIN, MAX) summarise each group. WHERE filters rows before grouping; HAVING filters groups after. PostgreSQL's FILTER clause lets you compute several conditional totals in one pass.",
+  "details_md": "### Logical order of evaluation\n`FROM/JOIN -> WHERE -> GROUP BY -> HAVING -> SELECT -> DISTINCT -> ORDER BY -> LIMIT`.\nThis explains most errors: you cannot use an aggregate in `WHERE` (groups do not exist yet), and you cannot reference a `SELECT` alias in `WHERE` or `HAVING` (the alias is not computed yet; PostgreSQL does allow aliases in `GROUP BY` and `ORDER BY`).\n\n### The grouping rule\nEvery column in `SELECT` must either be in `GROUP BY` or wrapped in an aggregate. PostgreSQL relaxes this in one case: if you group by a table's **primary key**, you may select any other column of that table (it is functionally dependent on the key).\n\n### Aggregates and NULL\n- `COUNT(*)` counts rows; `COUNT(col)` counts non-NULL values; `COUNT(DISTINCT col)` counts distinct non-NULL values.\n- `SUM`, `AVG`, `MIN`, `MAX` ignore NULLs. `SUM` over zero rows (or all NULLs) returns **NULL**, not 0; wrap it in `COALESCE(SUM(x), 0)`.\n- `AVG` of an integer column returns `numeric`; `SUM` of `bigint` returns `numeric` (no overflow).\n\n### FILTER: conditional aggregation\n`COUNT(*) FILTER (WHERE status = 'RTO')` aggregates only matching rows. It is the standard-SQL, readable replacement for `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` and lets you pivot statuses into columns in one table scan.\n\n### Useful aggregates beyond the basics\n- `string_agg(sku, ', ' ORDER BY sku)`, `array_agg(...)`, `jsonb_agg(...)`, `jsonb_object_agg(k, v)`.\n- `bool_and` / `bool_or` (\"are all items shipped?\").\n- `percentile_cont(0.5) WITHIN GROUP (ORDER BY amount)` for the median.\n- `mode() WITHIN GROUP (ORDER BY carrier)` for the most common value.\n\n### GROUPING SETS, ROLLUP, CUBE\nProduce several groupings in one query: `GROUP BY ROLLUP (channel, month)` returns per-(channel, month) rows, per-channel subtotals, and a grand total. `GROUPING(col)` tells you whether a NULL in a result row means \"subtotal\" or a real NULL value.\n\n### How PostgreSQL executes it\nThe planner uses either **HashAggregate** (builds a hash table of groups in `work_mem`; spills to disk since PG 13 if it overflows) or **GroupAggregate** (needs input sorted by the group keys, either through an explicit Sort or an index). Large `COUNT(DISTINCT ...)` is often slow because it sorts per group; pre-deduplicating in a subquery can be faster. Parallel workers can compute partial aggregates and combine them.\n\n### WHERE vs HAVING performance\nPut row-level conditions in `WHERE`, even if `HAVING` would also work, so rows are discarded before the expensive grouping step. Use `HAVING` only for conditions on aggregates (`HAVING SUM(total) > 10000`).",
+  "code_md": "```sql\n-- orders(id, customer_id, channel, status, order_date, total)\n\n-- 1) Basic grouping with WHERE vs HAVING\nSELECT customer_id,\n       COUNT(*)              AS orders,\n       SUM(total)            AS revenue,\n       ROUND(AVG(total), 2)  AS avg_order\nFROM orders\nWHERE order_date >= DATE '2024-01-01'   -- row filter: before grouping\nGROUP BY customer_id\nHAVING SUM(total) > 50000                -- group filter: after grouping\nORDER BY revenue DESC;\n```\n\n```sql\n-- 2) FILTER: pivot order statuses per channel in one scan\nSELECT channel,\n       COUNT(*)                                     AS total_orders,\n       COUNT(*) FILTER (WHERE status = 'DELIVERED') AS delivered,\n       COUNT(*) FILTER (WHERE status = 'RTO')       AS rto,\n       COALESCE(SUM(total) FILTER (WHERE status = 'DELIVERED'), 0) AS delivered_value\nFROM orders\nGROUP BY channel;\n```\n\n```sql\n-- 3) Monthly totals with subtotals and grand total\nSELECT channel,\n       date_trunc('month', order_date)::date AS month,\n       SUM(total)                             AS revenue,\n       GROUPING(channel, date_trunc('month', order_date)) AS level  -- 0=detail, 1=channel subtotal, 3=grand total\nFROM orders\nGROUP BY ROLLUP (channel, date_trunc('month', order_date))\nORDER BY channel NULLS LAST, month NULLS LAST;\n```\n\n```sql\n-- 4) Collecting values and medians\nSELECT customer_id,\n       string_agg(id::text, ',' ORDER BY order_date) AS order_ids,\n       percentile_cont(0.5) WITHIN GROUP (ORDER BY total) AS median_total,\n       bool_and(status = 'DELIVERED') AS all_delivered\nFROM orders\nGROUP BY customer_id;\n```",
+  "use_cases_md": "- Daily or monthly revenue per channel/marketplace for dashboards.\n- Reconciliation summaries: expected vs settled amount per settlement batch, with `HAVING` to show only mismatched batches.\n- Status breakdowns (delivered / RTO / cancelled) using `FILTER`.\n- Finding duplicates: `GROUP BY id, orgid HAVING COUNT(*) > 1`.\n- Inventory ledger roll-ups: net quantity movement per SKU per warehouse.",
+  "mistakes_md": "- **Selecting a non-grouped column** (`SELECT customer_id, channel ... GROUP BY customer_id`): error \"must appear in the GROUP BY clause\". Group by it, aggregate it, or group by the primary key.\n- **Putting aggregate conditions in WHERE**: `WHERE SUM(total) > 100` is invalid; use `HAVING`.\n- **Using HAVING for row filters**: works but discards rows late. Move non-aggregate conditions to `WHERE`.\n- **Assuming SUM returns 0 for no rows**: it returns NULL. Use `COALESCE(SUM(x), 0)`.\n- **COUNT(*) vs COUNT(col) confusion after LEFT JOIN**: `COUNT(*)` counts the NULL-padded row. Count a right-side column.\n- **Aggregating after a fan-out join**: sums get multiplied. Aggregate before joining.\n- **Grouping by a timestamp instead of a truncated date**: every row becomes its own group. Use `date_trunc('day', ts)` or `ts::date`.",
+  "best_practices_md": "- Filter as early as possible (`WHERE`), group as late as necessary.\n- Prefer `FILTER (WHERE ...)` over `CASE` inside aggregates for readability.\n- Use `numeric` for money; `SUM` of `float` accumulates rounding errors.\n- Use `date_trunc` with explicit time zones (`date_trunc('day', ts AT TIME ZONE 'Asia/Kolkata')`) for daily reports.\n- For heavy repeated reports, materialise results (summary table or materialized view) instead of re-aggregating millions of rows.\n- An index on the GROUP BY keys can enable a sorted GroupAggregate and avoid a big sort or hash.",
+  "my_context_md": "Reconciliation reports, which your resume says you sped up by 40%, are mostly GROUP BY queries: totals per order or settlement batch compared across sources, with `HAVING` to show only the rows that don't match. `FILTER` is a natural fit for summarising `fs_upload` rows by status (Processing / Completed / Error) in a single query, and `GROUP BY id, orgid HAVING COUNT(*) > 1` is a quick way to find the duplicates that your `ON CONFLICT (id, orgid)` constraint guards against.",
+  "related": [
+    "sql-joins",
+    "sql-window-functions",
+    "sql-null-handling",
+    "sql-ctes",
+    "explain-analyze"
+  ],
+  "flashcards": [
+    {
+      "front": "WHERE vs HAVING?",
+      "back": "WHERE filters rows before grouping; HAVING filters groups after aggregation and can use aggregates."
+    },
+    {
+      "front": "What does SUM return when there are no rows?",
+      "back": "NULL. Use COALESCE(SUM(x), 0)."
+    },
+    {
+      "front": "COUNT(*) vs COUNT(col) vs COUNT(DISTINCT col)?",
+      "back": "All rows / non-NULL values / distinct non-NULL values."
+    },
+    {
+      "front": "Write a conditional count of RTO orders in PostgreSQL.",
+      "back": "`COUNT(*) FILTER (WHERE status = 'RTO')`"
+    },
+    {
+      "front": "What does GROUP BY ROLLUP (a, b) produce?",
+      "back": "Groups (a, b), subtotals per (a), and a grand total ()."
+    },
+    {
+      "front": "When can you SELECT a column not listed in GROUP BY?",
+      "back": "When you group by the table's primary key; other columns of that table are functionally dependent on it."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which clause runs FIRST in the logical evaluation order?",
+      "options": [
+        "HAVING",
+        "WHERE",
+        "SELECT",
+        "ORDER BY"
+      ],
+      "answer_index": 1,
+      "explanation": "FROM -> WHERE -> GROUP BY -> HAVING -> SELECT -> ORDER BY."
+    },
+    {
+      "question": "What does `SELECT SUM(total) FROM orders WHERE false;` return?",
+      "options": [
+        "0",
+        "No rows",
+        "An error",
+        "NULL"
+      ],
+      "answer_index": 3,
+      "explanation": "An aggregate without GROUP BY always returns one row; SUM over no input is NULL."
+    },
+    {
+      "question": "Which is the idiomatic PostgreSQL way to count delivered orders alongside total orders?",
+      "options": [
+        "COUNT(*) FILTER (WHERE status = 'DELIVERED')",
+        "COUNT(status = 'DELIVERED')",
+        "COUNT(*) HAVING status = 'DELIVERED'",
+        "COUNT(DISTINCT 'DELIVERED')"
+      ],
+      "answer_index": 0,
+      "explanation": "FILTER restricts the rows fed to that one aggregate. COUNT(status = 'DELIVERED') counts non-NULL booleans, including false."
+    },
+    {
+      "question": "Which plan node aggregates using a hash table in work_mem?",
+      "options": [
+        "GroupAggregate",
+        "WindowAgg",
+        "HashAggregate",
+        "Unique"
+      ],
+      "answer_index": 2,
+      "explanation": "HashAggregate hashes group keys; GroupAggregate needs sorted input."
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between WHERE and HAVING, and why does it matter for performance?",
+      "difficulty": "easy",
+      "answer_md": "`WHERE` filters individual rows **before** grouping; `HAVING` filters groups **after** the aggregates are computed. Only `HAVING` can reference aggregates like `SUM(total)`.\n\n```sql\nSELECT customer_id, SUM(total)\nFROM orders\nWHERE status <> 'CANCELLED'        -- row-level: drop cancelled orders early\nGROUP BY customer_id\nHAVING SUM(total) > 10000;         -- group-level: only big customers\n```\n\nPerformance: any condition that does not need an aggregate should live in `WHERE`. Rows removed in `WHERE` are never hashed or sorted for grouping, and `WHERE` conditions can use indexes. Writing `HAVING status <> 'CANCELLED'` would not even be valid unless `status` were grouped, and `HAVING customer_id = 42` works but makes PostgreSQL aggregate every customer before throwing most away (the planner can sometimes push such conditions down, but you should not rely on that)."
+    },
+    {
+      "question": "How would you produce a report of order counts per status as columns, per channel, in one query?",
+      "difficulty": "medium",
+      "answer_md": "Use conditional aggregation. In PostgreSQL the cleanest form is the `FILTER` clause:\n\n```sql\nSELECT channel,\n       COUNT(*) AS total,\n       COUNT(*) FILTER (WHERE status = 'DELIVERED') AS delivered,\n       COUNT(*) FILTER (WHERE status = 'RTO')       AS rto,\n       COUNT(*) FILTER (WHERE status = 'CANCELLED') AS cancelled,\n       ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'RTO') / NULLIF(COUNT(*), 0), 2) AS rto_pct\nFROM orders\nWHERE order_date >= now() - interval '30 days'\nGROUP BY channel;\n```\n\nThis scans the table once. The portable equivalent is `SUM(CASE WHEN status = 'RTO' THEN 1 ELSE 0 END)`. Note `NULLIF(COUNT(*), 0)` to avoid division by zero, and `100.0` to force numeric division instead of integer division. If the set of statuses is dynamic, generate the SQL from the list of statuses in application code or pivot on the client (e.g. with pandas `pivot_table`), since SQL needs the output columns known at plan time."
+    },
+    {
+      "question": "A GROUP BY query over 50 million rows is slow. How do you approach it?",
+      "difficulty": "hard",
+      "answer_md": "1. **Run `EXPLAIN (ANALYZE, BUFFERS)`**. Check whether it uses HashAggregate or Sort + GroupAggregate, whether the hash aggregate spills to disk (`Batches: > 1`, `Disk Usage`), and whether a sort is external (`Sort Method: external merge`).\n2. **Reduce the input**: tighten `WHERE` (date range), make sure that filter uses an index, and drop unneeded joins. Pre-aggregate before joining dimension tables.\n3. **Memory**: raise `work_mem` for that session (`SET LOCAL work_mem = '256MB'`) so hashing or sorting fits in memory. Don't raise it globally, because it applies per sort/hash node per connection.\n4. **Parallelism**: confirm `Gather` / `Partial HashAggregate` appear; check `max_parallel_workers_per_gather`.\n5. **Expensive aggregates**: `COUNT(DISTINCT x)` sorts per group; rewrite as `SELECT g, COUNT(*) FROM (SELECT DISTINCT g, x ...) GROUP BY g`.\n6. **Precompute**: if the report runs repeatedly, keep a daily summary table updated incrementally (e.g. upsert per day per channel) or use a materialized view refreshed with `REFRESH MATERIALIZED VIEW CONCURRENTLY`.\n7. **Partitioning** by date lets the planner prune old partitions entirely."
+    }
+  ]
+}

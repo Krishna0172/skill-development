@@ -1,0 +1,153 @@
+{
+  "slug": "ai-model-evaluation",
+  "title": "Evaluating models: classification & regression metrics",
+  "skill": "ai-evaluation",
+  "extra_skills": [
+    "ml-fundamentals"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "precision",
+    "recall",
+    "f1",
+    "roc-auc",
+    "confusion-matrix",
+    "mae",
+    "rmse",
+    "mape",
+    "class-imbalance",
+    "baselines"
+  ],
+  "summary": "Choosing and computing the right metric: the confusion matrix, accuracy, precision, recall, F1, ROC-AUC and PR-AUC for classifiers; MAE, RMSE, MAPE and WAPE for regression and forecasting; handling class imbalance and always comparing against a baseline.",
+  "why_md": "- The metric defines what \"good\" means; the wrong one ships a useless model that looks great.\n- Class imbalance (fraud, returns, defects) makes accuracy meaningless.\n- Forecast metrics like MAPE explode on zero-sales SKUs — a real e-commerce trap.\n- LLM/RAG evaluation later reuses the same ideas: precision/recall of retrieval, baselines, slicing.\n- Every ML interview asks precision vs recall and when to prefer each.",
+  "details_md": "### Confusion matrix\nFor binary classification: **TP** (predicted positive, actually positive), **FP** (false alarm), **FN** (missed), **TN**. Every classification metric comes from these four counts.\n\n### Classification metrics\n- **Accuracy** = (TP+TN)/all. Misleading on imbalance: with 2% fraud, \"never fraud\" is 98% accurate.\n- **Precision** = TP/(TP+FP): of what we flagged, how much was right. Optimise when false alarms are costly (manual review capacity, blocking good customers).\n- **Recall** = TP/(TP+FN): of all real positives, how many we caught. Optimise when misses are costly (fraud loss, safety).\n- **F1** = harmonic mean of precision and recall; a single number when both matter.\n- **Threshold**: models output probabilities; moving the threshold trades precision for recall. Choose it from business costs, not 0.5 by default.\n\n### Ranking metrics\n- **ROC-AUC**: probability a random positive is scored above a random negative; threshold-independent; 0.5 = random. Can look flattering on heavy imbalance.\n- **PR-AUC / average precision**: focuses on the positive class; better for rare events.\n- **Precision@k**: precision among the top k scored items — matches \"we can review 200 cases a day\".\n\n### Regression / forecasting metrics\n- **MAE**: average absolute error, in units; robust, easy to explain.\n- **RMSE**: square root of mean squared error; punishes large misses more.\n- **MAPE**: mean of |error|/|actual|; scale-free but undefined at actual = 0 and biased toward under-forecasting.\n- **WAPE** = Σ|error| / Σ|actual|: the usual retail/forecasting choice; handles zeros sensibly.\n\n### Class imbalance\nUse stratified splits, PR-AUC/recall/precision, `class_weight=\"balanced\"` or resampling, and threshold tuning. Don't evaluate on a resampled test set — test must reflect real prevalence.\n\n### Baselines and slicing\nAlways report next to a baseline: majority class, a SQL rule, last week's value, seasonal naive. And slice metrics by marketplace, category, new vs old SKUs — a good average can hide a broken segment.",
+  "code_md": "```python\nfrom sklearn.metrics import (confusion_matrix, classification_report,\n                             roc_auc_score, average_precision_score,\n                             precision_recall_curve)\nimport numpy as np\n\nproba = model.predict_proba(X_test)[:, 1]\nprint(\"ROC-AUC\", roc_auc_score(y_test, proba))\nprint(\"PR-AUC \", average_precision_score(y_test, proba))\n\n# Choose the threshold that gives >= 80% precision with the best recall\nprec, rec, thr = precision_recall_curve(y_test, proba)\nok = np.where(prec[:-1] >= 0.80)[0]\nt = thr[ok[np.argmax(rec[ok])]]\ny_hat = (proba >= t).astype(int)\nprint(t, confusion_matrix(y_test, y_hat))\nprint(classification_report(y_test, y_hat, digits=3))\n```\n\n```python\n# Forecast metrics, including WAPE and a seasonal-naive baseline\nimport numpy as np\nfrom sklearn.metrics import mean_absolute_error, root_mean_squared_error\n\ndef wape(y, yhat):\n    return np.abs(y - yhat).sum() / np.abs(y).sum()\n\nfor name, pred in [(\"model\", model_pred), (\"last_year\", test[\"lag_52\"])]:\n    print(name,\n          round(mean_absolute_error(test.units, pred), 2),\n          round(root_mean_squared_error(test.units, pred), 2),\n          round(wape(test.units, pred), 3))\n```",
+  "use_cases_md": "- **Return-risk flagging**: precision@k matched to the QC team's daily capacity.\n- **Settlement anomaly alerts**: recall matters (missed errors cost money), precision bounded by reviewers.\n- **Demand forecasting**: WAPE per category vs seasonal-naive baseline.\n- **Review-sentiment classifier**: macro-F1 across rating classes.\n- **RAG retrieval**: recall@k of relevant chunks (same concept, later topics).",
+  "mistakes_md": "- **Accuracy on imbalanced data** — use precision/recall/PR-AUC.\n- **Default 0.5 threshold** — pick from costs or capacity.\n- **MAPE with zero actuals** — division by zero/infinite; use WAPE or MAE.\n- **No baseline** — can't tell if the model adds value.\n- **Only an overall number** — slice by segment.\n- **Resampling (SMOTE/undersampling) the test set** — distorts prevalence and metrics.\n- **Comparing RMSE across different scales/targets** — not comparable.",
+  "best_practices_md": "- Agree the metric with stakeholders before modelling; tie it to cost.\n- Report the confusion matrix along with any single score.\n- For rare positives: PR-AUC, precision@k, recall at fixed precision.\n- For forecasts: MAE + WAPE, and bias (mean error) to detect systematic under/over-forecasting.\n- Always include a baseline row and per-segment breakdown.\n- Keep a fixed evaluation set and track metrics over time in a table.",
+  "my_context_md": "`GetLlmData` stores user votes on LLM answers — vote rate per prompt version is an evaluation metric, and comparing it against a baseline version is the same discipline as here. `AmazonVendorBankRecon` is a natural place for precision/recall thinking: an auto-match rule or anomaly flag can be scored by how many flagged items were truly mismatched (precision) and how many real mismatches it caught (recall).",
+  "revision_notes_md": "- Confusion matrix: TP, FP, FN, TN.\n- Precision = TP/(TP+FP); recall = TP/(TP+FN).\n- F1 = 2PR/(P+R).\n- Accuracy lies on imbalance.\n- ROC-AUC: ranking quality, 0.5 random; PR-AUC better for rare positives.\n- Threshold from cost/capacity, not 0.5.\n- MAE (units), RMSE (punishes big misses), MAPE (breaks at 0), WAPE = Σ|e|/Σ|y|.\n- Always a baseline; slice by segment.",
+  "exercises_md": "1. Implement precision, recall, F1 and WAPE in pure Python and test against scikit-learn on random data.\n2. For a return-prediction model, plot precision and recall vs threshold and pick a threshold for a 200-orders/day review budget.\n3. Compute MAPE and WAPE on a weekly SKU forecast that includes zero-sales weeks; explain the difference.\n4. Write a SQL query computing precision of an existing rule (flagged vs confirmed) from a table of reviewed cases.",
+  "related": [
+    "ai-ml-fundamentals",
+    "ai-statistics-probability",
+    "ai-model-training",
+    "ai-supervised-learning",
+    "ai-rag-evaluation"
+  ],
+  "flashcards": [
+    {
+      "front": "Precision vs recall?",
+      "back": "Precision = TP/(TP+FP): how many flagged are correct. Recall = TP/(TP+FN): how many real positives were found."
+    },
+    {
+      "front": "Why is accuracy misleading for fraud detection?",
+      "back": "With 1% fraud, predicting 'never fraud' scores 99% accuracy while catching nothing."
+    },
+    {
+      "front": "WAPE formula and why retail prefers it?",
+      "back": "Σ|actual − forecast| / Σ|actual|. Scale-free and stays defined when individual actuals are 0, unlike MAPE."
+    },
+    {
+      "front": "What does ROC-AUC = 0.5 mean?",
+      "back": "The model ranks positives above negatives no better than random."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A QC team can manually inspect only 100 orders a day and wants most of them to be genuine return risks. Which metric best matches this goal?",
+      "options": [
+        "Recall",
+        "Accuracy",
+        "RMSE",
+        "Precision@100"
+      ],
+      "answer_index": 3,
+      "explanation": "They care about the hit rate within the fixed number they can review — precision at k."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your SKU forecast test set has many weeks with 0 units sold. Which metric should you NOT use as the primary one?",
+      "options": [
+        "MAE",
+        "MAPE",
+        "WAPE",
+        "RMSE"
+      ],
+      "answer_index": 1,
+      "explanation": "MAPE divides by the actual value, which is undefined/infinite when actuals are 0."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Recall = TP / (TP + ____).",
+      "answers": [
+        "FN",
+        "false negatives",
+        "false negative"
+      ],
+      "explanation": "Recall is the share of actual positives that were caught."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "F1 score is the ____ mean of precision and recall.",
+      "answers": [
+        "harmonic"
+      ],
+      "explanation": "2PR/(P+R); it's low if either is low."
+    },
+    {
+      "type": "output",
+      "prompt": "Confusion-matrix metrics by hand. What does this print?",
+      "code": "y_true = [1, 0, 1, 1, 0, 0, 1, 0, 0, 0]\ny_pred = [1, 0, 0, 1, 1, 0, 1, 0, 0, 0]\ntp = sum(t == 1 and p == 1 for t, p in zip(y_true, y_pred))\nfp = sum(t == 0 and p == 1 for t, p in zip(y_true, y_pred))\nfn = sum(t == 1 and p == 0 for t, p in zip(y_true, y_pred))\nprecision = tp / (tp + fp)\nrecall = tp / (tp + fn)\nf1 = 2 * precision * recall / (precision + recall)\nprint(tp, fp, fn, round(precision, 2), round(recall, 2), round(f1, 2))",
+      "answers": [
+        "3 1 1 0.75 0.75 0.75"
+      ],
+      "explanation": "TP=3 (positions 0,3,6), FP=1 (position 4), FN=1 (position 2). Precision = recall = 3/4, so F1 = 0.75."
+    },
+    {
+      "type": "output",
+      "prompt": "Regression metrics by hand. What does this print?",
+      "code": "import math\nactual = [10, 0, 20, 30]\nforecast = [12, 2, 18, 24]\nerr = [f - a for a, f in zip(actual, forecast)]\nmae = sum(abs(e) for e in err) / len(err)\nrmse = math.sqrt(sum(e * e for e in err) / len(err))\nwape = sum(abs(e) for e in err) / sum(abs(a) for a in actual)\nprint(mae, round(rmse, 2), round(wape, 3))",
+      "answers": [
+        "3.0 3.46 0.2"
+      ],
+      "explanation": "|err| = [2,2,2,6] → MAE 3.0; squares 4+4+4+36 = 48/4 = 12 → RMSE 3.46; WAPE = 12/60 = 0.2. MAPE would divide by the 0 actual and fail."
+    },
+    {
+      "type": "debug",
+      "prompt": "A fraud model is reported as '99.2% accurate'. Review the evaluation.",
+      "code": "from sklearn.metrics import accuracy_score\n# 0.8% of settlements are fraudulent\ny_pred = model.predict(X_test)          # default threshold 0.5\nprint(\"accuracy\", accuracy_score(y_test, y_pred))",
+      "answer": "With 0.8% positives, predicting 'not fraud' for everything scores 99.2% — so this number says nothing; the model may catch zero fraud. Also the default 0.5 threshold is arbitrary. Evaluate with imbalance-aware metrics and choose a threshold:\n\n```python\nfrom sklearn.metrics import (average_precision_score, confusion_matrix,\n                             precision_score, recall_score)\nproba = model.predict_proba(X_test)[:, 1]\nprint(\"PR-AUC\", average_precision_score(y_test, proba))\ny_hat = (proba >= chosen_threshold).astype(int)\nprint(confusion_matrix(y_test, y_hat))\nprint(precision_score(y_test, y_hat), recall_score(y_test, y_hat))\n```\nCompare against the majority-class baseline explicitly.",
+      "rubric": [
+        "Accuracy equals the majority-class baseline on imbalanced data",
+        "Use precision/recall/PR-AUC and the confusion matrix",
+        "Choose the threshold from costs rather than default 0.5"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the precision-recall trade-off and how you'd pick a threshold for a settlement-error detector.",
+      "answer": "The model outputs a score; we flag items above a threshold. Lowering the threshold flags more items: we catch more real errors (**recall** up) but also more false alarms (**precision** down). Raising it does the opposite. To pick it, quantify costs: a missed error costs, say, the average mismatch amount; a false alarm costs a reviewer's 5 minutes; and the finance team can review at most N items per day. Plot precision and recall versus threshold on validation data, then choose the threshold that maximises expected savings subject to the review capacity — often expressed as precision@N or recall at a minimum precision. Revisit it as volumes and prevalence change.",
+      "rubric": [
+        "Lower threshold → higher recall, lower precision (and vice versa)",
+        "Threshold chosen from business costs / review capacity",
+        "Uses validation data / PR curve to choose",
+        "Mentions monitoring or revisiting as prevalence changes"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "When do you prefer precision over recall, and vice versa? Give examples.",
+      "difficulty": "easy",
+      "answer_md": "**Precision** matters when false positives are expensive: auto-blocking a seller's listings, sending customers a 'suspected fraud' email, or a manual-review queue with limited capacity. Being wrong annoys customers or wastes reviewer time.\n\n**Recall** matters when misses are expensive: catching settlement errors that cost real money, safety/compliance issues, or a first-stage retrieval in RAG (if the right chunk isn't retrieved, the LLM can't use it — a later reranker can fix precision).\n\nOften you fix one and optimise the other: \"maximise recall subject to precision ≥ 80%\". F1 is a reasonable single number only when both errors cost roughly the same."
+    },
+    {
+      "question": "ROC-AUC is 0.93 but the business says the model is useless. What could be going on?",
+      "difficulty": "hard",
+      "answer_md": "- **Heavy imbalance**: ROC-AUC uses the false-positive *rate*, which stays tiny when negatives are huge; precision at the operating point can still be poor. Check PR-AUC and precision@k.\n- **Wrong threshold**: AUC is threshold-free; the deployed threshold may give unusable precision/recall.\n- **Wrong slice**: overall AUC is high but the segment that matters (high-value orders, one marketplace) performs badly.\n- **Leakage / distribution shift**: offline test included leaky features or is older than production data.\n- **Metric-goal mismatch**: business cares about money saved, not ranking; a model good at easy cheap cases doesn't save much.\n\nFix: evaluate at the operating point with cost-weighted metrics, slice by segment, compare to the current rule/baseline, and validate on recent out-of-time data."
+    }
+  ]
+}

@@ -1,0 +1,123 @@
+{
+  "slug": "s3-presigned-urls",
+  "title": "S3 Presigned URLs: Secure Temporary Upload and Download",
+  "skill": "aws-s3",
+  "extra_skills": [
+    "boto3",
+    "security",
+    "rest-api-integration"
+  ],
+  "category": "Cloud & DevOps",
+  "difficulty": "intermediate",
+  "tags": [
+    "aws",
+    "s3",
+    "presigned-url",
+    "boto3",
+    "sigv4",
+    "file-upload"
+  ],
+  "summary": "A presigned URL is a normal S3 URL with a signature and expiry time in its query string, created with your AWS credentials. Anyone holding it can perform exactly that one operation (GET or PUT an object) until it expires, without having AWS credentials themselves. It's the standard way to let browsers or other services upload and download files directly to and from a private bucket.",
+  "details_md": "### How it works\n`generate_presigned_url` runs **locally** in boto3; there's no API call. It builds a canonical request (method, bucket, key, chosen headers, expiry) and signs it with **Signature Version 4** using the caller's credentials. The URL carries `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-Signature` (and `X-Amz-Security-Token` for temporary credentials). When the URL is used, S3 recomputes the signature and checks:\n1. the signature matches (method, key and signed headers unchanged),\n2. the URL hasn't expired,\n3. **the signer's IAM permissions still allow the action**, at request time.\n\nSo a URL signed by a role that lacks `s3:GetObject`, or whose credentials have been revoked, fails with 403 even if it's correctly signed.\n\n### Expiry rules\n- `ExpiresIn` up to **7 days** (604,800 s) with SigV4.\n- With **temporary credentials** (Lambda/ECS roles, STS), the URL stops working when the **session credentials expire**, even if `ExpiresIn` is longer. Lambda role credentials typically last a few hours at most.\n- Keep it short: minutes for uploads and downloads triggered by a user action.\n\n### Operations\n- **GET** (`get_object`): download. You can override response headers like `ResponseContentDisposition` to force a filename.\n- **PUT** (`put_object`): upload a single object (up to 5 GB per PUT). If you sign `ContentType`, the client **must send the same header**, or you get `SignatureDoesNotMatch`.\n- **Presigned POST** (`generate_presigned_post`): an HTML-form style upload with a **policy** that can enforce conditions such as `content-length-range` (max file size) and key prefix. Better for browser uploads that need limits.\n- **Multipart**: for big files, call `create_multipart_upload` server-side, presign `upload_part` for each part, then `complete_multipart_upload`.\n\n### Security model\n- A presigned URL is a **bearer token**: whoever has it can use it. Don't log full URLs, and send them only over HTTPS.\n- Buckets stay private (**Block Public Access** on); presigned URLs still work because they're authenticated requests.\n- Restrict the signer's role to specific prefixes (`arn:aws:s3:::bucket/uploads/${orgid}/*`) and generate keys server-side; never let the client choose arbitrary keys.\n- Bucket policies can add conditions (e.g. `aws:SecureTransport`). SSE-KMS-encrypted objects need the signer to have `kms:Decrypt` as well.\n- Validate uploaded content after the upload (type, size, malware scan); the URL controls *who can upload*, not *what* gets uploaded.\n\n### Gotchas\n- Generate URLs with a client configured for the **bucket's region** and SigV4 (`Config(signature_version=\"s3v4\")`), or signatures may fail or redirect.\n- S3 has **strong read-after-write consistency**, so a just-uploaded object can be read immediately.\n- Downloading in Python: stream with `requests.get(url, stream=True, timeout=...)`, call `raise_for_status()`, and write chunks to `/tmp` or a buffer instead of holding huge files in memory twice.\n- An expired URL gives **403 AccessDenied** with \"Request has expired\", not 404. A wrong key with a valid signature gives 403 or 404 depending on whether the signer has `s3:ListBucket`.",
+  "code_md": "```python\n# 1) Generate download and upload URLs (server side)\nimport boto3\nfrom botocore.config import Config\n\ns3 = boto3.client(\"s3\", region_name=\"ap-south-1\",\n                  config=Config(signature_version=\"s3v4\"))\n\ndownload_url = s3.generate_presigned_url(\n    \"get_object\",\n    Params={\"Bucket\": \"reports-bucket\", \"Key\": \"uploads/7/orders_may.xlsx\",\n            \"ResponseContentDisposition\": 'attachment; filename=\"orders_may.xlsx\"'},\n    ExpiresIn=900,                         # 15 minutes\n)\n\nupload_url = s3.generate_presigned_url(\n    \"put_object\",\n    Params={\"Bucket\": \"reports-bucket\", \"Key\": \"uploads/7/u-123.csv\",\n            \"ContentType\": \"text/csv\"},    # client MUST send this exact Content-Type\n    ExpiresIn=300,\n)\n```\n\n```python\n# 2) Client side: upload with PUT, download with streaming\nimport requests\n\nwith open(\"orders.csv\", \"rb\") as f:\n    r = requests.put(upload_url, data=f, headers={\"Content-Type\": \"text/csv\"}, timeout=60)\nr.raise_for_status()                       # 403 SignatureDoesNotMatch => header mismatch\n\nwith requests.get(download_url, stream=True, timeout=(5, 120)) as r:\n    r.raise_for_status()                   # 403 + \"Request has expired\" => URL too old\n    with open(\"/tmp/orders_may.xlsx\", \"wb\") as out:\n        for chunk in r.iter_content(chunk_size=1024 * 1024):\n            out.write(chunk)\n```\n\n```python\n# 3) Presigned POST with a size limit (browser form uploads)\npost = s3.generate_presigned_post(\n    Bucket=\"reports-bucket\",\n    Key=\"uploads/7/${filename}\",\n    Conditions=[\n        [\"content-length-range\", 1, 50 * 1024 * 1024],   # 1 byte .. 50 MB\n        [\"starts-with\", \"$key\", \"uploads/7/\"],\n    ],\n    ExpiresIn=600,\n)\n# post == {\"url\": \"...\", \"fields\": {...}}: send fields + file as multipart/form-data\nrequests.post(post[\"url\"], data=post[\"fields\"],\n              files={\"file\": (\"orders.csv\", open(\"orders.csv\", \"rb\"))}, timeout=60)\n```\n\n```python\n# 4) Download into pandas without touching disk (small/medium files)\nimport io\nimport pandas as pd\n\nresp = requests.get(download_url, timeout=(5, 120))\nresp.raise_for_status()\nbuf = io.BytesIO(resp.content)\nif download_url.split(\"?\")[0].endswith(\".csv\"):\n    df = pd.read_csv(buf, dtype=str)\nelse:\n    df = pd.read_excel(buf, dtype=str)     # .xlsx needs openpyxl; .xlsb needs pyxlsb\n```",
+  "use_cases_md": "- Letting users upload report files from a browser directly to S3, bypassing API Gateway/Lambda payload limits.\n- Handing a backend job a time-limited link to an uploaded file without giving it bucket credentials.\n- Sharing generated exports (invoices, reconciliation reports) via short-lived download links.\n- Large uploads via presigned multipart parts.\n- Third-party integrations that send or receive files over plain HTTPS.",
+  "mistakes_md": "- **Long expiry \"to be safe\"**: leaked URLs stay usable. Use minutes, and generate on demand.\n- **Signing with a role and expecting a 7-day URL**: it dies when the temporary credentials expire. Use short expiries, or a dedicated IAM user only if long links are truly necessary.\n- **Content-Type mismatch on PUT**: `SignatureDoesNotMatch`. Send exactly the signed headers.\n- **Logging full URLs**: the signature is a credential. Log the bucket/key only.\n- **Letting clients choose the object key**: overwrites or path abuse. Generate keys server-side, scoped to the tenant prefix.\n- **Wrong region or SigV2 client**: signature errors or redirects. Configure the bucket's region and `s3v4`.\n- **Reading whole large files into memory** (`resp.content`) in Lambda: memory errors. Stream to `/tmp` or process in chunks.\n- **No timeout on `requests.get`**: a stalled download hangs until the Lambda times out. Always pass `timeout`.",
+  "best_practices_md": "- Least-privilege signer role scoped to a key prefix; Block Public Access on.\n- Short expiries (5–15 minutes) and one URL per operation.\n- Use presigned POST when you need size or key constraints for browser uploads.\n- Validate files after upload (size, extension, magic bytes, schema) before processing.\n- Stream large downloads with timeouts and retries on 5xx/connection errors.\n- Trigger processing from S3 events (or a callback) instead of polling.\n- Enable default encryption (SSE-S3 or SSE-KMS) and lifecycle rules for temporary uploads.",
+  "my_context_md": "Your `read_and_validate()` function in ECSMarketplaceDataUpload downloads report files from presigned S3 URLs with `requests` and parses CSV/XLSX/XLS/XLSB/ZIP files with pandas. The details here apply directly. A URL that sits in a queue too long fails with 403 \"Request has expired\", not 404, and if the URL was signed with role credentials it can expire earlier than its `ExpiresIn`. Downloads should always set a `timeout` and call `raise_for_status()`, so an S3 error page isn't handed to pandas as if it were a spreadsheet. For large files, streaming to disk keeps memory under control inside the container. Each format needs its own pandas engine (openpyxl for XLSX, xlrd for XLS, pyxlsb for XLSB), and these dependencies have to be in your Docker image or Lambda Layer.",
+  "related": [
+    "aws-lambda-essentials",
+    "web-security-owasp",
+    "ecs-fargate",
+    "pandas-essentials",
+    "retries-backoff-idempotency"
+  ],
+  "flashcards": [
+    {
+      "front": "Does generating a presigned URL call AWS?",
+      "back": "No. boto3 signs it locally with SigV4 using the caller's credentials."
+    },
+    {
+      "front": "Maximum presigned URL expiry with SigV4?",
+      "back": "7 days, but URLs signed with temporary credentials stop working when those credentials expire."
+    },
+    {
+      "front": "Why would a presigned PUT return SignatureDoesNotMatch?",
+      "back": "The request differs from what was signed, e.g. a different Content-Type header, method, or key."
+    },
+    {
+      "front": "Presigned PUT vs presigned POST?",
+      "back": "PUT: simple single-object upload. POST: form upload with a policy enforcing conditions like content-length-range and key prefix."
+    },
+    {
+      "front": "Error returned by an expired presigned URL?",
+      "back": "403 AccessDenied with 'Request has expired'."
+    },
+    {
+      "front": "Do presigned URLs work on buckets with Block Public Access enabled?",
+      "back": "Yes; they're authenticated requests made with the signer's permissions."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "A presigned URL created in a Lambda with ExpiresIn=7 days stops working after a few hours. Why?",
+      "options": [
+        "S3 caps all URLs at 1 hour",
+        "It was signed with temporary role credentials that expired",
+        "Lambda deletes URLs on shutdown",
+        "The bucket has versioning"
+      ],
+      "answer_index": 1,
+      "explanation": "Validity is limited by the lifetime of the signing credentials."
+    },
+    {
+      "question": "Which approach lets you enforce a maximum upload size for browser uploads?",
+      "options": [
+        "Presigned GET",
+        "Presigned PUT with ExpiresIn",
+        "Bucket versioning",
+        "Presigned POST with content-length-range"
+      ],
+      "answer_index": 3,
+      "explanation": "POST policies support conditions like content-length-range."
+    },
+    {
+      "question": "The signer role's s3:GetObject permission is removed after the URL is created. Using the URL now...",
+      "options": [
+        "Fails with 403",
+        "Still works until expiry",
+        "Returns 404",
+        "Works only over HTTP"
+      ],
+      "answer_index": 0,
+      "explanation": "S3 evaluates the signer's permissions at request time."
+    },
+    {
+      "question": "Best practice when downloading a large presigned file in Python?",
+      "options": [
+        "requests.get(url).content with no timeout",
+        "urllib with retries disabled",
+        "Stream with requests.get(url, stream=True, timeout=...) and iter_content",
+        "boto3.download_file with the URL"
+      ],
+      "answer_index": 2,
+      "explanation": "Streaming keeps memory bounded; timeouts prevent hangs."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you design file uploads for a web app so files don't pass through your API servers?",
+      "difficulty": "medium",
+      "answer_md": "Use **direct-to-S3 uploads with presigned URLs**:\n\n1. Client calls `POST /uploads` with the filename and size. The API authenticates the user, validates the type and size, creates a DB record (`status = PENDING`), and generates a **server-chosen key** like `uploads/{orgid}/{upload_id}.xlsx`.\n2. The API returns a presigned **PUT** (or **POST** with `content-length-range`) URL valid for about 5 minutes.\n3. The browser uploads directly to S3, so there are no API Gateway (10 MB) or Lambda payload limits and no server bandwidth.\n4. An **S3 event notification** (to SQS or Lambda) or a client callback marks the upload complete and starts processing.\n5. The processor validates the content (magic bytes, schema), updates the status (`Processing` to `Completed`/`Error`), and exposes results.\n\nSecurity: the bucket stays private, the signer role is scoped to the `uploads/` prefix, URLs are short-lived and never logged, and keys are never client-controlled. For files over about 100 MB, use presigned multipart uploads so parts can retry independently. A lifecycle rule deletes abandoned uploads and incomplete multipart uploads."
+    },
+    {
+      "question": "What exactly does S3 validate when a presigned URL is used?",
+      "difficulty": "hard",
+      "answer_md": "The URL contains the SigV4 parameters: algorithm, credential scope (access key / date / region / service), signing time, expiry, signed headers and signature (plus a session token for temporary credentials). On request, S3:\n\n1. **Recomputes the signature** from the actual request: HTTP method, path (bucket and key), canonical query string, and the **signed headers** (always `host`, plus any you signed such as `content-type`). Any difference leads to `SignatureDoesNotMatch`.\n2. **Checks time**: `X-Amz-Date + X-Amz-Expires` must not be in the past (otherwise \"Request has expired\"); the credential scope's date and region must match.\n3. **Validates the credentials**: the access key exists, and for temporary credentials the session token is still valid. That's why role-signed URLs die with the session.\n4. **Authorises the request as the signer**: IAM policies, bucket policy, SCPs, Block Public Access, KMS key policy for SSE-KMS objects, all evaluated **now**, not at signing time.\n\nSo a presigned URL delegates *one specific request* with the signer's identity for a limited window. It can't widen permissions and is revoked by removing the signer's permissions or deactivating its key."
+    },
+    {
+      "question": "Your service downloads files from presigned URLs that sometimes fail. How do you make it robust?",
+      "difficulty": "medium",
+      "answer_md": "Classify failures and handle each:\n- **403 \"Request has expired\"**: not retryable with the same URL. Request a fresh URL from the producer, or process sooner. Log the URL's age (without the signature).\n- **403 SignatureDoesNotMatch / AccessDenied**: a configuration bug (wrong region, header mismatch, missing permission). Fail fast, alert.\n- **5xx, timeouts, connection resets**: transient. Retry with exponential backoff and jitter, a few attempts.\n\n```python\nfrom requests.adapters import HTTPAdapter\nfrom urllib3.util.retry import Retry\n\nsession = requests.Session()\nsession.mount(\"https://\", HTTPAdapter(max_retries=Retry(\n    total=4, backoff_factor=1, status_forcelist=[500, 502, 503, 504], allowed_methods=[\"GET\"])))\n\nwith session.get(url, stream=True, timeout=(5, 120)) as r:\n    r.raise_for_status()\n    with open(path, \"wb\") as f:\n        for chunk in r.iter_content(1 << 20):\n            f.write(chunk)\n```\nAlso: always set timeouts; stream to disk for large files; verify the size or ETag if known; validate the file type (magic bytes) before parsing, so an HTML/XML error body isn't parsed as CSV; and record the failure reason in your upload-status table so users see \"Error: link expired\" instead of a generic failure."
+    }
+  ]
+}

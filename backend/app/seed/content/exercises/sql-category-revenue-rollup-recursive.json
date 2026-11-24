@@ -1,0 +1,60 @@
+{
+  "slug": "sql-category-revenue-rollup-recursive",
+  "title": "Revenue rolled up to top-level categories (recursive CTE)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "hard",
+  "skill": "sql-ctes",
+  "concepts": [
+    "WITH RECURSIVE",
+    "hierarchical data",
+    "adjacency list",
+    "LEFT JOIN chain",
+    "COALESCE"
+  ],
+  "related_topics": [
+    "sql-ctes",
+    "sql-joins",
+    "sql-group-by"
+  ],
+  "problem_md": "Products are attached to categories at any depth of a category tree stored as an adjacency list\n(`parent_id` is `NULL` for top-level categories). Some products are attached directly to a top-level category.\nThe CEO wants revenue **rolled up to each top-level category**, including every descendant category at any depth.\n\n```sql\nCREATE TABLE categories (\n  category_id INTEGER PRIMARY KEY,\n  name        TEXT NOT NULL,\n  parent_id   INTEGER REFERENCES categories(category_id)   -- NULL = top level\n);\n\nCREATE TABLE products (\n  product_id  INTEGER PRIMARY KEY,\n  sku         TEXT NOT NULL,\n  category_id INTEGER NOT NULL\n);\n\nCREATE TABLE order_items (\n  order_item_id INTEGER PRIMARY KEY,\n  order_id      INTEGER NOT NULL,\n  product_id    INTEGER NOT NULL,\n  quantity      INTEGER NOT NULL,\n  unit_price    REAL NOT NULL\n);\n```\n\n> Money columns are `REAL` in this sandbox (they would be `NUMERIC(12,2)` in production PostgreSQL). Dates are ISO `'YYYY-MM-DD'` text.\n\n**Task.** Return `top_category` (name of the top-level category) and `revenue` (sum of `quantity * unit_price` of\nall order items whose product sits in that category or any descendant). Top-level categories with no sales must\nappear with `0`. Order by `revenue` descending, then `top_category`.",
+  "examples": [
+    {
+      "input": "Festive Kurtas (9) -> Kurtas (6) -> Women (3) -> Fashion (1); TOTE-BAG is attached directly to Fashion; Grocery has a product but no sales",
+      "output": "top_category | revenue\nFashion      | 7694\nBeauty       | 2347\nGrocery      | 0"
+    }
+  ],
+  "hints": [
+    "First map every category to its top-level ancestor. Because depth is unbounded, you need `WITH RECURSIVE`.",
+    "Anchor: `SELECT category_id, name AS top_category FROM categories WHERE parent_id IS NULL`. Recursive step: join `categories c` where `c.parent_id` equals a row already in the CTE, carrying `top_category` down.",
+    "Then `tree LEFT JOIN products LEFT JOIN order_items`, `GROUP BY top_category`, `COALESCE(SUM(oi.quantity * oi.unit_price), 0)`."
+  ],
+  "starter_code": "-- Write your query here\nWITH RECURSIVE tree AS (\n  -- anchor: top-level categories\n  SELECT ...\n  UNION ALL\n  -- recursive step: children of rows already in tree\n  SELECT ...\n)\nSELECT ...\n",
+  "solution_code": "WITH RECURSIVE tree AS (\n  SELECT category_id, name AS top_category\n  FROM categories\n  WHERE parent_id IS NULL\n  UNION ALL\n  SELECT c.category_id, t.top_category\n  FROM categories c\n  JOIN tree t ON c.parent_id = t.category_id\n)\nSELECT t.top_category,\n       COALESCE(SUM(oi.quantity * oi.unit_price), 0) AS revenue\nFROM tree t\nLEFT JOIN products p     ON p.category_id = t.category_id\nLEFT JOIN order_items oi ON oi.product_id = p.product_id\nGROUP BY t.top_category\nORDER BY revenue DESC, t.top_category;",
+  "solution_md": "**Recursive CTE anatomy.**\n\n1. **Anchor member** - the top-level categories, each labelled with its own name as `top_category`.\n2. **Recursive member** - children of any row already produced (`c.parent_id = t.category_id`), inheriting the\n   ancestor's label. It runs repeatedly on the rows produced by the previous iteration until no new rows appear.\n3. `UNION ALL` glues iterations together (use `UNION` only if you need duplicate elimination, e.g. to stop cycles).\n\nThe CTE yields one row per category: `(4, Fashion)`, `(9, Fashion)` (three levels down), `(8, Beauty)`, and the\nroots themselves - which is why the tote bag attached directly to *Fashion* is counted.\n\n**Aggregation.** `LEFT JOIN` all the way down keeps categories without products/sales; their `SUM` is NULL and\n`COALESCE` turns it into 0 (Grocery). An inner join would silently drop Grocery.\n\nFashion = 998 + 1999 + 1299 + 2499 + 899 = 7694; Beauty = 1047 + 1300 = 2347.\n\n**Safety.** Bad data (a category that is its own ancestor) makes a recursive CTE loop forever. Guard with a depth\ncolumn (`t.depth + 1 ... WHERE t.depth < 20`) or, in PostgreSQL 14+, the `CYCLE` clause:\n`... ) CYCLE category_id SET is_cycle USING path`.\n\n**The same in PostgreSQL** - identical syntax (`WITH RECURSIVE` is required there too). For deep or frequently\nqueried trees, consider storing a materialized path (`ltree` extension, e.g. `fashion.women.kurtas`) or a closure\ntable so roll-ups become a single indexed join. Index `categories (parent_id)` so each recursive step is an index\nlookup, plus `products (category_id)` and `order_items (product_id)` for the joins.",
+  "tests": {
+    "schema_sql": "CREATE TABLE categories (\n  category_id INTEGER PRIMARY KEY,\n  name        TEXT NOT NULL,\n  parent_id   INTEGER REFERENCES categories(category_id)   -- NULL = top level\n);\n\nCREATE TABLE products (\n  product_id  INTEGER PRIMARY KEY,\n  sku         TEXT NOT NULL,\n  category_id INTEGER NOT NULL\n);\n\nCREATE TABLE order_items (\n  order_item_id INTEGER PRIMARY KEY,\n  order_id      INTEGER NOT NULL,\n  product_id    INTEGER NOT NULL,\n  quantity      INTEGER NOT NULL,\n  unit_price    REAL NOT NULL\n);\n\nINSERT INTO categories VALUES\n (1,'Fashion',NULL),\n (2,'Men',1),\n (3,'Women',1),\n (4,'T-Shirts',2),\n (5,'Jeans',2),\n (6,'Kurtas',3),\n (7,'Beauty',NULL),\n (8,'Lipsticks',7),\n (9,'Festive Kurtas',6),\n (10,'Grocery',NULL),\n (11,'Skincare',7);\n\nINSERT INTO products VALUES\n (1,'TSHIRT-BLK-M',4),\n (2,'JEANS-32',5),\n (3,'KURTA-COTTON',6),\n (4,'KURTA-SILK-FESTIVE',9),\n (5,'LIPSTICK-RED',8),\n (6,'SERUM-30ML',11),\n (7,'TOTE-BAG',1),\n (8,'BASMATI-5KG',10);\n\nINSERT INTO order_items VALUES\n (1,1,1,2, 499.00),\n (2,1,2,1,1999.00),\n (3,2,3,1,1299.00),\n (4,2,4,1,2499.00),\n (5,3,5,3, 349.00),\n (6,3,6,2, 650.00),\n (7,4,7,1, 899.00);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "top_category",
+        "revenue"
+      ],
+      "rows": [
+        [
+          "Fashion",
+          7694
+        ],
+        [
+          "Beauty",
+          2347
+        ],
+        [
+          "Grocery",
+          0
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

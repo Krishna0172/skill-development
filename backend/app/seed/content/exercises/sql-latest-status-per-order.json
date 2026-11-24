@@ -1,0 +1,67 @@
+{
+  "slug": "sql-latest-status-per-order",
+  "title": "Latest status per order (ROW_NUMBER)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "medium",
+  "skill": "sql-window-functions",
+  "concepts": [
+    "ROW_NUMBER",
+    "PARTITION BY",
+    "latest row per group",
+    "deterministic tie-breaking"
+  ],
+  "related_topics": [
+    "sql-window-functions",
+    "sql-ctes"
+  ],
+  "problem_md": "Status updates from marketplace order reports are appended to `order_status_log`. Rows can arrive **out of\norder** (a later status may have a smaller `log_id`), and occasionally two updates share the same timestamp.\n\n```sql\nCREATE TABLE order_status_log (\n  log_id     INTEGER PRIMARY KEY,\n  order_id   INTEGER NOT NULL,\n  status     TEXT NOT NULL,\n  updated_at TEXT NOT NULL      -- 'YYYY-MM-DD HH:MM:SS'\n);\n```\n\n**Task.** For each `order_id` return its **current** status: the row with the greatest `updated_at`; if two rows\ntie on `updated_at`, the one with the greater `log_id` wins. Return `order_id`, `status`, `updated_at`, ordered by\n`order_id`.",
+  "examples": [
+    {
+      "input": "order 103 has DELIVERED (log 9) and RTO_INITIATED (log 10) both at 2024-03-05 13:20:00",
+      "output": "order_id | status        | updated_at\n103      | RTO_INITIATED | 2024-03-05 13:20:00"
+    }
+  ],
+  "hints": [
+    "Number the rows inside each order from newest to oldest, then keep row number 1.",
+    "`ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY updated_at DESC, log_id DESC)`.",
+    "Window functions can't be used in `WHERE`; compute `rn` in a CTE or subquery and filter `WHERE rn = 1` outside."
+  ],
+  "starter_code": "-- Write your query here\nSELECT order_id, status, updated_at\nFROM order_status_log\n",
+  "solution_code": "WITH ranked AS (\n  SELECT order_id,\n         status,\n         updated_at,\n         ROW_NUMBER() OVER (PARTITION BY order_id\n                            ORDER BY updated_at DESC, log_id DESC) AS rn\n  FROM order_status_log\n)\nSELECT order_id, status, updated_at\nFROM ranked\nWHERE rn = 1\nORDER BY order_id;",
+  "solution_md": "**\"Latest row per group\" with `ROW_NUMBER`.** `PARTITION BY order_id` restarts numbering per order;\n`ORDER BY updated_at DESC, log_id DESC` puts the newest row first, with `log_id` as an explicit tie-breaker so the\nresult is deterministic. Keep `rn = 1`.\n\n- Timestamps are ISO-8601 text, so lexical order equals chronological order. (Never store\n  `'01-03-2024'`-style dates as text - they don't sort.)\n- `log_id` alone is **not** a safe \"latest\" indicator because rows arrive out of order: log 13\n  (`PAYMENT_PENDING` for order 104) was loaded last but describes an *older* event than log 11 (`PLACED`).\n  Always order by the business timestamp first and use the surrogate id only as a tie-breaker.\n- A common wrong answer is `SELECT order_id, MAX(updated_at), status ... GROUP BY order_id`. PostgreSQL rejects it\n  (status isn't grouped); SQLite accepts it and picks the status from the max row, but on ties it is arbitrary.\n  The other classic is joining back to `MAX(updated_at)`, which returns *two* rows for order 103.\n\n**In PostgreSQL** `DISTINCT ON` is a concise alternative:\n\n```sql\nSELECT DISTINCT ON (order_id) order_id, status, updated_at\nFROM order_status_log\nORDER BY order_id, updated_at DESC, log_id DESC;\n```\n\n**Index.** `CREATE INDEX ON order_status_log (order_id, updated_at DESC, log_id DESC);` lets PostgreSQL read\neach partition already sorted. If you only ever need the current status, consider also maintaining a\n`current_status` column on `orders` (updated in the same transaction as the log insert) so reads don't scan the log.",
+  "tests": {
+    "schema_sql": "CREATE TABLE order_status_log (\n  log_id     INTEGER PRIMARY KEY,\n  order_id   INTEGER NOT NULL,\n  status     TEXT NOT NULL,\n  updated_at TEXT NOT NULL      -- 'YYYY-MM-DD HH:MM:SS'\n);\n\nINSERT INTO order_status_log VALUES\n (1, 101,'PLACED',       '2024-03-01 10:00:00'),\n (2, 101,'PACKED',       '2024-03-01 18:30:00'),\n (3, 101,'SHIPPED',      '2024-03-02 09:15:00'),\n (4, 102,'PLACED',       '2024-03-01 11:00:00'),\n (5, 102,'CANCELLED',    '2024-03-01 11:45:00'),\n (6, 103,'PLACED',       '2024-03-02 08:00:00'),\n (7, 103,'PACKED',       '2024-03-02 20:00:00'),\n (8, 103,'SHIPPED',      '2024-03-03 07:00:00'),\n (9, 103,'DELIVERED',    '2024-03-05 13:20:00'),\n (10,103,'RTO_INITIATED','2024-03-05 13:20:00'),\n (11,104,'PLACED',       '2024-03-04 16:00:00'),\n (12,101,'DELIVERED',    '2024-03-04 12:00:00'),\n (13,104,'PAYMENT_PENDING','2024-03-04 15:55:00');",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "order_id",
+        "status",
+        "updated_at"
+      ],
+      "rows": [
+        [
+          101,
+          "DELIVERED",
+          "2024-03-04 12:00:00"
+        ],
+        [
+          102,
+          "CANCELLED",
+          "2024-03-01 11:45:00"
+        ],
+        [
+          103,
+          "RTO_INITIATED",
+          "2024-03-05 13:20:00"
+        ],
+        [
+          104,
+          "PLACED",
+          "2024-03-04 16:00:00"
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

@@ -1,0 +1,242 @@
+[
+  {
+    "slug": "claim-primary-developer-commits",
+    "claim": "Primary developer (1,000+ commits, ~68% of all commits) of the company's marketplace data ingestion service",
+    "evidence_md": "The service exists (`ECSMarketplaceDataUpload`, ~225 files, 150+ processor modules routed by the registry). Commit counts/percentages come from git history, which the code assessment did not compute: run `git shortlog -sn` on that repo and keep the exact output handy.",
+    "status": "partially-supported",
+    "likely_questions": [
+      "What did the service look like when you joined, and what did you change?",
+      "Which parts did others own?",
+      "What's the hardest commit/feature you made there?"
+    ],
+    "star_prompts": {
+      "situation": "What state was the ingestion service in when you started contributing?",
+      "task": "What were you responsible for (features, report types, reliability)?",
+      "action": "Which major pieces did you design or rewrite (dispatcher, status tracker, parsing, pooling)?",
+      "result": "Commit share, report types added, failures reduced: which numbers can you show?"
+    }
+  },
+  {
+    "slug": "claim-report-types-channels",
+    "claim": "processes 170+ report types from 20+ sales channels (Myntra, Nykaa, Blinkit, Zepto, Swiggy, Firstcry, Snapdeal, Amazon Vendor Central, BigBasket, Flipkart and others) into PostgreSQL",
+    "evidence_md": "Supported: the `_MODULE_SPECS` registry in `ECSMarketplaceDataUpload/lambda_function.py` lists report types for Snapdeal, Myntra, Cred, Glowroad, Amazon VCP, Flipkart vendor, BigBasket, Nykaa/Nykaa Fashion, Firstcry, Swiggy, Blinkit, Zepto, Pepperfry, Shippigo, Xpressbees, iThink Logistics and more. Count the registry entries (`len(_MODULE_SPECS)`) to confirm the exact 170+ figure.",
+    "status": "supported",
+    "likely_questions": [
+      "How do you onboard a new report type?",
+      "What happens when a channel changes its report format?",
+      "How do you test 170 report types?"
+    ],
+    "star_prompts": {
+      "situation": "Why did the business need so many channels' reports in one database?",
+      "task": "What was your role in adding channels and report types?",
+      "action": "Walk through adding one new report type end to end.",
+      "result": "How many report types/channels did you add, and how long does onboarding take now?"
+    }
+  },
+  {
+    "slug": "claim-report-processors",
+    "claim": "Personally wrote 150+ report processors covering orders, returns, inventory, ads, promotions, fees and payouts.",
+    "evidence_md": "Processor modules exist in `ECSMarketplaceDataUpload` (pandas read_csv/read_excel, rename/merge/groupby/apply, upserts). Authorship of 150+ specifically is a git question: verify with `git log --author` per file (or `git blame` counts) before the interview.",
+    "status": "partially-supported",
+    "likely_questions": [
+      "How much code is shared between processors vs duplicated?",
+      "Pick one processor and explain it line by line.",
+      "How do you handle a processor failing halfway through a file?"
+    ],
+    "star_prompts": {
+      "situation": "Which categories of reports (orders, returns, payouts...) did you cover?",
+      "task": "What did each processor have to guarantee for downstream reconciliation?",
+      "action": "Describe the common processing steps and how you'd refactor duplicated logic.",
+      "result": "Number of processors, rows processed per day, error rate: which can you quantify?"
+    }
+  },
+  {
+    "slug": "claim-dispatcher-status-tracker",
+    "claim": "Designed a config-driven dispatcher with lazy module loading that routes each report type to its processor, and an upload status tracker that gives users real-time per-upload progress and error messages.",
+    "evidence_md": "Dispatcher supported: `lambda_function.py` builds `MODULE_DISPATCH` from a spec tuple table; each entry is a closure that imports the module on first use (`__import__` + `getattr`) and maps request-body keys to arguments; a second table handles 6 automation channels. Upload status tracking is listed in the code assessment; be ready to show the table/updates that implement 'real-time progress'.",
+    "status": "supported",
+    "likely_questions": [
+      "Why lazy imports instead of importing everything at startup?",
+      "How do you catch a typo in a module name before production?",
+      "How does the frontend get progress: polling, websockets, SSE?"
+    ],
+    "star_prompts": {
+      "situation": "What did routing look like before the dispatcher (if/elif chains?) and what problems did it cause?",
+      "task": "What did you need: easy onboarding, faster startup, isolation of failures?",
+      "action": "Explain the spec table, the closure, and how status is written during processing.",
+      "result": "Lines removed, time to add a report type, cold-start/import time, support tickets about upload status."
+    }
+  },
+  {
+    "slug": "claim-automated-sync-6-channels",
+    "claim": "Built automated report sync for 6 channels: the service picks up sync jobs from DynamoDB, fetches files from S3, runs the processing jobs and records per-file success, failure and analytics.",
+    "evidence_md": "Supported in part: `_AUTOMATION_SPECS` in `lambda_function.py` lists exactly 6 channels (snapdeal, swiggy, blinkit, zepto, shopify, firstcry) mapped to automation processors; boto3 DynamoDB and S3 usage exists in the repo. Confirm the DynamoDB job-pickup code path and how a job is claimed safely.",
+    "status": "supported",
+    "likely_questions": [
+      "How do you prevent two workers from processing the same sync job?",
+      "What's the DynamoDB key design?",
+      "What happens when a file fails: retries, alerts?"
+    ],
+    "star_prompts": {
+      "situation": "How were these channel reports loaded before automation?",
+      "task": "What did automation need to guarantee (no duplicates, visibility of failures)?",
+      "action": "Walk through job pickup, S3 fetch, processing, and status/analytics writes.",
+      "result": "Manual effort saved, files per day processed automatically, failure rate."
+    }
+  },
+  {
+    "slug": "claim-pooling-transactions-upserts",
+    "claim": "Made ingestion reliable with PostgreSQL connection pooling, transactional writes and bulk upserts, and built parsing that handles inconsistent CSV, XLSX, XLSB, ZIP and PDF reports (header detection, case-insensitive column matching, sheet resolution).",
+    "evidence_md": "Pooling/transactions strongly evidenced in the repo: `AmazonVendorBankRecon/db.py` (ThreadedConnectionPool behind PgBouncer, double-checked locking, Secrets Manager TTL cache, `db_transaction()` context manager); bulk upserts with `execute_values`/`execute_batch` and `ON CONFLICT DO UPDATE SET col = COALESCE(EXCLUDED.col, t.col)` across services; deadlock retry in ingestion processors. Note the pool example is in AmazonVendorBankRecon: be clear which service has which pattern. Parsing features are plausible but prepare one concrete example of header detection.",
+    "status": "supported",
+    "likely_questions": [
+      "Why PgBouncer plus an app-side pool of 1?",
+      "Why COALESCE in the upsert, and what's the downside?",
+      "How did you detect the header row in messy files?",
+      "How do you handle deadlocks?"
+    ],
+    "star_prompts": {
+      "situation": "What reliability problems existed (connection errors, partial writes, duplicates)?",
+      "task": "What did 'reliable' have to mean for the business?",
+      "action": "Explain the pool, the transaction context manager and the upsert pattern.",
+      "result": "Fewer failed uploads? Fewer connection errors? Any before/after numbers?"
+    }
+  },
+  {
+    "slug": "claim-other-services-oms",
+    "claim": "Built and maintain 20+ other production services on ECS and Lambda, including API integrations with order management platforms Unicommerce, EasyEcom and OmsGuru, normalizing different schemas into a single data model.",
+    "evidence_md": "The repo has 179 services, including ECS and Lambda services; the assessment did not attribute ownership per service. Unicommerce appears in the ingestion registry (`UNICOMMERCE_CUSTOMIZE_ORDER`); confirm the EasyEcom/OmsGuru integration service names and your commit share in each. List your 20+ services by name before interviewing.",
+    "status": "partially-supported",
+    "likely_questions": [
+      "How do you normalise statuses across OMSs?",
+      "How do you do incremental sync and avoid missing updates?",
+      "How do you handle API rate limits and outages?"
+    ],
+    "star_prompts": {
+      "situation": "Why did the company integrate multiple OMS platforms?",
+      "task": "What did the unified data model need to support?",
+      "action": "Describe one integration: auth, pagination, incremental sync, mapping, upserts.",
+      "result": "Number of clients/orders synced, sync latency, integration failures."
+    }
+  },
+  {
+    "slug": "claim-settlement-reconciliation",
+    "claim": "Built settlement and bank-statement reconciliation for payment gateways (PayU, Easebuzz) and logistics partners (Shiprocket, Shippigo), automatically matching payouts and charges against orders.",
+    "evidence_md": "Partially evidenced: `AmazonVendorBankRecon` and `ECSAmazonBankStatementPostgres` exist; ingestion registry includes `EASEBUZZ_FEESUPDATION` and `SHIPPIGO_ORDERS/TRANSACTION/SETTLED`. PayU and Shiprocket reconciliation services were not specifically confirmed in the assessment: locate them and prepare the matching rules.",
+    "status": "partially-supported",
+    "likely_questions": [
+      "What keys do you match on, and what if they're missing?",
+      "How do you handle partial refunds, split settlements, chargebacks?",
+      "How do you verify the reconciliation is correct?"
+    ],
+    "star_prompts": {
+      "situation": "What did finance/sellers do manually before reconciliation existed?",
+      "task": "What did the reconciliation need to detect (short payments, extra fees)?",
+      "action": "Explain the matching tiers and the SQL (CTEs, joins, UPDATE...FROM) you used.",
+      "result": "Amount of money/orders reconciled, discrepancies found, manual hours saved."
+    }
+  },
+  {
+    "slug": "claim-other-features",
+    "claim": "Developed inventory ledger reconciliation, a returns recall API, return-status sync from partner APIs and pincode-to-fulfillment-center automation.",
+    "evidence_md": "Related registry entries exist (`RECALL_IN_YOUR_HAND`, `MYNTRA_RECALL`, ledger sync modules such as `MYNTRA_LEDGER_SYNC`, `ZEPTO_LEDGER`), but the specific API and pincode automation services were not identified in the assessment. Prepare which service implements each.",
+    "status": "needs-preparation",
+    "likely_questions": [
+      "How does the returns recall API work, and who calls it?",
+      "How is the pincode-to-fulfilment-centre mapping decided and kept up to date?",
+      "How do you reconcile an inventory ledger against stock snapshots?"
+    ],
+    "star_prompts": {
+      "situation": "Which of these four had the biggest business impact?",
+      "task": "What problem did it solve for sellers?",
+      "action": "Describe the design: endpoints, data sources, sync frequency.",
+      "result": "Usage, time saved, errors prevented."
+    }
+  },
+  {
+    "slug": "claim-forty-percent-speedup",
+    "claim": "Optimized PostgreSQL queries and batch writes, reducing reconciliation processing time by 40%",
+    "evidence_md": "Not verifiable from the repo: there is evidence of batch writes (`execute_values`/`execute_batch`) but no code-level evidence of EXPLAIN analysis, index changes, or before/after timing. Prepare specifics: the job, the before/after durations, how measured, and exactly what changed. If you can't reconstruct it, re-measure or soften the wording.",
+    "status": "needs-preparation",
+    "likely_questions": [
+      "What was the query plan before and after?",
+      "How did you measure 40%: over how many runs, what data size?",
+      "Did you add indexes? Which columns and why that order?",
+      "What was the bottleneck: DB, Python, or network?"
+    ],
+    "star_prompts": {
+      "situation": "Which reconciliation job was slow, and how slow (minutes, rows)?",
+      "task": "What target did you set and why did it matter?",
+      "action": "List each change (batching, set-based SQL, indexes, fewer columns) and how you validated it.",
+      "result": "Exact before/after timings and how they were measured. Make sure the 40% is reproducible."
+    }
+  },
+  {
+    "slug": "claim-product-documents",
+    "claim": "wrote product documents defining settlement, commission, claims and promo-calculation logic for multiple marketplaces",
+    "evidence_md": "Not verifiable from the code repo. Have one document (sanitised) or a clear verbal walkthrough of one marketplace's commission/settlement formula.",
+    "status": "needs-preparation",
+    "likely_questions": [
+      "Explain how one marketplace calculates its commission and settlement.",
+      "How did engineers and finance use these documents?",
+      "How do you keep them current when marketplaces change rules?"
+    ],
+    "star_prompts": {
+      "situation": "Why were these documents needed?",
+      "task": "Who were the readers and what decisions depended on them?",
+      "action": "How did you research and validate the rules (sample statements, marketplace docs)?",
+      "result": "Errors avoided, onboarding time for new devs, disputes resolved."
+    }
+  },
+  {
+    "slug": "claim-pulumi-lambda-layers",
+    "claim": "Provisioned infrastructure as code with Pulumi and managed shared dependencies through Lambda Layers for consistent, repeatable deployments.",
+    "evidence_md": "Weak evidence: the assessment found your Pulumi commits only in the LambdaLayers project. Broader Pulumi provisioning (ECS services, IAM, networking) is not supported by the code. Prepare to talk precisely about the Lambda Layers stack, or narrow the claim.",
+    "status": "needs-preparation",
+    "likely_questions": [
+      "Show the Pulumi program for one layer: how are versions and runtimes managed?",
+      "How do functions pick up a new layer version?",
+      "Pulumi vs Terraform vs CDK: why Pulumi?",
+      "How do you manage Pulumi state and secrets?"
+    ],
+    "star_prompts": {
+      "situation": "What deployment problem did layers solve (duplicate deps, package size limits)?",
+      "task": "What were you responsible for in the infra code?",
+      "action": "Walk through the Pulumi code and the deploy process.",
+      "result": "Number of functions sharing layers, deployment time/size reduction."
+    }
+  },
+  {
+    "slug": "claim-intern-automation-60",
+    "claim": "Automated report processing, reducing manual operational effort by 60%.",
+    "evidence_md": "Not verifiable from the repo. Prepare how the 60% was estimated (hours per week before vs after, which team).",
+    "status": "needs-preparation",
+    "likely_questions": [
+      "How did you measure manual effort?",
+      "What was still manual after automation?"
+    ],
+    "star_prompts": {
+      "situation": "What was being done manually during your internship?",
+      "task": "What did you set out to automate?",
+      "action": "What did you build (scripts, processors, scheduling)?",
+      "result": "Hours per week before and after; who benefited."
+    }
+  },
+  {
+    "slug": "claim-dsa-1500",
+    "claim": "Solved 1500+ data structures and algorithms problems across LeetCode, CodeChef and SkillRack.",
+    "evidence_md": "Not verifiable from the work repo; verify via profile counts (LeetCode/CodeChef/SkillRack) and be ready to solve medium problems live.",
+    "status": "needs-preparation",
+    "likely_questions": [
+      "Which patterns do you find hardest?",
+      "Solve a medium problem now (e.g. sliding window, graph BFS, heap).",
+      "Have you used any of these algorithms at work?"
+    ],
+    "star_prompts": {
+      "situation": "How did you practise DSA over time?",
+      "task": "What was your goal (placements, contests)?",
+      "action": "Which patterns did you master and how?",
+      "result": "Profile counts, contest ratings: have the links ready."
+    }
+  }
+]

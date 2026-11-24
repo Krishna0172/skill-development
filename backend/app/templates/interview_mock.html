@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty %}
+{% block title %}Mock interview{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Mock interview</h1><p>{{ questions|length }} random questions{% if role %} for {{ roles[role] }}{% endif %}. Answer each one, reveal the model answer, then rate yourself honestly. Answers rated 1–2 go into revision.</p></div>
+  <div class="actions"><a class="btn" href="/interview">Back</a></div>
+</div>
+<form method="get" action="/interview/mock" class="row mb">
+  <select name="role" style="max-width:260px"><option value="">Any role</option>{% for k, v in roles.items() %}<option value="{{ k }}" {{ 'selected' if k == role }}>{{ v }}</option>{% endfor %}</select>
+  <select name="n" style="max-width:140px">{% for x in [3, 5, 8, 10] %}<option value="{{ x }}" {{ 'selected' if x == n }}>{{ x }} questions</option>{% endfor %}</select>
+  <button class="btn">New set</button>
+</form>
+{% if not questions %}{{ empty("No questions for this role") }}{% else %}
+<form method="post" action="/interview/mock" style="max-width:900px">
+  <input type="hidden" name="role" value="{{ role }}">
+  {% for q in questions %}
+    <div class="q">
+      <input type="hidden" name="qid" value="{{ q.id }}">
+      <div class="qhead"><span class="badge">{{ q.category|label }}</span><span>#{{ loop.index }}</span>{{ badge(q.difficulty) }}</div>
+      <div class="md"><strong>{{ q.question }}</strong></div>
+      <textarea name="a{{ q.id }}" rows="4" class="mt" placeholder="Your answer…"></textarea>
+      {% if q.answer_md %}<details class="fold mt"><summary>Reveal model answer</summary><div class="md">{{ q.answer_md|md }}</div></details>{% endif %}
+      <div class="row mt"><span class="small muted">How well did you answer?</span>
+        {% for v in range(1, 6) %}<label class="row small"><input type="radio" name="c{{ q.id }}" value="{{ v }}" required> {{ v }}</label>{% endfor %}</div>
+    </div>
+  {% endfor %}
+  <div class="row mt"><button class="btn primary">Finish mock interview</button></div>
+</form>
+{% endif %}
+{% endblock %}

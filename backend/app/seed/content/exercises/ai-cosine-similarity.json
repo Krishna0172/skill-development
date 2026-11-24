@@ -1,0 +1,121 @@
+{
+  "slug": "ai-cosine-similarity",
+  "title": "Cosine similarity from scratch",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "ml-math-stats",
+  "concepts": [
+    "dot product",
+    "vector norm",
+    "cosine similarity",
+    "edge cases"
+  ],
+  "related_topics": [
+    "ai-math-linear-algebra",
+    "ai-embeddings",
+    "ai-semantic-search"
+  ],
+  "problem_md": "Every semantic search over embeddings boils down to comparing vectors. Implement it without numpy:\n\n```python\ndef cosine_similarity(a: list[float], b: list[float]) -> float\n```\n\n- `cos(a, b) = (a . b) / (||a|| * ||b||)`; return the value rounded to 6 decimals.\n- Different lengths -> `ValueError`. Empty vectors -> `ValueError`.\n- If either vector has zero norm, return `0.0` (similarity is undefined; don't divide by zero).",
+  "examples": [
+    {
+      "input": "cosine_similarity([1, 0], [0, 1])",
+      "output": "0.0",
+      "explanation": "Orthogonal."
+    },
+    {
+      "input": "cosine_similarity([1, 2, 3], [2, 4, 6])",
+      "output": "1.0",
+      "explanation": "Same direction, different length."
+    }
+  ],
+  "hints": [
+    "`dot = sum(x * y for x, y in zip(a, b))`; `math.sqrt(sum(x * x for x in a))` is the norm (or `math.hypot(*a)`).",
+    "Check lengths before zipping - `zip` silently truncates (or use `zip(a, b, strict=True)`, which raises `ValueError`)."
+  ],
+  "starter_code": "import math\n\n\ndef cosine_similarity(a, b):\n    dot = sum(x * y for x, y in zip(a, b))\n    return round(dot / (math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))), 6)\n",
+  "solution_code": "import math\n\n\ndef cosine_similarity(a, b):\n    if len(a) != len(b):\n        raise ValueError('vectors must have the same length')\n    if not a:\n        raise ValueError('vectors must not be empty')\n    dot = sum(x * y for x, y in zip(a, b))\n    norm_a = math.sqrt(sum(x * x for x in a))\n    norm_b = math.sqrt(sum(y * y for y in b))\n    if norm_a == 0 or norm_b == 0:\n        return 0.0\n    return round(dot / (norm_a * norm_b), 6)\n",
+  "solution_md": "Cosine measures the angle between vectors, ignoring magnitude - which is why it's the default for text embeddings (document length shouldn't change meaning). O(d) time, O(1) extra memory.\n\nEdge cases matter in pipelines: `zip` silently truncates mismatched vectors (a model change from 1536 to 3072 dims would then produce garbage scores instead of an error), and an all-zero vector (e.g. an embedding of empty text) would raise `ZeroDivisionError` mid-batch.\n\nMost embedding APIs return **unit-normalised** vectors, so cosine reduces to the dot product - that's why vector DBs (pgvector `<#>` / `<=>`) offer inner product as a faster equivalent. With numpy: `a @ b / (np.linalg.norm(a) * np.linalg.norm(b))`.",
+  "tests": {
+    "function": "cosine_similarity",
+    "cases": [
+      {
+        "args": [
+          [
+            1,
+            0
+          ],
+          [
+            0,
+            1
+          ]
+        ],
+        "kwargs": {},
+        "expected": 0.0
+      },
+      {
+        "args": [
+          [
+            1,
+            2,
+            3
+          ],
+          [
+            2,
+            4,
+            6
+          ]
+        ],
+        "kwargs": {},
+        "expected": 1.0
+      },
+      {
+        "args": [
+          [
+            0.5,
+            -1.0,
+            2.0
+          ],
+          [
+            1.5,
+            0.25,
+            -0.75
+          ]
+        ],
+        "kwargs": {},
+        "expected": -0.257396
+      },
+      {
+        "args": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            2,
+            3
+          ]
+        ],
+        "kwargs": {},
+        "expected": 0.0
+      },
+      {
+        "args": [
+          [
+            1,
+            2
+          ],
+          [
+            1,
+            2,
+            3
+          ]
+        ],
+        "raises": "ValueError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

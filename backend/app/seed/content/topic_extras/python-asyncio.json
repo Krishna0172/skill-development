@@ -1,0 +1,55 @@
+{
+  "slug": "python-asyncio",
+  "why_md": "asyncio is how modern Python services handle thousands of concurrent I/O operations - FastAPI endpoints, async HTTP clients, and especially LLM apps that stream tokens and fan out many model/tool calls in parallel. Interviewers test the event-loop model, blocking-call pitfalls, `gather` vs `TaskGroup`, and concurrency limiting.",
+  "revision_notes_md": "- `async def` returns a coroutine; nothing runs until awaited or scheduled as a Task.\n- One thread, one event loop: any blocking call (`requests`, `time.sleep`, psycopg2) freezes everything.\n- Offload blocking code with `await asyncio.to_thread(fn, *args)`.\n- `asyncio.gather(*coros)` runs concurrently; `return_exceptions=True` returns errors as values.\n- `asyncio.TaskGroup` (3.11+) cancels siblings on first failure - preferred structure.\n- Limit concurrency with `asyncio.Semaphore`; serialise with `asyncio.Lock`.\n- `asyncio.timeout(s)` (3.11+) / `wait_for` for deadlines.\n- Re-raise `CancelledError` after cleanup; keep references to created tasks.",
+  "exercises_md": "1. Write an async fetcher that downloads 100 fake pages (`await asyncio.sleep(0.1)`) with a `Semaphore(10)` and a `asyncio.timeout`; measure the total time.\n2. Insert a `time.sleep(1)` into one coroutine and observe the whole program stall; fix it with `asyncio.to_thread`.",
+  "my_context_md": "`ECSInventoryPriceTracking/app/fetchers/spapi.py` is an async httpx client for Amazon SP-API that refreshes LWA tokens and paces requests with an `asyncio.Lock` while reading rate-limit headers - real asyncio usage you can explain in interviews. The rest of the repo is psycopg2-based and synchronous, so any DB call from async code there must go through `asyncio.to_thread`.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To run a blocking function like a psycopg2 query from async code without freezing the loop, use `await asyncio.____(fn, *args)`.",
+      "answers": [
+        "to_thread"
+      ],
+      "explanation": "Runs it in the default thread pool."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To cap the number of concurrent requests to an API at 5, wrap each call in `async with` an asyncio.____(5).",
+      "answers": [
+        "Semaphore"
+      ],
+      "explanation": "A semaphore allows N holders at once."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import asyncio\n\nasync def fetch(name, delay):\n    await asyncio.sleep(delay)\n    print(\"done\", name)\n    return name.upper()\n\nasync def main():\n    results = await asyncio.gather(fetch(\"a\", 0.3), fetch(\"b\", 0.1), fetch(\"c\", 0.2))\n    print(results)\n\nasyncio.run(main())",
+      "answers": [
+        "done b\ndone c\ndone a\n['A', 'B', 'C']"
+      ],
+      "explanation": "Completion order follows the delays (b, c, a) but gather returns results in argument order."
+    },
+    {
+      "type": "debug",
+      "prompt": "This endpoint handles only one request at a time under load. Why?",
+      "code": "import asyncio, requests\n\nasync def get_price(sku: str):\n    r = requests.get(f\"https://api.example.com/price/{sku}\", timeout=10)\n    return r.json()\n\nasync def main(skus):\n    return await asyncio.gather(*(get_price(s) for s in skus))",
+      "answer": "`requests.get` is blocking: it holds the single event-loop thread for the full network wait, so the 'concurrent' coroutines actually run one after another (and the whole server stalls). Use an async client (shared instance) or offload:\n\n```python\nimport httpx\n\nasync def get_price(client: httpx.AsyncClient, sku: str):\n    r = await client.get(f\"https://api.example.com/price/{sku}\")\n    r.raise_for_status()\n    return r.json()\n\nasync def main(skus):\n    async with httpx.AsyncClient(timeout=10) as client:\n        return await asyncio.gather(*(get_price(client, s) for s in skus))\n```",
+      "rubric": [
+        "Blocking call inside async def blocks the event loop",
+        "Use an async client (httpx.AsyncClient) or asyncio.to_thread",
+        "Reuse one client for connection pooling"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how asyncio achieves concurrency on a single thread and when it beats threads.",
+      "answer": "The event loop runs coroutines cooperatively: when a coroutine hits `await` on I/O, it yields control, the loop registers the socket with the OS selector, and runs other ready coroutines; when I/O completes the waiting coroutine is resumed. There's no preemption, so switching only happens at `await` points. This scales to thousands of concurrent connections with low memory and fewer race conditions than threads, which is ideal for HTTP/LLM API fan-out. It doesn't help CPU-bound work, and one blocking call stalls everything.",
+      "rubric": [
+        "Cooperative scheduling: switches only at await",
+        "Event loop + OS selector waits on many sockets",
+        "Great for many I/O waits; useless for CPU-bound; blocking calls stall the loop"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "slug": "jwt-authentication",
+  "title": "JWT Authentication",
+  "skill": "authentication",
+  "extra_skills": [
+    "security",
+    "fastapi"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "jwt",
+    "authentication",
+    "authorization",
+    "oauth2",
+    "tokens",
+    "security",
+    "fastapi"
+  ],
+  "summary": "A JWT (JSON Web Token) is a signed string with three parts - header, payload (claims like user id and expiry) and signature. The server signs it at login; afterwards the client sends it in `Authorization: Bearer <token>` and the server verifies the signature instead of looking up a session. JWTs are signed, not encrypted, so never put secrets in them, keep them short-lived, and use refresh tokens to stay logged in.",
+  "details_md": "### Structure\n`base64url(header).base64url(payload).base64url(signature)`\n- **Header**: `{\"alg\": \"HS256\", \"typ\": \"JWT\"}` (plus `kid` to identify the key when keys rotate).\n- **Payload (claims)**: registered claims `sub` (subject/user id), `exp` (expiry, Unix seconds), `iat` (issued at), `nbf`, `iss` (issuer), `aud` (audience), `jti` (unique token id), plus custom claims (`org_id`, `roles`).\n- **Signature**: computed over `header.payload` with the key. Anyone can **decode** the payload (it's just base64); only the key holder can **produce a valid signature**.\n\n### Signing algorithms\n- **HS256** (HMAC + shared secret): same secret signs and verifies. Simple for a single service; every verifier can also mint tokens.\n- **RS256 / ES256 / EdDSA** (asymmetric): the auth server signs with a private key; other services verify with the public key (often published as a JWKS endpoint). Preferred when several services verify tokens or a third-party identity provider (Cognito, Auth0, Keycloak) issues them.\n\n### Verification checklist\n1. Verify the signature with an **allow-list of algorithms** (`algorithms=[\"HS256\"]`) - never trust the token's own `alg` header (prevents `alg: none` and RS/HS confusion attacks).\n2. Check `exp` (and `nbf`) with a small clock-skew leeway.\n3. Check `iss` and `aud` match your service.\n4. Require the claims you depend on (`sub`, `exp`).\n5. Load the user/permissions as needed and **authorise** the action (e.g. the token's `org_id` must own the resource).\n\n### Access and refresh tokens\nJWTs are **stateless**: the server can't easily revoke one before it expires. So:\n- **Access token**: short-lived (5-15 min), sent on every request.\n- **Refresh token**: long-lived, opaque random string stored server-side (hashed) so it can be revoked and **rotated** on each use; used only at `/auth/refresh`. Reuse of an old refresh token signals theft -> revoke the family.\n- For immediate revocation of access tokens, keep a denylist of `jti`s until expiry, or bump a per-user token version.\n\n### Storage on the client\n- **HttpOnly, Secure, SameSite cookie**: not readable by JavaScript (mitigates XSS token theft); needs CSRF protection for state-changing requests (SameSite=Lax/Strict + CSRF token).\n- **localStorage**: easy, but any XSS can read it. Avoid for long-lived tokens.\n- Mobile/CLI clients: OS secure storage.\n\n### Authentication vs authorisation\nAuthentication proves *who* you are (password check, then token). Authorisation decides *what* you may do (roles, scopes, tenant ownership). Most real breaches are authorisation bugs - e.g. `GET /uploads/42` returning another org's upload because only the token was checked, not ownership (IDOR).\n\n### Passwords\nNever store passwords; store a slow, salted hash: **Argon2id** (preferred) or bcrypt, via `pwdlib`/`argon2-cffi`/`bcrypt`. Compare with the library's verify function (constant time). Rate-limit login attempts.\n\n### Alternatives\nServer-side sessions (random session id in a cookie + store in DB/Redis) are simpler and instantly revocable - often the better choice for a single web app. API keys suit machine-to-machine access. OAuth2/OIDC with an identity provider avoids building auth yourself.",
+  "code_md": "```python\n# Issue and verify JWTs with PyJWT (pip install pyjwt)\nfrom datetime import datetime, timedelta, UTC\nimport jwt\n\nSECRET = \"load-from-env-or-secrets-manager\"   # >= 32 random bytes\nALGO = \"HS256\"\n\ndef create_access_token(user_id: int, org_id: int) -> str:\n    now = datetime.now(UTC)\n    claims = {\n        \"sub\": str(user_id),           # sub should be a string\n        \"org_id\": org_id,\n        \"iat\": now,\n        \"exp\": now + timedelta(minutes=15),\n        \"iss\": \"skill-api\",\n        \"aud\": \"skill-web\",\n    }\n    return jwt.encode(claims, SECRET, algorithm=ALGO)\n\ndef verify(token: str) -> dict:\n    return jwt.decode(\n        token, SECRET,\n        algorithms=[ALGO],             # allow-list; never read alg from the token\n        audience=\"skill-web\", issuer=\"skill-api\",\n        options={\"require\": [\"exp\", \"sub\"]},\n        leeway=30,                     # seconds of clock skew\n    )\n\nt = create_access_token(1, 7)\nprint(verify(t)[\"org_id\"])            # 7\n# Tampered/expired tokens raise jwt.InvalidTokenError subclasses (ExpiredSignatureError, ...)\n```\n\n```python\n# FastAPI: login endpoint + current-user dependency\nfrom typing import Annotated\nfrom fastapi import Depends, FastAPI, HTTPException, status\nfrom fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm\nfrom pwdlib import PasswordHash          # pip install \"pwdlib[argon2]\"\nimport jwt\n\napp = FastAPI()\noauth2 = OAuth2PasswordBearer(tokenUrl=\"/auth/token\")\nhasher = PasswordHash.recommended()       # Argon2id\nUSERS = {\"asha\": {\"id\": 1, \"org_id\": 7, \"hash\": hasher.hash(\"correct horse\")}}\n\n@app.post(\"/auth/token\")\ndef login(form: Annotated[OAuth2PasswordRequestForm, Depends()]):\n    user = USERS.get(form.username)\n    if not user or not hasher.verify(form.password, user[\"hash\"]):\n        raise HTTPException(status.HTTP_401_UNAUTHORIZED, \"invalid credentials\")\n    return {\"access_token\": create_access_token(user[\"id\"], user[\"org_id\"]), \"token_type\": \"bearer\"}\n\ndef current_user(token: Annotated[str, Depends(oauth2)]) -> dict:\n    try:\n        claims = verify(token)\n    except jwt.InvalidTokenError:\n        raise HTTPException(status.HTTP_401_UNAUTHORIZED, \"invalid token\",\n                            headers={\"WWW-Authenticate\": \"Bearer\"})\n    return {\"id\": int(claims[\"sub\"]), \"org_id\": claims[\"org_id\"]}\n\nCurrentUser = Annotated[dict, Depends(current_user)]\n\n@app.get(\"/uploads/{upload_id}\")\ndef get_upload(upload_id: int, user: CurrentUser):\n    upload = {\"id\": upload_id, \"org_id\": 7}           # fetched from DB in real code\n    if upload[\"org_id\"] != user[\"org_id\"]:            # authorisation, not just authentication\n        raise HTTPException(status.HTTP_404_NOT_FOUND, \"not found\")\n    return upload\n```\n\n```bash\n# Calling the API\nTOKEN=$(curl -s -X POST localhost:8000/auth/token -d \"username=asha&password=correct horse\" | jq -r .access_token)\ncurl -H \"Authorization: Bearer $TOKEN\" localhost:8000/uploads/42\n```",
+  "use_cases_md": "- Stateless authentication for APIs consumed by SPAs, mobile apps and other services.\n- Service-to-service auth where verifiers only need a public key (RS256/ES256 + JWKS).\n- Carrying tenant context (`org_id`) and roles/scopes for multi-tenant authorisation.\n- Validating tokens issued by identity providers (Cognito, Auth0, Google) in API Gateway or FastAPI.\n- Short-lived signed links/tokens (email verification, password reset) with a specific `aud`.",
+  "mistakes_md": "- **Putting sensitive data in the payload** - it's only base64, readable by anyone. Fix: only ids/roles; encrypt (JWE) if you truly must.\n- **Not pinning algorithms** (`algorithms` from the token header) - enables `alg: none`/key-confusion attacks. Fix: explicit allow-list.\n- **Long-lived access tokens** with no revocation. Fix: 5-15 min access tokens + rotating, revocable refresh tokens.\n- **Weak HS256 secrets** (\"secret\") - brute-forceable offline. Fix: 256-bit random secret from a secrets manager.\n- **Authenticating but not authorising** - any valid token can read any org's data (IDOR). Fix: check resource ownership/roles on every request.\n- **Storing long-lived tokens in localStorage** - stolen by XSS. Fix: HttpOnly Secure cookies + CSRF protection, or keep tokens in memory.\n- **Hashing passwords with SHA-256/MD5**. Fix: Argon2id or bcrypt.",
+  "best_practices_md": "- Prefer a managed identity provider or proven library over hand-rolled auth.\n- Validate `exp`, `iss`, `aud`, required claims, and pin algorithms; allow small clock skew.\n- Use asymmetric keys (RS256/ES256) with `kid` + JWKS when multiple services verify tokens; rotate keys.\n- Keep tokens small; look up fast-changing permissions server-side.\n- Enforce HTTPS everywhere; return 401 with `WWW-Authenticate: Bearer` for bad tokens and 403 (or 404) for forbidden resources.\n- Rate-limit login and refresh endpoints; log auth failures without logging tokens.\n- Centralise auth in one dependency/middleware so no endpoint forgets it.",
+  "my_context_md": "- Authentication is a listed gap: none of your projects implement it yet. Your FastAPI downloader apps are the natural place to practice - an `OAuth2PasswordBearer` + `current_user` dependency added to the job endpoints.\n- ECSMarketplaceDataUpload is multi-tenant by `orgid` (e.g. the `(id, orgid)` conflict key); any API in front of it must authorise by org on every request, not just validate a token - this is where IDOR bugs come from.\n- Your React and Next.js apps currently store data in localStorage; if they ever hold auth tokens, prefer HttpOnly cookies set by the backend.",
+  "related": [
+    "fastapi-essentials",
+    "rest-api-design",
+    "web-security-owasp",
+    "caching-strategies"
+  ],
+  "flashcards": [
+    {
+      "front": "Three parts of a JWT?",
+      "back": "Header . Payload (claims) . Signature - each base64url-encoded."
+    },
+    {
+      "front": "Is a JWT payload encrypted?",
+      "back": "No - signed (JWS) tokens are only base64url-encoded; anyone can read them. The signature prevents tampering."
+    },
+    {
+      "front": "HS256 vs RS256?",
+      "back": "HS256: one shared secret signs and verifies. RS256: private key signs, public key verifies (better for many verifiers/IdPs)."
+    },
+    {
+      "front": "Why pin `algorithms=[...]` when decoding?",
+      "back": "To prevent `alg: none` and algorithm-confusion attacks where the attacker chooses how the token is verified."
+    },
+    {
+      "front": "Access vs refresh token?",
+      "back": "Access: short-lived, sent every request. Refresh: long-lived, stored/revocable server-side, rotated, used only to get new access tokens."
+    },
+    {
+      "front": "Recommended password hashing algorithm?",
+      "back": "Argon2id (or bcrypt) - slow, salted; never plain SHA/MD5."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "A user's token is valid, but they request `/uploads/99` belonging to another org. What's the correct behaviour?",
+      "options": [
+        "Return the upload - the token is valid",
+        "Return 403 or 404 after checking org ownership",
+        "Return 401",
+        "Refresh the token"
+      ],
+      "answer_index": 1,
+      "explanation": "Authentication succeeded; authorisation must still check ownership. 404 avoids revealing the resource exists."
+    },
+    {
+      "question": "Which claim tells the verifier when a token stops being valid?",
+      "options": [
+        "iat",
+        "sub",
+        "aud",
+        "exp"
+      ],
+      "answer_index": 3,
+      "explanation": "`exp` is the expiration time (seconds since epoch)."
+    },
+    {
+      "question": "Why are JWT access tokens usually short-lived?",
+      "options": [
+        "Stateless tokens can't easily be revoked, so short expiry limits damage if stolen",
+        "Long tokens are slower to verify",
+        "The spec limits them to 15 minutes",
+        "Browsers delete them"
+      ],
+      "answer_index": 0,
+      "explanation": "Without server-side state you can't invalidate a token early; short TTL + refresh tokens bounds the exposure window."
+    },
+    {
+      "question": "Where is a browser-based app's token least exposed to XSS theft?",
+      "options": [
+        "localStorage",
+        "sessionStorage",
+        "An HttpOnly, Secure, SameSite cookie",
+        "A global JS variable written to the DOM"
+      ],
+      "answer_index": 2,
+      "explanation": "HttpOnly cookies can't be read by JavaScript; pair them with CSRF protection."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Walk through how JWT authentication works end to end in an API.",
+      "difficulty": "medium",
+      "answer_md": "1. **Login**: client sends credentials to `POST /auth/token`. Server verifies the password against an Argon2/bcrypt hash.\n2. **Issue tokens**: server creates an access JWT with claims `sub`, `org_id`, `roles`, `iat`, `exp` (~15 min), `iss`, `aud`, signs it (HS256 secret or RS256 private key), and usually issues a refresh token (opaque, stored hashed server-side).\n3. **Use**: client sends `Authorization: Bearer <jwt>` on each request.\n4. **Verify** (per request, no DB lookup needed): decode with pinned algorithms, validate signature, `exp`, `iss`, `aud`, required claims. Failure -> 401 with `WWW-Authenticate: Bearer`.\n5. **Authorise**: check roles/scopes and resource ownership (token's `org_id` must match the resource's org). Failure -> 403/404.\n6. **Refresh**: when the access token expires, the client calls `/auth/refresh` with the refresh token; the server validates it, **rotates** it (old one invalidated) and returns a new pair.\n7. **Logout/revoke**: delete the refresh token server-side; optionally denylist the access token `jti` until expiry.\n\n```python\nclaims = jwt.decode(token, key, algorithms=[\"RS256\"], audience=\"api\", issuer=\"auth\")\n```"
+    },
+    {
+      "question": "JWTs vs server-side sessions: when would you choose each?",
+      "difficulty": "hard",
+      "answer_md": "**Server-side sessions**: the server stores session data (DB/Redis) and gives the browser a random session ID in an HttpOnly cookie.\n- Pros: instant revocation (delete the row), small cookie, permissions always fresh, simple.\n- Cons: a store lookup per request; shared store needed across instances.\n- Best for: a classic web app with its own backend.\n\n**JWTs**: self-contained signed claims.\n- Pros: stateless verification (no lookup), easy for many services to verify with a public key, works across domains/mobile/service-to-service, natural fit with external identity providers (OIDC).\n- Cons: hard to revoke before `exp`; stale claims (roles changed after issue); bigger; easy to misconfigure (algorithms, storage, missing `aud`).\n- Best for: distributed systems/microservices, third-party IdPs, mobile and API clients.\n\nA common hybrid: short-lived JWT access tokens (stateless, 5-15 min) plus stateful, rotating refresh tokens - you get cheap verification with revocation within one access-token lifetime. Whatever you pick, authorisation checks (ownership, roles) remain server-side logic."
+    },
+    {
+      "question": "What are common JWT security vulnerabilities and how do you prevent them?",
+      "difficulty": "hard",
+      "answer_md": "- **`alg: none` / algorithm confusion**: attacker changes the header so the server skips verification or verifies an RS256 token as HS256 using the public key as the HMAC secret. *Prevent*: always pass an explicit `algorithms=[...]` allow-list and use separate key types.\n- **Weak HMAC secrets**: tokens can be brute-forced offline. *Prevent*: 256-bit random secrets from a secrets manager; rotate.\n- **Missing claim validation**: not checking `exp`, `aud`, `iss` lets tokens from another app/environment be accepted. *Prevent*: validate all, require them.\n- **Sensitive data in payload**: readable by anyone. *Prevent*: only identifiers.\n- **Token theft via XSS** (localStorage): *Prevent*: HttpOnly cookies + CSP; short expiry.\n- **CSRF** when using cookies: *Prevent*: SameSite cookies, CSRF tokens for state-changing requests.\n- **No revocation**: stolen long-lived tokens remain valid. *Prevent*: short TTL, rotating refresh tokens with reuse detection, `jti` denylist.\n- **`kid` injection** (using the header's `kid` to load arbitrary files/SQL): *Prevent*: look `kid` up only in a fixed key set/JWKS.\n- **Broken authorisation (IDOR)**: valid token, wrong tenant. *Prevent*: ownership checks on every resource access."
+    }
+  ]
+}

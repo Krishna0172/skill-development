@@ -1,0 +1,113 @@
+{
+  "slug": "parse-sync-log-line",
+  "title": "Parse a sync-service log line",
+  "category": "python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "etl-data-processing",
+  "concepts": [
+    "regular expressions",
+    "named groups",
+    "validation"
+  ],
+  "related_topics": [
+    "python-exceptions"
+  ],
+  "problem_md": "Your ingestion workers log every outbound API call in this format:\n\n```\n2024-03-15T10:22:01Z INFO [orders-sync] GET /api/v1/orders?page=2 200 134ms\n```\n\nYou want to parse these lines to find slow or failing calls.\n\nImplement:\n\n```python\ndef parse_log_line(line: str) -> dict:\n```\n\nThe line consists of these fields, separated by **one or more** spaces (surrounding whitespace, including a trailing newline, should be ignored):\n\n| field | rule |\n|---|---|\n| timestamp | any run of non-space characters |\n| level | exactly one of `DEBUG`, `INFO`, `WARNING`, `ERROR` (uppercase) |\n| service | text inside square brackets, e.g. `[orders-sync]` |\n| method | one of `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |\n| path | any run of non-space characters (may include a query string) |\n| status | exactly 3 digits |\n| duration | digits followed by `ms` |\n\nReturn:\n\n```python\n{\"timestamp\": str, \"level\": str, \"service\": str, \"method\": str,\n \"path\": str, \"status\": int, \"duration_ms\": int}\n```\n\nIf the line does not match, raise `ValueError`.",
+  "examples": [
+    {
+      "input": "line = '2024-03-15T10:22:01Z INFO [orders-sync] GET /api/v1/orders?page=2 200 134ms'",
+      "output": "{'timestamp': '2024-03-15T10:22:01Z', 'level': 'INFO', 'service': 'orders-sync', 'method': 'GET', 'path': '/api/v1/orders?page=2', 'status': 200, 'duration_ms': 134}"
+    },
+    {
+      "input": "line = 'garbage'",
+      "output": "raises ValueError"
+    }
+  ],
+  "hints": [
+    "A single anchored regular expression with named groups `(?P<name>...)` is the cleanest approach.",
+    "Use `\\s+` between fields and `re.fullmatch` (or `^...$`) on `line.strip()` so partial matches don't sneak through.",
+    "After matching, `m.groupdict()` gives you the dict; convert `status` and `duration_ms` with `int()`. Raise `ValueError` when the match is `None`."
+  ],
+  "starter_code": "import re\n\n\ndef parse_log_line(line: str) -> dict:\n    # your code here\n    ...\n",
+  "solution_code": "import re\n\nLOG_RE = re.compile(\n    r\"(?P<timestamp>\\S+)\\s+\"\n    r\"(?P<level>DEBUG|INFO|WARNING|ERROR)\\s+\"\n    r\"\\[(?P<service>[^\\]]+)\\]\\s+\"\n    r\"(?P<method>GET|POST|PUT|PATCH|DELETE)\\s+\"\n    r\"(?P<path>\\S+)\\s+\"\n    r\"(?P<status>\\d{3})\\s+\"\n    r\"(?P<duration_ms>\\d+)ms\"\n)\n\n\ndef parse_log_line(line: str) -> dict:\n    m = LOG_RE.fullmatch(line.strip())\n    if m is None:\n        raise ValueError(f\"unparseable log line: {line!r}\")\n    record = m.groupdict()\n    record[\"status\"] = int(record[\"status\"])\n    record[\"duration_ms\"] = int(record[\"duration_ms\"])\n    return record\n",
+  "solution_md": "Compile one regex with named groups and `fullmatch` it against the stripped line. `fullmatch` guarantees the *whole* line conforms — `re.match` would accept trailing junk, `re.search` would accept leading junk.\n\n- Alternation `(DEBUG|INFO|WARNING|ERROR)` is case-sensitive, so `info` is rejected as required.\n- `\\S+` for timestamp and path avoids having to model ISO dates or URL syntax.\n- `\\s+` tolerates the double spaces that sometimes appear when fields are padded.\n\n**Complexity:** O(len(line)) per line; compile the pattern once at module level so it's not rebuilt per call (Python caches recent patterns anyway, but the explicit constant documents intent).\n\n**Alternative:** `line.split()` and positional checks — workable, but you end up re-implementing the validation the regex gives you for free, and it breaks if a field ever contains spaces.",
+  "tests": {
+    "function": "parse_log_line",
+    "cases": [
+      {
+        "args": [
+          "2024-03-15T10:22:01Z INFO [orders-sync] GET /api/v1/orders?page=2 200 134ms"
+        ],
+        "kwargs": {},
+        "expected": {
+          "timestamp": "2024-03-15T10:22:01Z",
+          "level": "INFO",
+          "service": "orders-sync",
+          "method": "GET",
+          "path": "/api/v1/orders?page=2",
+          "status": 200,
+          "duration_ms": 134
+        }
+      },
+      {
+        "args": [
+          "2024-03-15T10:22:05Z   WARNING [settlements]  PUT /api/v1/payouts/77 429 2048ms\n"
+        ],
+        "kwargs": {},
+        "expected": {
+          "timestamp": "2024-03-15T10:22:05Z",
+          "level": "WARNING",
+          "service": "settlements",
+          "method": "PUT",
+          "path": "/api/v1/payouts/77",
+          "status": 429,
+          "duration_ms": 2048
+        }
+      },
+      {
+        "args": [
+          "2024-03-16T00:00:00Z ERROR [returns sync] POST /v2/returns 503 30001ms"
+        ],
+        "kwargs": {},
+        "expected": {
+          "timestamp": "2024-03-16T00:00:00Z",
+          "level": "ERROR",
+          "service": "returns sync",
+          "method": "POST",
+          "path": "/v2/returns",
+          "status": 503,
+          "duration_ms": 30001
+        }
+      },
+      {
+        "args": [
+          "garbage"
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      },
+      {
+        "args": [
+          ""
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      },
+      {
+        "args": [
+          "2024-03-15T10:22:01Z info [orders-sync] GET /api/v1/orders 200 134ms"
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      },
+      {
+        "args": [
+          "2024-03-15T10:22:01Z INFO [orders-sync] GET /api/v1/orders 200 134"
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

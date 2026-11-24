@@ -1,0 +1,178 @@
+{
+  "slug": "py-comprehensions",
+  "title": "Comprehensions",
+  "skill": "python",
+  "extra_skills": [],
+  "category": "Python",
+  "difficulty": "beginner",
+  "tags": [
+    "list comprehension",
+    "dict comprehension",
+    "set comprehension",
+    "generator expression"
+  ],
+  "summary": "A comprehension builds a list, set or dict from another iterable in a single readable expression. It replaces the common 'make an empty list, loop, append' pattern. This topic teaches the syntax step by step.",
+  "why_md": "- Comprehensions are everywhere in real Python and in code reviews.\n- They are usually clearer and faster than the equivalent append loop.\n- Knowing when NOT to use them (complex logic, side effects) is part of writing clean code.",
+  "details_md": "### From loop to comprehension\nStart with a normal loop:\n\n```python\nsquares = []\nfor n in range(5):\n    squares.append(n * n)\n```\nThe same thing as a list comprehension:\n\n```python\nsquares = [n * n for n in range(5)]   # [0, 1, 4, 9, 16]\n```\nRead it as: 'give me `n * n` for each `n` in `range(5)`'. The result expression comes first, then the `for`.\n\n### Adding a filter\nPut an `if` at the end to keep only some items:\n\n```python\nevens = [n for n in range(10) if n % 2 == 0]\n```\n\n### Transforming with if/else\nA conditional *expression* goes at the front, before the `for`:\n\n```python\nlabels = [\"even\" if n % 2 == 0 else \"odd\" for n in range(4)]\n```\nRemember: filter `if` goes at the end (no else); choose-a-value `if/else` goes at the front.\n\n### Dict and set comprehensions\nUse braces. A dict comprehension has `key: value`:\n\n```python\nprices = {\"pen\": 10, \"book\": 250}\nwith_tax = {name: p * 1.18 for name, p in prices.items()}\nunique_lengths = {len(w) for w in [\"a\", \"bb\", \"cc\"]}   # set\n```\n\n### Nested loops\nMultiple `for` clauses read left to right like nested loops:\n\n```python\npairs = [(x, y) for x in range(2) for y in \"ab\"]\n```\nMore than two levels becomes hard to read; use a normal loop.\n\n### Generator expressions\nReplace square brackets with parentheses to produce items lazily, one at a time, without building a list:\n\n```python\ntotal = sum(n * n for n in range(1_000_000))\n```\nThis uses almost no memory. Use it when you only need to iterate once (inside `sum`, `any`, `all`, `max`, `join`).\n\n### Scope\nIn Python 3 the loop variable of a comprehension does not leak into the surrounding scope.\n\n### When not to use one\n- When the body needs several statements or try/except.\n- When you want side effects (printing, writing). Use a `for` loop.\n- When it no longer fits comfortably on one or two lines.\n\n### The walrus operator (3.8+)\n`[y for x in data if (y := f(x)) is not None]` calls `f` only once per item, but use it sparingly because it hurts readability.",
+  "code_md": "```python\n# 1. map + filter in one expression\norders = [120, 0, 560, 35, 980]\nbig = [o for o in orders if o > 100]\nprint(big)\n```\n\n```python\n# 2. dict comprehension: invert and transform\nstock = {\"pen\": 5, \"book\": 0, \"cap\": 12}\nin_stock = {sku: qty for sku, qty in stock.items() if qty > 0}\nby_qty = {qty: sku for sku, qty in stock.items()}\nprint(in_stock, by_qty)\n```\n\n```python\n# 3. flatten nested lists\nbatches = [[1, 2], [3], [4, 5]]\nflat = [x for batch in batches for x in batch]\nprint(flat)\n```\n\n```python\n# 4. generator expression inside sum/any\nrows = [\"10\", \"20\", \"x\", \"5\"]\nprint(sum(int(r) for r in rows if r.isdigit()))\nprint(any(r == \"x\" for r in rows))\n```",
+  "use_cases_md": "- Cleaning a column of strings: `[s.strip().lower() for s in raw]`.\n- Building a lookup dict by id: `{o[\"id\"]: o for o in orders}`.\n- Flattening paginated API results.\n- Summing totals with a generator expression without making an intermediate list.\n- De-duplicating with a set comprehension.",
+  "mistakes_md": "- **Overlong comprehensions** with nested conditions: use a loop or helper function.\n- **Side effects** inside comprehensions (`[print(x) for x in xs]`).\n- **Wrong `if` placement**: `[x for x in xs else 0]` is a SyntaxError; the if/else goes before `for`.\n- **Building a huge list** when a generator expression would do.\n- **Forgetting `.items()`** when iterating a dict for key and value.",
+  "best_practices_md": "- Keep each comprehension to one idea, ideally one line.\n- Name the loop variable meaningfully.\n- Use generator expressions when feeding `sum`, `any`, `all`, `max`, `min`, `join`.\n- Switch to a loop when you need `try/except` or several steps.\n- Use dict comprehension for building lookups.",
+  "my_context_md": "",
+  "revision_notes_md": "- `[expr for x in it]` builds a list; `{k: v for ...}` a dict; `{x for ...}` a set.\n- Filter: `if` at the end, no else.\n- Choose-value: `a if cond else b` at the front.\n- Nested for-clauses read left to right like nested loops.\n- `(expr for x in it)` is a lazy generator expression.\n- Loop variable does not leak (Python 3).\n- No side effects in comprehensions.\n- Too complex means use a loop.",
+  "exercises_md": "1. From a list of order dicts, build a list of ids for orders with `total > 500`.\n2. Build a dict mapping sku to uppercase name from a list of `(sku, name)` tuples.\n3. Flatten a list of lists of order lines, then compute the sum with a generator expression.\n4. Rewrite a loop that has try/except as a loop plus a helper function; explain why it is not a comprehension.",
+  "related": [
+    "py-lists-tuples-sets-dicts-basics",
+    "py-control-flow-loops",
+    "python-generators-iterators",
+    "py-itertools-functools-collections"
+  ],
+  "flashcards": [
+    {
+      "front": "Syntax of a list comprehension?",
+      "back": "`[expr for item in iterable if condition]`"
+    },
+    {
+      "front": "Where does the else go?",
+      "back": "In the front expression: `[a if c else b for x in xs]`. A trailing filter `if` has no else."
+    },
+    {
+      "front": "Dict comprehension syntax?",
+      "back": "`{key: value for k, v in items}`"
+    },
+    {
+      "front": "List comp vs generator expression?",
+      "back": "Brackets build the whole list now; parentheses produce items lazily and use little memory."
+    },
+    {
+      "front": "How do you flatten `[[1,2],[3]]`?",
+      "back": "`[x for sub in nested for x in sub]`"
+    },
+    {
+      "front": "When avoid a comprehension?",
+      "back": "Side effects, multi-step logic, try/except, or when it is hard to read."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What does `[n * 2 for n in range(3)]` produce?",
+      "options": [
+        "[0, 1, 2]",
+        "[0, 2, 4]",
+        "[2, 4, 6]",
+        "[0, 2, 4, 6]"
+      ],
+      "answer_index": 1,
+      "explanation": "range(3) is 0,1,2, doubled."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is valid for replacing odd numbers with 0?",
+      "options": [
+        "[n for n in xs else 0]",
+        "[n if n % 2 == 0 else 0 for n in xs]",
+        "[n for n in xs if n % 2 == 0 else 0]",
+        "[if n % 2: 0 for n in xs]"
+      ],
+      "answer_index": 1,
+      "explanation": "The conditional expression goes before `for`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is `(x * x for x in range(3))`?",
+      "options": [
+        "A tuple",
+        "A list",
+        "A generator",
+        "A set"
+      ],
+      "answer_index": 2,
+      "explanation": "Parentheses make a generator expression, not a tuple."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A comprehension that builds a mapping uses the syntax `{k: v ____ k, v in pairs}`.",
+      "answers": [
+        "for"
+      ],
+      "explanation": "The `for` keyword introduces the loop."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Wrapping a comprehension in ____ instead of square brackets makes it lazy.",
+      "answers": [
+        "parentheses",
+        "parens",
+        "()",
+        "round brackets"
+      ],
+      "explanation": "Parentheses create a generator expression."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "orders = [120, 0, 560, 35, 980]\nprint([o for o in orders if o > 100])\nprint([\"big\" if o > 100 else \"small\" for o in orders])\nprint({o: o % 3 for o in orders if o})\n",
+      "answers": [
+        "[120, 560, 980]\n['big', 'small', 'big', 'small', 'big']\n{120: 0, 560: 2, 35: 2, 980: 2}"
+      ],
+      "explanation": "Filtering, if/else value selection, and dict comprehension with the 0 excluded by `if o`."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "batches = [[1, 2], [3], [4, 5]]\nprint([x for b in batches for x in b])\nrows = [\"10\", \"20\", \"x\", \"5\"]\nprint(sum(int(r) for r in rows if r.isdigit()))\nprint(type(x for x in rows).__name__)\n",
+      "answers": [
+        "[1, 2, 3, 4, 5]\n35\ngenerator"
+      ],
+      "explanation": "Flatten reads outer loop first; sum of 10+20+5; generator type name."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "prices = {\"pen\": 10, \"book\": 250}\ndoubled = [p * 2 for p in prices]\ntags = [x for x in range(5) if x % 2 == 0 else -1]\n",
+      "answer": "`for p in prices` iterates the dict keys (strings), so `p * 2` repeats the strings instead of doubling prices; use `{k: v * 2 for k, v in prices.items()}` or `[v * 2 for v in prices.values()]`. The second line is a SyntaxError: a trailing `if` filter cannot have `else`; put the conditional expression at the front: `[x if x % 2 == 0 else -1 for x in range(5)]`.",
+      "rubric": [
+        "Notes iterating a dict yields keys",
+        "Uses .items()/.values()",
+        "Fixes if/else placement"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain when a list comprehension is better than a for loop and when it is worse.",
+      "answer": "A comprehension is better when you are creating a new collection by mapping and/or filtering one iterable; it states intent in one expression and is usually a bit faster than append in a loop. It is worse when the logic needs multiple statements, exception handling, side effects, or several nested conditions, because it becomes dense and hard to debug. In those cases write a loop or extract a helper function. For one-pass aggregation use a generator expression to avoid a temporary list.",
+      "rubric": [
+        "Mapping/filtering a new collection",
+        "Readability limits: complex logic means loop",
+        "Generator expression for one-pass aggregation"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is the difference between `[x for x in big]` and `(x for x in big)` in terms of memory?",
+      "answer": "The list comprehension builds all items in memory immediately (O(n) memory). The generator expression stores only its current state and yields one item at a time (O(1) extra memory), but can only be consumed once. Use generators when you stream into `sum`, `any` or `''.join`; use a list when you need indexing, len or multiple passes.",
+      "rubric": [
+        "List is eager and holds all items",
+        "Generator is lazy and single-use"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Are list comprehensions faster than for loops? Why?",
+      "difficulty": "easy",
+      "answer_md": "Usually somewhat faster for building a list, because the loop runs in optimised bytecode and avoids repeated `append` attribute lookups and method calls. The gain is modest (often 10-30%), so choose comprehensions for readability first. If the body is expensive, the loop overhead is irrelevant. For huge data, memory matters more: use a generator expression."
+    },
+    {
+      "question": "What does this return: `[(x, y) for x in range(2) for y in range(2) if x != y]`?",
+      "difficulty": "medium",
+      "answer_md": "The `for` clauses nest left to right: x is the outer loop and y the inner loop; the `if` filters afterwards. Pairs: (0,0) no, (0,1) yes, (1,0) yes, (1,1) no. Result: `[(0, 1), (1, 0)]`. Equivalent loop:\n\n```python\nout = []\nfor x in range(2):\n    for y in range(2):\n        if x != y:\n            out.append((x, y))\n```"
+    },
+    {
+      "question": "Does the loop variable in a comprehension leak into the enclosing scope?",
+      "difficulty": "medium",
+      "answer_md": "Not in Python 3. A comprehension has its own scope, so `[i for i in range(3)]` leaves no `i` behind (Python 2 leaked it). Python 3.12 inlined comprehensions for speed (PEP 709) but kept the same visible semantics. The walrus operator inside a comprehension is the exception: the target is bound in the containing scope."
+    }
+  ]
+}

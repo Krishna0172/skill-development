@@ -1,0 +1,146 @@
+{
+  "slug": "ai-statistics-probability",
+  "title": "Statistics & probability for ML engineers",
+  "skill": "ml-math-stats",
+  "extra_skills": [],
+  "category": "AI",
+  "difficulty": "beginner",
+  "tags": [
+    "statistics",
+    "probability",
+    "bayes",
+    "distributions",
+    "ab-testing",
+    "correlation"
+  ],
+  "summary": "The practical statistics behind ML and product decisions: distributions, mean/median/variance, conditional probability and Bayes' rule, sampling, correlation vs causation, and the basics of A/B testing. Enough to reason about data, model outputs and experiments without a textbook.",
+  "why_md": "- Every model output is a probability or an estimate with uncertainty; you need to read it correctly.\n- Skewed e-commerce data (order values, review counts) makes mean vs median a real decision, not trivia.\n- Bayes' rule explains why a 95%-accurate fraud model can still be wrong most of the time it fires.\n- A/B tests decide whether a new ranking/prompt actually helped; misreading p-values ships regressions.\n- Interview staples: base-rate fallacy, correlation vs causation, standard deviation intuition.",
+  "details_md": "### Describing data\n- **Mean** is sensitive to outliers; **median** is robust. Order values are right-skewed, so a few bulk B2B orders drag the mean up — report the median.\n- **Variance** is the mean squared deviation from the mean; **standard deviation** is its square root, in the original units. Sample variance divides by `n − 1` (`statistics.variance`); population variance divides by `n` (`statistics.pvariance`). pandas `.var()` uses `n − 1`, numpy `.var()` uses `n` by default — a classic mismatch.\n- **Percentiles** (p50, p95, p99) describe latency and order values better than averages.\n\n### Distributions\n- **Normal**: symmetric bell; ~68% within 1 sd, ~95% within 2 sd. Measurement noise, averages of many things.\n- **Binomial / Bernoulli**: counts of yes/no events (did the customer return the item?).\n- **Poisson**: event counts per interval (orders per hour) — a sensible starting point for demand.\n- **Long-tail / log-normal**: prices, sales per SKU. Often modelled on `log(x)`.\n\n### Conditional probability and Bayes\n`P(A|B) = P(A and B) / P(B)`. Bayes' rule: `P(A|B) = P(B|A)·P(A) / P(B)`. With a 1% fraud base rate, a detector with 90% recall and 5% false-positive rate gives `P(fraud|flag) = 0.009 / (0.009 + 0.0495) ≈ 15%`. Base rates dominate; this is why precision collapses on rare classes.\n\n### Sampling\nA model is only as good as the sample it learned from. Random samples generalise; convenience samples (only one marketplace, only last month) bias results. Larger samples shrink the standard error as `sd / sqrt(n)`.\n\n### Correlation vs causation\nPearson correlation (−1 to 1) measures linear association only. Ad spend and sales both rise in festive season — correlated via a confounder (season), not necessarily causal. Only a randomised experiment establishes causation cleanly.\n\n### A/B testing basics\nRandomly split users, change one thing, compare a pre-chosen metric. Decide sample size and duration **before** starting; a p-value < 0.05 means \"this difference would be unlikely if there were no real effect\", not \"95% chance the variant is better\". Don't peek and stop early.",
+  "code_md": "```python\nimport statistics as st\n\norder_values = [499, 520, 610, 450, 580, 25000]   # one bulk order\nprint(st.mean(order_values))     # ~4609.8 — misleading\nprint(st.median(order_values))   # 550.0 — typical order\nprint(st.stdev(order_values))    # sample sd (n-1)\n\n# Bayes: how often is a flagged settlement really fraudulent?\np_fraud, recall, fpr = 0.01, 0.90, 0.05\np_flag = recall * p_fraud + fpr * (1 - p_fraud)\nprint(round(recall * p_fraud / p_flag, 3))   # 0.154\n```\n\n```python\n# A/B test on conversion with a two-proportion z-test (scipy/statsmodels)\nfrom statsmodels.stats.proportion import proportions_ztest\nconversions = [420, 468]     # control, variant\nvisitors = [10000, 10000]\nz, p = proportions_ztest(conversions, visitors)\nprint(f\"z={z:.2f} p={p:.3f}\")   # decide alpha=0.05 BEFORE running the test\n```",
+  "use_cases_md": "- Reporting typical order value / delivery time with median and p95 instead of mean.\n- Detecting anomalous settlement amounts using mean ± 3 sd (or robust median/MAD).\n- Estimating whether a new search ranking improved conversion via an A/B test.\n- Explaining to stakeholders why a fraud/return-risk model has many false alarms (base rates).\n- Modelling orders-per-day per SKU as Poisson for a forecasting baseline.",
+  "mistakes_md": "- **Reporting the mean of skewed data** — use median/percentiles.\n- **Mixing `n` and `n−1` variance** between numpy and pandas and wondering why numbers differ — pass `ddof` explicitly.\n- **Ignoring base rates** — a \"95% accurate\" detector on a 1% class is mostly false positives.\n- **Peeking at an A/B test** and stopping when p dips below 0.05 — inflates false positives. Fix duration up front.\n- **Treating correlation as causation** — check for confounders (seasonality, marketplace, price changes).",
+  "best_practices_md": "- Always look at the distribution (histogram, percentiles) before choosing a summary statistic.\n- Log-transform heavy-tailed quantities (price, sales) before modelling.\n- State the base rate next to any classifier metric.\n- Pre-register A/B test metric, sample size and alpha.\n- Prefer confidence intervals over a single p-value.",
+  "my_context_md": "His pandas processors in `ECSMarketplaceDataUpload` already `groupby` and aggregate marketplace reports — the natural place to add median/p95 per marketplace instead of means. `AmazonVendorBankRecon` reconciles bank settlements; flagging unusual settlement amounts with a robust z-score (median/MAD) is a direct statistics application. The `GetLlmData` backend stores user votes on LLM answers — comparing vote rates between two prompt versions is exactly a two-proportion A/B test.",
+  "revision_notes_md": "- Skewed data → median, percentiles.\n- Variance: sample ÷(n−1), population ÷n; numpy default ddof=0, pandas ddof=1.\n- sd = sqrt(variance), same units as data.\n- Normal: 68/95/99.7 within 1/2/3 sd.\n- Bayes: P(A|B) = P(B|A)P(A)/P(B); base rates dominate.\n- Standard error = sd/sqrt(n).\n- Correlation ≠ causation; look for confounders.\n- A/B: randomise, one change, fix sample size, no peeking.\n- p-value: P(data this extreme | no effect), not P(variant better).",
+  "exercises_md": "1. For one marketplace report, compute mean, median, p95 and sd of order value per marketplace with pandas; explain which you'd put on a dashboard.\n2. Write a function `posterior(base_rate, recall, fpr)` and tabulate precision for base rates 0.1%, 1%, 10%.\n3. Simulate an A/B test with no real effect 1,000 times, peeking every day and stopping at p<0.05; measure how often you falsely \"win\".\n4. Find two correlated columns in a sales dataset and name a plausible confounder.",
+  "related": [
+    "ai-math-linear-algebra",
+    "ai-model-evaluation",
+    "ai-data-preprocessing",
+    "ai-unsupervised-learning",
+    "pandas-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "Bayes' rule?",
+      "back": "P(A|B) = P(B|A) · P(A) / P(B)."
+    },
+    {
+      "front": "statistics.variance vs statistics.pvariance?",
+      "back": "variance = sample variance (divides by n−1); pvariance = population variance (divides by n)."
+    },
+    {
+      "front": "What does p < 0.05 actually mean?",
+      "back": "If there were no real effect, data this extreme would occur less than 5% of the time. It is not the probability the variant is better."
+    },
+    {
+      "front": "Why median over mean for order values?",
+      "back": "Order values are right-skewed; a few huge orders inflate the mean, while the median reflects a typical order."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A return-fraud model flags 5% of legitimate orders and catches 90% of fraud. Fraud is 1% of orders. Roughly what fraction of flagged orders are actually fraud?",
+      "options": [
+        "About 90%",
+        "About 50%",
+        "About 95%",
+        "About 15%"
+      ],
+      "answer_index": 3,
+      "explanation": "0.9·0.01 / (0.9·0.01 + 0.05·0.99) = 0.009 / 0.0585 ≈ 0.154. The low base rate dominates."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Sales and ad spend are strongly correlated across months. What is the most defensible conclusion?",
+      "options": [
+        "Ad spend causes sales",
+        "They move together; a confounder like seasonality may drive both",
+        "Sales cause ad spend",
+        "The correlation must be a data error"
+      ],
+      "answer_index": 1,
+      "explanation": "Correlation alone cannot establish direction or causation; a randomised experiment is needed."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Sample variance divides the sum of squared deviations by n − ____.",
+      "answers": [
+        "1",
+        "one"
+      ],
+      "explanation": "Bessel's correction: n − 1 gives an unbiased estimate from a sample."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "For heavily right-skewed data such as order values, the ____ is a more robust measure of a typical value than the mean.",
+      "answers": [
+        "median"
+      ],
+      "explanation": "The median ignores the magnitude of extreme values."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import statistics as st\nx = [2, 4, 4, 4, 5, 5, 7, 9]\nprint(st.mean(x), st.median(x), st.pstdev(x))",
+      "answers": [
+        "5 4.5 2.0"
+      ],
+      "explanation": "Mean 40/8 = 5 (int inputs give int mean); median of 4 and 5 = 4.5; population variance = 32/8 = 4, so pstdev = 2.0."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (conditional probability from counts)",
+      "code": "orders = [\n    (\"electronics\", True), (\"electronics\", False), (\"electronics\", True),\n    (\"apparel\", False), (\"apparel\", False), (\"apparel\", True),\n    (\"apparel\", False), (\"electronics\", False),\n]\nreturned = sum(1 for c, r in orders if r)\nelec = [r for c, r in orders if c == \"electronics\"]\nprint(returned / len(orders), sum(elec) / len(elec))",
+      "answers": [
+        "0.375 0.5"
+      ],
+      "explanation": "P(return) = 3/8 = 0.375; P(return | electronics) = 2/4 = 0.5."
+    },
+    {
+      "type": "debug",
+      "prompt": "Two engineers compute the 'variance' of the same column and get different numbers. Why, and how do you make them agree?",
+      "code": "import numpy as np\nimport pandas as pd\ns = pd.Series([10, 12, 14, 30])\nprint(np.var(s.to_numpy()))   # 62.75\nprint(s.var())                # 83.67",
+      "answer": "numpy's `var` defaults to `ddof=0` (population variance, divide by n) while pandas' `.var()` defaults to `ddof=1` (sample variance, divide by n−1). Be explicit:\n\n```python\nnp.var(s.to_numpy(), ddof=1)   # 83.67, matches pandas\ns.var(ddof=0)                  # 62.75, matches numpy\n```\nUse ddof=1 when estimating from a sample.",
+      "rubric": [
+        "Identifies the ddof default difference (n vs n−1)",
+        "Shows passing ddof explicitly",
+        "Knows which one estimates a population from a sample"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would run an A/B test comparing two LLM prompt versions in a chat product, and what pitfalls you'd avoid.",
+      "answer": "1. Pick one primary metric up front (e.g. thumbs-up rate per answer) and a minimum detectable effect.\n2. Compute the required sample size for alpha 0.05 and power 0.8.\n3. Randomly assign **sessions or users** (not individual messages, to avoid one user seeing both) to prompt A or B.\n4. Run until the planned sample size is reached — no peeking/early stopping.\n5. Compare proportions with a two-proportion z-test and report the confidence interval for the difference, plus guardrail metrics like cost per answer and latency.\n\nPitfalls: peeking, changing multiple things at once, novelty effects, uneven traffic mix (one org dominating), and claiming causation from a non-randomised before/after comparison.",
+      "rubric": [
+        "Randomised assignment at user/session level",
+        "Primary metric and sample size decided in advance; no peeking",
+        "Appropriate test (two proportions) and confidence interval",
+        "Mentions at least one pitfall like confounding or multiple changes"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain the base-rate fallacy with an example relevant to ML.",
+      "difficulty": "medium",
+      "answer_md": "The base-rate fallacy is ignoring how rare a class is when interpreting a positive prediction.\n\nExample: 1% of marketplace settlements are erroneous. A detector catches 90% of them (recall) and wrongly flags 5% of correct ones. Out of 10,000 settlements: 100 are bad → 90 flagged; 9,900 are fine → 495 flagged. Total flags = 585, of which only 90 are real: precision ≈ 15%.\n\nSo a model that sounds \"95% accurate\" mostly produces false alarms on a rare class. Implications: report precision/recall rather than accuracy, choose thresholds by the cost of each error type, and consider the review capacity of whoever handles the alerts."
+    },
+    {
+      "question": "When would you report median instead of mean, and what is standard error?",
+      "difficulty": "easy",
+      "answer_md": "Use the **median** (and percentiles) when the data is skewed or has outliers — order values, latency, sales per SKU. One ₹2,50,000 bulk order can move the mean of 1,000 orders a lot but barely moves the median. Latency SLOs use p95/p99 for the same reason.\n\n**Standard error** is the standard deviation of an estimate (like a mean) across repeated samples: `sd / sqrt(n)`. It tells you how precise your estimate is; quadrupling the sample halves the error. It is the basis of confidence intervals: mean ± 1.96·SE gives an approximate 95% interval."
+    }
+  ]
+}

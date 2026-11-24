@@ -1,0 +1,149 @@
+{
+  "slug": "be-pydantic-validation",
+  "title": "Pydantic v2 validation for real-world data",
+  "skill": "pydantic",
+  "extra_skills": [
+    "fastapi",
+    "etl-data-processing",
+    "python-typing"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "pydantic",
+    "validation",
+    "field_validator",
+    "model_validator",
+    "pydantic-settings",
+    "serialization"
+  ],
+  "summary": "Pydantic v2 turns type hints into a fast (Rust-backed) validation and serialization layer. Models declare fields with types and `Field` constraints, custom rules go in `@field_validator` / `@model_validator`, and `model_dump` controls output. It is the backbone of FastAPI request/response handling and an excellent way to validate messy marketplace report rows before they hit Postgres.",
+  "why_md": "- FastAPI request bodies, responses and settings are all Pydantic — you can't use FastAPI well without it.\n- Validating at the boundary turns silent bad data (blank prices, '1,234.50', wrong dates) into explicit, row-level errors.\n- LLM structured outputs (tool calls, JSON mode) are validated with Pydantic models in nearly every AI stack.\n- Interviewers ask about v1→v2 differences, strict vs lax mode and validator types.",
+  "details_md": "### Models and constraints\nA `BaseModel` subclass declares fields with type hints. `Field(...)` adds constraints (`gt`, `ge`, `max_length`, `pattern`), defaults, `alias` (map a column like `\"Order ID\"` to `order_id`) and docs. `Model.model_validate(dict)` parses; `Model.model_validate_json(bytes)` parses JSON directly (faster). Errors raise `ValidationError` listing *every* failing field with `loc`, `msg` and `type`.\n\n### Lax vs strict\nBy default Pydantic is **lax**: `\"42\"` → `42` for an `int`, `\"true\"` → `True`, `\"2024-05-01\"` → `date`. Strict mode (`ConfigDict(strict=True)`, `Field(strict=True)` or `StrictInt`) rejects type mismatches — useful for internal APIs, risky for CSV input where everything is a string.\n\n### Validators\n- `@field_validator(\"price\", mode=\"before\")` runs on the raw input before type coercion — ideal for cleaning `\"1,234.50\"` or `\"\"` → `None`.\n- `mode=\"after\"` (default) receives the already-typed value.\n- `@model_validator(mode=\"after\")` sees the whole model for cross-field rules (`refund <= amount`, `end >= start`).\n- `Annotated[Decimal, AfterValidator(fn)]` makes reusable validated types.\n\n### Serialization\n`model_dump()` → dict, `model_dump(mode=\"json\")` → JSON-safe types, `model_dump_json()` → string; options `exclude_none`, `by_alias`, `include/exclude`. `@field_serializer` customizes output, and `@computed_field` adds derived values.\n\n### Config and settings\n`model_config = ConfigDict(extra=\"forbid\", str_strip_whitespace=True, populate_by_name=True, from_attributes=True)`. The separate `pydantic-settings` package provides `BaseSettings`, which reads env vars / `.env` with types and validation — replacing scattered `os.environ.get` calls.\n\n### Messy report rows\nUse `TypeAdapter(list[Row])` or validate row by row, collecting `ValidationError`s per row index so one bad row doesn't kill a 50k-row upload, then report failures alongside the upload status.",
+  "code_md": "```python\nfrom datetime import date\nfrom decimal import Decimal\nfrom pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator\n\nclass SettlementRow(BaseModel):\n    model_config = ConfigDict(str_strip_whitespace=True, populate_by_name=True, extra=\"ignore\")\n\n    order_id: str = Field(alias=\"Order ID\", min_length=5)\n    posted: date = Field(alias=\"Posted Date\")\n    amount: Decimal = Field(alias=\"Amount\")\n    refund: Decimal | None = Field(default=None, alias=\"Refund\")\n\n    @field_validator(\"amount\", \"refund\", mode=\"before\")\n    @classmethod\n    def clean_money(cls, v):\n        if isinstance(v, str):\n            v = v.replace(\",\", \"\").replace(\"$\", \"\").strip()\n            return v or None          # \"\" -> None\n        return v\n\n    @model_validator(mode=\"after\")\n    def refund_not_bigger(self):\n        if self.refund is not None and abs(self.refund) > abs(self.amount):\n            raise ValueError(\"refund exceeds amount\")\n        return self\n\ngood, bad = [], []\nfor i, raw in enumerate(rows):          # rows = df.to_dict(\"records\")\n    try:\n        good.append(SettlementRow.model_validate(raw))\n    except ValidationError as e:\n        bad.append({\"row\": i, \"errors\": e.errors(include_url=False)})\n```\n\n```python\nfrom pydantic import SecretStr\nfrom pydantic_settings import BaseSettings, SettingsConfigDict\n\nclass Settings(BaseSettings):\n    model_config = SettingsConfigDict(env_file=\".env\", env_prefix=\"APP_\")\n    db_dsn: SecretStr                 # APP_DB_DSN, hidden in repr/logs\n    pool_max: int = 10                # APP_POOL_MAX=\"20\" -> 20\n    debug: bool = False\n\nsettings = Settings()                 # fails fast at startup if APP_DB_DSN missing\nprint(settings.model_dump(exclude={\"db_dsn\"}))\n```",
+  "use_cases_md": "- Validating each row of a marketplace settlement/inventory report before `execute_values` into Postgres, writing failed rows to an errors table.\n- FastAPI request/response models (`OrderCreate`, `OrderOut`) so internal columns never leak.\n- Typed service config via `BaseSettings` instead of `os.environ` lookups scattered across modules.\n- Parsing third-party API responses (SP-API JSON) into models so missing fields fail loudly.\n- Validating LLM JSON output (e.g. generated SQL metadata) before executing anything.",
+  "mistakes_md": "- **Using v1 APIs** (`.dict()`, `.parse_obj()`, `@validator`): deprecated in v2 — use `model_dump`, `model_validate`, `@field_validator`.\n- **Forgetting `mode=\"before\"`** when cleaning strings: an after-validator never sees `\"1,234.50\"` because type coercion already failed.\n- **Using `float` for money**: use `Decimal`.\n- **Mutable defaults**: Pydantic copies them safely, but prefer `Field(default_factory=list)` for clarity.\n- **Validating a whole file in one call and aborting on first bad row**: validate per row and collect errors.\n- **Returning ORM/dict objects with extra fields** without a response model — leaks internals.",
+  "best_practices_md": "- Validate at the boundaries (HTTP input, files, third-party APIs, LLM output); trust typed objects inside.\n- Separate input, DB and output models.\n- Use `extra=\"forbid\"` on API inputs to catch typos; `extra=\"ignore\"` for wide vendor reports.\n- Prefer `Annotated` reusable types (e.g. `Money = Annotated[Decimal, ...]`).\n- Keep validators pure and fast; no DB calls inside validators.\n- Use `SecretStr` for secrets and `BaseSettings` for config.",
+  "my_context_md": "Your `ECSMarketplaceDataUpload` processors (150+ of them) clean reports with pandas `rename`/`apply`; a Pydantic row model per report type would turn that implicit cleaning into declared, testable rules and give per-row error reporting for the upload status tracking you already have. Your `ECSInventoryPriceTracking` config uses `@dataclass`; `pydantic-settings` would add env loading and type validation on top. You haven't used Pydantic yet, so this is new ground that maps directly onto FastAPI.",
+  "revision_notes_md": "- `BaseModel` + type hints + `Field(gt=, max_length=, alias=)`.\n- Parse: `model_validate(dict)`, `model_validate_json(bytes)`; dump: `model_dump(mode=\"json\", exclude_none=True, by_alias=True)`.\n- Lax by default (\"42\"→42); strict via `ConfigDict(strict=True)` / `StrictInt`.\n- `@field_validator(..., mode=\"before\")` for raw cleaning; after for typed checks; `@model_validator(mode=\"after\")` for cross-field rules.\n- `ValidationError.errors()` gives loc/msg/type for every failure.\n- `ConfigDict(extra=\"forbid\", str_strip_whitespace=True, from_attributes=True)`.\n- `pydantic-settings` `BaseSettings` reads env vars; `SecretStr` hides secrets.\n- `TypeAdapter(list[Row])` validates non-model types.",
+  "exercises_md": "1. Pick one marketplace report processor and write a Pydantic row model for it (aliases for the raw column names, money as Decimal, blank → None). Validate a real sample file and print the error count per field.\n2. Add a `@model_validator` enforcing a cross-field rule from that report (e.g. `ship_date >= order_date`).\n3. Replace one service's `os.environ.get` config with a `BaseSettings` class and make startup fail on missing variables.\n4. Benchmark `model_validate` per row vs `TypeAdapter(list[Row]).validate_python(rows)` on 50k rows.",
+  "related": [
+    "fastapi-essentials",
+    "python-typing",
+    "pandas-cleaning-performance",
+    "be-api-error-handling",
+    "ai-structured-outputs"
+  ],
+  "flashcards": [
+    {
+      "front": "v2 replacements for `.dict()`, `.parse_obj()`, `@validator`?",
+      "back": "`model_dump()`, `model_validate()`, `@field_validator`."
+    },
+    {
+      "front": "When do you need `mode=\"before\"` on a field validator?",
+      "back": "When you must transform the raw input before type coercion, e.g. strip '1,234.50' commas or turn '' into None."
+    },
+    {
+      "front": "Lax vs strict mode?",
+      "back": "Lax (default) coerces compatible inputs ('42'→42); strict rejects type mismatches."
+    },
+    {
+      "front": "How do you load typed config from env vars?",
+      "back": "`pydantic-settings` `BaseSettings` with `SettingsConfigDict(env_prefix=..., env_file=...)`."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A field is declared `qty: int` in a default (lax) Pydantic v2 model. Which input fails validation?",
+      "options": [
+        "\"7\"",
+        "7.0",
+        "\"7.5\"",
+        "7"
+      ],
+      "answer_index": 2,
+      "explanation": "Lax mode accepts numeric strings like \"7\" and floats with no fractional part like 7.0, but \"7.5\" would lose data, so it fails with an int_parsing error."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You need to reject a row where `refund_amount` exceeds `order_amount`. Which tool fits best?",
+      "options": [
+        "`@model_validator(mode=\"after\")`",
+        "`Field(gt=0)` on refund_amount",
+        "`@field_validator(\"refund_amount\", mode=\"before\")`",
+        "`ConfigDict(strict=True)`"
+      ],
+      "answer_index": 0,
+      "explanation": "Cross-field rules need the whole model; an after-model validator sees all typed fields."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In Pydantic v2, convert a model instance to a JSON-safe dict with `order.model_dump(mode=\"____\")`.",
+      "answers": [
+        "json"
+      ],
+      "explanation": "`mode=\"json\"` converts Decimal, date, UUID etc. to JSON-compatible types."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To make unknown keys in a request body raise an error, set `model_config = ConfigDict(extra=\"____\")`.",
+      "answers": [
+        "forbid"
+      ],
+      "explanation": "`extra` can be 'ignore' (default), 'allow' or 'forbid'."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib function mimics a `mode=\"before\"` money cleaner applied to messy report values. What does it print?",
+      "code": "from decimal import Decimal, InvalidOperation\n\ndef clean_money(v):\n    if isinstance(v, str):\n        v = v.replace(\",\", \"\").replace(\"$\", \"\").strip()\n        if not v:\n            return None\n    try:\n        return Decimal(v)\n    except InvalidOperation:\n        return \"ERROR\"\n\nfor raw in [\"$1,234.50\", \"  \", \"12.3.4\", 7]:\n    print(repr(raw), \"->\", clean_money(raw))\n",
+      "answers": [
+        "'$1,234.50' -> 1234.50\n'  ' -> None\n'12.3.4' -> ERROR\n7 -> 7"
+      ],
+      "explanation": "Commas and $ are stripped before parsing, blank strings become None, '12.3.4' isn't a valid decimal, and int 7 converts to Decimal('7') which prints as 7."
+    },
+    {
+      "type": "debug",
+      "prompt": "Rows with amounts like \"1,299.00\" still fail with a decimal parsing error. Why, and how do you fix it?",
+      "code": "from decimal import Decimal\nfrom pydantic import BaseModel, field_validator\n\nclass Row(BaseModel):\n    amount: Decimal\n\n    @field_validator(\"amount\")\n    @classmethod\n    def strip_commas(cls, v):\n        return Decimal(str(v).replace(\",\", \"\"))\n",
+      "answer": "`@field_validator` defaults to `mode=\"after\"`, which runs **after** Pydantic has already tried to parse \"1,299.00\" as Decimal — that parse fails, so the validator never runs. Use a before-validator:\n\n```python\n    @field_validator(\"amount\", mode=\"before\")\n    @classmethod\n    def strip_commas(cls, v):\n        if isinstance(v, str):\n            return v.replace(\",\", \"\").strip()\n        return v\n```\nReturn the cleaned raw value and let Pydantic do the Decimal conversion.",
+      "rubric": [
+        "After-validators run after type coercion",
+        "Coercion of '1,299.00' fails first so validator is never reached",
+        "Fix with mode='before' and return the cleaned raw value"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior how you'd validate a 50,000-row marketplace report with Pydantic without one bad row failing the whole upload.",
+      "answer": "Define a row model with aliases matching the report's column headers, `Decimal` for money, `date` for dates, and before-validators that clean strings (strip commas/currency symbols, blank → None). Read the file (pandas or csv), then validate **row by row** inside `try/except ValidationError`, appending valid models to one list and `{row_index, e.errors()}` to an error list. Insert the valid rows in batches (`execute_values`), write errors to an errors table or the upload status record, and mark the upload `partial` if any failed. For speed, `TypeAdapter(list[Row])` validates all rows at once but then errors are reported together — row-by-row is clearer for partial acceptance.",
+      "rubric": [
+        "Row model with aliases, Decimal/date types, before-validators for cleaning",
+        "Per-row try/except ValidationError collecting errors with row index",
+        "Insert valid rows in batch and record failures/status"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What problems does `pydantic-settings` `BaseSettings` solve compared with `os.environ.get` calls across a codebase?",
+      "answer": "It centralizes config in one typed class: values are read from env vars / `.env`, **converted** (`\"20\"` → `20`, `\"true\"` → `True`), **validated**, and missing required values fail at startup instead of deep in a request. `SecretStr` keeps secrets out of logs, defaults are documented in one place, and tests can construct `Settings(pool_max=1)` directly.",
+      "rubric": [
+        "Typed conversion and validation of env vars",
+        "Fail fast on missing required config",
+        "Single source of truth; SecretStr for secrets"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What changed between Pydantic v1 and v2 that you'd care about in a production service?",
+      "difficulty": "medium",
+      "answer_md": "v2 rewrote the core in Rust (`pydantic-core`), making validation roughly an order of magnitude faster for typical models — significant when validating large payloads or every row of a report. The API was renamed: `.dict()` → `model_dump()`, `.json()` → `model_dump_json()`, `parse_obj` → `model_validate`, `parse_raw` → `model_validate_json`, `@validator` → `@field_validator`, `@root_validator` → `@model_validator`, and `class Config` → `model_config = ConfigDict(...)`. `orm_mode` became `from_attributes`. Settings moved to the separate `pydantic-settings` package. Validators gained explicit `mode=\"before\"/\"after\"/\"wrap\"`, and there's first-class strict mode and `TypeAdapter` for validating non-model types like `list[Row]`. In migration, I'd watch for subtle coercion changes (v2 is stricter in places, e.g. int fields no longer accept 7.5) and run the test suite with deprecation warnings as errors."
+    },
+    {
+      "question": "Where should validation live in a backend service, and why not just validate in SQL constraints?",
+      "difficulty": "medium",
+      "answer_md": "Validate at **every trust boundary**: HTTP input (FastAPI models), files and reports, third-party API responses, and LLM outputs. Inside the service, work with typed objects and don't re-validate everywhere. Pydantic gives *early, descriptive, per-field* errors you can return to users (422 with `loc`) or attach to a failed report row.\n\nDatabase constraints (`NOT NULL`, `CHECK`, `UNIQUE`, FKs) are still essential — they're the last line of defense against bugs and concurrent writers, and they protect data written by other services sharing the database. But they give poor error messages, fail an entire batch insert on the first bad row, and only fire after you've done the work. So use both: Pydantic for friendly, early validation and cleaning; constraints for invariants that must never be violated."
+    }
+  ]
+}

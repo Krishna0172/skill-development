@@ -1,0 +1,150 @@
+{
+  "slug": "ai-tokenization",
+  "title": "Tokenization: BPE, token counts and their cost",
+  "skill": "deep-learning",
+  "extra_skills": [
+    "llm-applications",
+    "nlp-basics"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "tokenization",
+    "bpe",
+    "wordpiece",
+    "tokens",
+    "context-window",
+    "cost",
+    "multilingual"
+  ],
+  "summary": "LLMs don't see characters or words — they see tokens produced by subword tokenizers like BPE and WordPiece. Token counts drive API cost, latency and context-window limits, and they vary a lot by language, numbers, code and formatting: Hindi or Tamil text typically costs several times more tokens than the same message in English.",
+  "why_md": "- You are billed per token, and context windows are measured in tokens — not characters or words.\n- Token-aware design (trimming history, compact formats) directly cuts LLM cost in a product that tracks per-org USD spend.\n- Tokenization explains odd LLM behaviour: bad arithmetic on long numbers, miscounting letters, trailing-space sensitivity.\n- Indian-language content (Hindi, Tamil) can cost multiples of English — a real budgeting issue for Indian e-commerce.\n- Interview topic: \"what is a token and why does it matter?\", \"how does BPE work?\"",
+  "details_md": "### Why subwords\nWord-level vocabularies explode (every SKU code, typo and inflection) and can't handle unseen words. Character-level sequences are too long. Subword tokenizers sit in between: frequent words become one token, rare words split into pieces (`\"unboxing\"` → `\"un\" + \"box\" + \"ing\"`), and anything can still be encoded.\n\n### BPE (Byte-Pair Encoding)\nTraining: start from bytes/characters; count adjacent pairs across a corpus; merge the most frequent pair into a new token; repeat until the vocabulary reaches the target size (tens to hundreds of thousands). Encoding applies the learned merges in order. **Byte-level BPE** (GPT family, Llama 3, many others) starts from raw UTF-8 bytes, so any string — emoji, Devanagari, binary-ish junk — can be encoded with no unknown token.\n\n### WordPiece and SentencePiece\nWordPiece (BERT) is similar but picks merges that maximise corpus likelihood; continuation pieces are marked `##` (`\"charger\"` → `\"charge\", \"##r\"`). SentencePiece (T5, many multilingual models) treats the input as a raw stream including spaces (`▁` marks word starts) and supports BPE or unigram models.\n\n### Tokens vs words\nRough English rule: 1 token ≈ 4 characters ≈ 0.75 words. Rules break down for code, JSON, numbers, URLs and non-English text. Always measure with the model's own tokenizer — different model families tokenize the same text differently, so counts aren't portable.\n\n### Why counts matter\n- **Cost**: price = input tokens × input rate + output tokens × output rate.\n- **Context window**: system prompt + chat history + retrieved documents + output must fit.\n- **Latency**: more input tokens → slower prefill; more output tokens → linearly slower generation.\n\n### Multilingual and number quirks\nTokenizers trained mostly on English learn few merges for Devanagari or Tamil script. Each such character is 3 bytes in UTF-8, so text may fall back to byte-level pieces: Hindi/Tamil often take 3-8x the tokens of equivalent English (newer tokenizers with bigger multilingual vocabularies narrow the gap). Numbers are split into chunks (`\"1234567\"` → `\"123\", \"456\", \"7\"` in some tokenizers), which is one reason LLMs are unreliable at exact arithmetic — compute in code instead. Whitespace and capitalisation change tokens too (`\"Hello\"` vs `\" hello\"`).",
+  "code_md": "```python\n# Count tokens with a real tokenizer before sending a prompt\nimport tiktoken                                  # OpenAI-style BPE tokenizers\nenc = tiktoken.get_encoding(\"o200k_base\")\n\nfor text in [\"Your order has been shipped\",\n             \"आपका ऑर्डर भेज दिया गया है\",          # same message in Hindi\n             \"உங்கள் ஆர்டர் அனுப்பப்பட்டது\",      # Tamil\n             \"SKU-AB12-9981734\"]:\n    ids = enc.encode(text)\n    print(len(text), len(ids), [enc.decode([i]) for i in ids][:8])\n\n# For Hugging Face / local models, use that model's tokenizer:\n# from transformers import AutoTokenizer\n# tok = AutoTokenizer.from_pretrained(\"Qwen/Qwen2.5-0.5B-Instruct\")\n# len(tok(text)[\"input_ids\"])\n```\n\n```python\n# Budget chat history to fit a context limit (keep system prompt + newest turns)\ndef fit_history(system: str, turns: list[str], count, max_tokens: int, reserve_output: int = 800):\n    budget = max_tokens - reserve_output - count(system)\n    kept = []\n    for turn in reversed(turns):                 # newest first\n        n = count(turn)\n        if n > budget:\n            break\n        kept.append(turn)\n        budget -= n\n    return [system] + kept[::-1]\n\n# cost estimate per request (rates per million tokens are inputs, not hardcoded truths)\ndef cost_usd(in_tok, out_tok, in_rate_per_m, out_rate_per_m):\n    return in_tok * in_rate_per_m / 1e6 + out_tok * out_rate_per_m / 1e6\n```",
+  "use_cases_md": "- Estimating monthly LLM spend per org from token counts × price.\n- Trimming chat history to fit the context window without dropping the system prompt.\n- Choosing chunk sizes for RAG in tokens, not characters.\n- Budgeting Hindi/Tamil customer-support automation (more tokens per message).\n- Formatting structured data compactly (CSV-like rows instead of verbose JSON) to cut prompt tokens.",
+  "mistakes_md": "- **Estimating tokens from characters/words** for non-English, code or JSON — often off by multiples. Use the tokenizer.\n- **Using one model's tokenizer to count for another** — counts differ across model families.\n- **Forgetting output tokens and the system prompt** in context budgeting.\n- **Asking the LLM to do exact arithmetic on long numbers** — tokenization splits digits unpredictably; compute in Python/SQL.\n- **Truncating text by characters** mid-token or mid-UTF-8 sequence for Indic scripts — truncate by tokens.\n- **Verbose prompts** (pretty-printed JSON, repeated instructions) multiplied over millions of calls.",
+  "best_practices_md": "- Count tokens with the target model's tokenizer (or the provider's token-counting endpoint).\n- Log input/output tokens per request and aggregate cost per org/feature.\n- Reserve output tokens when budgeting context.\n- Chunk RAG documents by token count with small overlaps.\n- Use compact formats and avoid redundant whitespace in large prompts.\n- Test cost/latency separately for each language you support.",
+  "my_context_md": "`GetLlmData` / `ECSLlmQueryProcess` already track per-org USD cost for an LLM chat product and store chat sessions and message history. Cost there is a function of tokens, so logging input/output token counts per message (and trimming history by token budget) is the direct lever on that cost. If the product's users write in Hindi or Tamil, their messages will cost noticeably more tokens than English ones — worth measuring per language.",
+  "revision_notes_md": "- Models see token IDs, not words.\n- Subword tokenizers: BPE (merge frequent pairs), WordPiece (`##`), SentencePiece (`▁`).\n- Byte-level BPE: no unknown tokens; UTF-8 bytes as base.\n- English ≈ 4 chars/token ≈ 0.75 words/token.\n- Hindi/Tamil: Indic chars are 3 UTF-8 bytes; often 3-8x more tokens than English.\n- Numbers split into chunks → weak exact arithmetic.\n- Cost = in_tokens·in_rate + out_tokens·out_rate.\n- Context = system + history + retrieved docs + output.\n- Always count with the target model's tokenizer.",
+  "exercises_md": "1. Tokenize 20 real customer messages in English and their Hindi/Tamil equivalents with two different tokenizers; tabulate tokens per message and cost ratio.\n2. Add input/output token logging to a mock chat endpoint and a SQL query aggregating cost per org per day.\n3. Implement `fit_history` and unit-test it with a fake `count` function (e.g. `len(s.split())`).\n4. Implement toy BPE training (merge the most frequent pair 10 times) on a list of product titles and inspect the merges.",
+  "related": [
+    "ai-transformers",
+    "ai-embeddings",
+    "ai-context-tokens-cost",
+    "ai-chunking",
+    "ai-llm-fundamentals"
+  ],
+  "flashcards": [
+    {
+      "front": "How does BPE training work?",
+      "back": "Start from characters/bytes, repeatedly merge the most frequent adjacent pair into a new token until the vocabulary reaches the target size."
+    },
+    {
+      "front": "Rough English tokens-to-characters ratio?",
+      "back": "≈ 4 characters per token, ≈ 0.75 words per token — only for English prose."
+    },
+    {
+      "front": "Why does Hindi/Tamil text cost more tokens?",
+      "back": "Tokenizers have fewer merges for those scripts and each character is 3 UTF-8 bytes, so text splits into many more pieces."
+    },
+    {
+      "front": "What must fit in the context window?",
+      "back": "System prompt + conversation history + retrieved context + tool definitions + the generated output."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Why can a byte-level BPE tokenizer encode any string without an 'unknown' token?",
+      "options": [
+        "It has every word in its vocabulary",
+        "Its base vocabulary includes all 256 byte values, so anything can fall back to bytes",
+        "It removes characters it doesn't know",
+        "It translates input to English first"
+      ],
+      "answer_index": 1,
+      "explanation": "Starting from raw bytes guarantees coverage; merges just make common sequences shorter."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your chat feature's LLM bill doubled after launching in Tamil Nadu, with the same number of messages. Most likely cause?",
+      "options": [
+        "Tamil prompts produce shorter outputs",
+        "The provider charges per character",
+        "Tamil text tokenizes into many more tokens than equivalent English",
+        "Context windows are smaller for Tamil"
+      ],
+      "answer_index": 2,
+      "explanation": "Cost is per token, and Indic scripts typically need several times more tokens."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In WordPiece tokenization (BERT), continuation pieces of a word are prefixed with ____.",
+      "answers": [
+        "##"
+      ],
+      "explanation": "e.g. 'charger' → 'charge', '##r'."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Each Devanagari or Tamil character takes ____ bytes in UTF-8.",
+      "answers": [
+        "3",
+        "three"
+      ],
+      "explanation": "Code points U+0800–U+FFFF use 3 bytes in UTF-8."
+    },
+    {
+      "type": "output",
+      "prompt": "UTF-8 bytes of the same message in English and Hindi. What does this print?",
+      "code": "en = \"order shipped\"\nhi = \"ऑर्डर भेजा\"\nfor s in (en, hi):\n    print(len(s), len(s.encode(\"utf-8\")))",
+      "answers": [
+        "13 13\n10 28"
+      ],
+      "explanation": "English: 13 ASCII chars = 13 bytes. Hindi: 10 code points (9 Devanagari at 3 bytes + 1 space) = 28 bytes. A byte-level tokenizer with few Hindi merges sees far more pieces."
+    },
+    {
+      "type": "output",
+      "prompt": "One BPE training step: find the most frequent adjacent pair. What does this print?",
+      "code": "from collections import Counter\ncorpus = [list(\"charger\"), list(\"charge\"), list(\"char\")]\npairs = Counter()\nfor word in corpus:\n    pairs.update(zip(word, word[1:]))\nbest = max(pairs.items(), key=lambda kv: (kv[1], kv[0]))\nprint(best)\nmerged = []\nfor word in corpus:\n    out, i = [], 0\n    while i < len(word):\n        if i + 1 < len(word) and (word[i], word[i + 1]) == best[0]:\n            out.append(word[i] + word[i + 1]); i += 2\n        else:\n            out.append(word[i]); i += 1\n    merged.append(out)\nprint(merged[2])",
+      "answers": [
+        "(('h', 'a'), 3)\n['c', 'ha', 'r']"
+      ],
+      "explanation": "'ch', 'ha' and 'ar' each appear 3 times; ties are broken by the pair itself (max picks the lexicographically largest: ('h','a')). Merging gives 'char' → ['c', 'ha', 'r']. Real BPE repeats this thousands of times."
+    },
+    {
+      "type": "debug",
+      "prompt": "This helper keeps chat requests under an 8k-token context limit, but requests still fail with 'context length exceeded', mostly for Hindi users. Why?",
+      "code": "MAX_CONTEXT = 8000\n\ndef build_prompt(system, history, user_msg):\n    prompt = system + \"\\n\" + \"\\n\".join(history) + \"\\n\" + user_msg\n    # ~4 chars per token\n    while len(prompt) / 4 > MAX_CONTEXT:\n        history = history[1:]\n        prompt = system + \"\\n\" + \"\\n\".join(history) + \"\\n\" + user_msg\n    return prompt",
+      "answer": "1. The 4-chars-per-token heuristic only holds for English; Hindi text uses several times more tokens per character, so the estimate is far too low.\n2. No room is reserved for the **output** tokens (max_tokens) — they count against the context window.\n3. (Minor) it rebuilds the whole string each loop.\n\nFix: count with the model's tokenizer and reserve output:\n\n```python\ndef build_prompt(system, history, user_msg, count_tokens, max_context=8000, max_output=800):\n    budget = max_context - max_output - count_tokens(system) - count_tokens(user_msg)\n    kept = []\n    for turn in reversed(history):\n        n = count_tokens(turn)\n        if n > budget:\n            break\n        kept.append(turn)\n        budget -= n\n    return \"\\n\".join([system, *reversed(kept), user_msg])\n```",
+      "rubric": [
+        "Character heuristic fails for non-English (Hindi) text",
+        "Must count with the model's real tokenizer",
+        "Reserve tokens for the output / max_tokens"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a product manager what a token is and why our LLM cost depends on language and prompt design.",
+      "answer": "LLMs read and write text in **tokens** — chunks of text from a fixed vocabulary learned from training data. Common English words are usually one token; rare words, codes, numbers and non-English scripts get split into many smaller pieces. Providers bill per token (input and output, output usually pricier), and the model's memory limit (context window) is in tokens. So: (1) the same message in Hindi or Tamil can cost several times more than in English because the tokenizer splits it into more pieces; (2) long chat histories, verbose instructions and big pasted documents are re-sent every turn and billed every time; (3) long answers cost more and take longer. Levers: trim history, summarise old turns, keep prompts tight, cap output length, and measure tokens per feature and language.",
+      "rubric": [
+        "Token = subword chunk from model vocabulary, not a word/char",
+        "Billing and context limits are per token (input + output)",
+        "Language and formatting change token counts",
+        "Concrete levers to reduce tokens"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain BPE tokenization and its consequences for LLM behaviour.",
+      "difficulty": "medium",
+      "answer_md": "**BPE** learns a vocabulary by starting from bytes (or characters) and repeatedly merging the most frequent adjacent pair in a training corpus, e.g. `t`+`h` → `th`, then `th`+`e` → `the`. After tens of thousands of merges, frequent words are single tokens and rare strings are split into pieces. Encoding new text applies the merges in order.\n\nConsequences:\n- **No unknown words** with byte-level BPE, but rare strings become many tokens.\n- **Language bias**: corpora dominated by English give English efficient tokens; Hindi/Tamil cost more and fit less into the context.\n- **Character-level blind spots**: the model sees `\"strawberry\"` as a few tokens, so counting letters or reversing strings is error-prone.\n- **Numbers** are chunked inconsistently, hurting exact arithmetic — do math in code.\n- **Whitespace/case sensitivity**: `\" Hello\"` and `\"hello\"` are different tokens; prompt formatting affects outputs subtly.\n- Token counts differ between model families, so budgets must use the target model's tokenizer."
+    },
+    {
+      "question": "How would you control LLM cost in a multi-tenant chat product?",
+      "difficulty": "hard",
+      "answer_md": "1. **Measure**: log input/output tokens, model and computed cost per message; aggregate per org/feature/language in Postgres.\n2. **Trim context**: keep the system prompt + last N turns within a token budget; summarise older turns; retrieve only relevant context (RAG) instead of dumping schemas or documents.\n3. **Cap output**: `max_tokens`, concise formats (JSON with short keys, or SQL only), stop sequences.\n4. **Right-size models**: route simple requests to a smaller/cheaper model; use the large model only when needed.\n5. **Caching**: prompt caching for large static prefixes (system prompt, schema); response caching for repeated questions.\n6. **Per-tenant budgets/rate limits** with alerts.\n7. **Language awareness**: measure token inflation for Hindi/Tamil and price or budget accordingly; consider models with better multilingual tokenizers.\n\nThe principle: tokens are the unit of cost and latency, so make them observable and then minimise unnecessary ones."
+    }
+  ]
+}

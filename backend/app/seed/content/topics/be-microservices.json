@@ -1,0 +1,155 @@
+{
+  "slug": "be-microservices",
+  "title": "Microservices: boundaries, communication and data ownership",
+  "skill": "system-design",
+  "extra_skills": [
+    "backend-architecture",
+    "message-queues",
+    "database-design"
+  ],
+  "category": "Backend",
+  "difficulty": "advanced",
+  "tags": [
+    "microservices",
+    "service-boundaries",
+    "sagas",
+    "outbox",
+    "shared-database",
+    "observability",
+    "modular-monolith"
+  ],
+  "summary": "Microservices split a system into independently deployable services, each owning its data and communicating via APIs or events. The benefits — independent deploys, scaling and team autonomy — come only with clear boundaries and data ownership; a shared database couples everything back together. Cross-service workflows use sagas and the outbox pattern instead of distributed transactions, and need strong observability. For many teams a modular monolith is the better start.",
+  "why_md": "- Many 'microservice' estates are really a distributed monolith: many deployables, one shared schema, all the costs with few of the benefits.\n- Designing boundaries, choosing sync vs async calls and handling partial failure are core senior backend skills.\n- Sagas, outbox and idempotent consumers come up in system design interviews.\n- AI systems are often split into services (ingestion, embedding, retrieval, generation) — the same trade-offs apply.",
+  "details_md": "### Boundaries\nA good service maps to a **business capability** (orders, billing, report ingestion, catalog) with a cohesive model and a small, stable API — not to a technical layer ('the DB service') or a single function. Signals of a bad boundary: every feature changes several services together, chatty synchronous calls, shared tables.\n\n### Data ownership and the shared-database anti-pattern\nEach service owns its tables; others access the data **through its API or events**, never by querying its tables. With a shared database: schema changes ripple across unknown consumers, one service's heavy query or lock affects all, connection limits are shared, and nobody can deploy independently. Migrating out gradually: assign an owner per table, put a read API or views in front, publish change events, then move tables into separate schemas/databases.\n\n### Communication\n- **Synchronous** (HTTP/gRPC): simple request/response, but availability multiplies (three services at 99.9% ≈ 99.7%) and latency adds up. Use timeouts, retries with backoff for idempotent calls, and circuit breakers.\n- **Asynchronous** (queues/events): producer doesn't wait; consumers process at their pace; better resilience and decoupling, but eventual consistency and harder debugging. Events should be facts (`ReportProcessed{report_id, seller_id}`), consumers idempotent.\n\n### Distributed transactions → sagas\nTwo-phase commit across services is rarely practical. A **saga** is a sequence of local transactions; if a step fails, earlier steps are undone by **compensating actions** (refund, release reservation). Orchestrated (a coordinator drives steps) or choreographed (services react to events).\n\n### Outbox pattern\nThe dual-write problem: commit to DB, then publish to queue — a crash between them loses the event. Instead insert the event into an `outbox` table **in the same transaction** as the business change; a relay process publishes outbox rows and marks them sent (at-least-once).\n\n### Observability\nDistributed tracing (OpenTelemetry) with propagated trace/request IDs, structured logs, per-service RED metrics (rate, errors, duration), and dashboards for queue depth/DLQs.\n\n### When a monolith is better\nSmall team, unclear domain, low scale: a **modular monolith** (clear modules, enforced boundaries, one deployable, one database with schema-per-module) gives most of the design benefits without network failures, distributed debugging and deployment overhead. Extract services when a module needs independent scaling, deploy cadence or isolation.",
+  "code_md": "```python\n# Outbox: business change + event in ONE local transaction\nimport json\n\ndef mark_report_processed(conn, report_id: int, seller_id: int, rows: int):\n    with conn.cursor() as cur:\n        cur.execute(\"UPDATE reports SET status='processed', row_count=%s WHERE id=%s\",\n                    (rows, report_id))\n        cur.execute(\"INSERT INTO outbox(topic, payload) VALUES (%s, %s)\",\n                    (\"report.processed\", json.dumps({\"report_id\": report_id, \"seller_id\": seller_id})))\n    conn.commit()                                   # both or neither\n\ndef relay_outbox(conn, publish):                    # separate loop/process\n    with conn.cursor() as cur:\n        cur.execute('''SELECT id, topic, payload FROM outbox WHERE sent_at IS NULL\n                       ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED''')\n        for oid, topic, payload in cur.fetchall():\n            publish(topic, payload)                 # at-least-once: consumers must dedupe\n            cur.execute(\"UPDATE outbox SET sent_at = now() WHERE id = %s\", (oid,))\n    conn.commit()\n```\n\n```python\n# Calling another service: timeout, limited retries, propagated request id\nimport httpx\n\nasync def get_seller(client: httpx.AsyncClient, seller_id: int, request_id: str):\n    for attempt in range(3):\n        try:\n            r = await client.get(f\"http://catalog/sellers/{seller_id}\",\n                                 headers={\"X-Request-ID\": request_id}, timeout=2.0)\n            if r.status_code < 500:\n                r.raise_for_status()\n                return r.json()\n        except httpx.TransportError:\n            pass                                    # network/timeout -> retry\n        await asyncio.sleep(0.2 * 2 ** attempt)\n    raise UpstreamDown(\"catalog unavailable\")       # mapped to 503 by a handler\n```",
+  "use_cases_md": "- Splitting report ingestion (heavy, bursty) from the dashboard API (latency-sensitive) so each scales independently.\n- Publishing `report.processed` events so the LLM/analytics service refreshes embeddings or aggregates without the ingestion service knowing about it.\n- An order → reserve inventory → charge → confirm saga with compensations.\n- Giving each of many services its own Postgres role with access only to its schema as a first step out of a shared database.\n- Tracing a slow dashboard request across API → catalog → pricing services.",
+  "mistakes_md": "- **Shared database** across services: hidden coupling, can't change schemas safely, noisy neighbours.\n- **Splitting too early/too fine** (nano-services): network calls replace function calls, deploys must be coordinated.\n- **Chains of synchronous calls**: latency adds up, availability multiplies down, cascading failures without timeouts/circuit breakers.\n- **Dual writes** (DB then queue) without outbox → lost or phantom events.\n- **Non-idempotent consumers** with at-least-once delivery.\n- **No tracing/correlation IDs** → debugging is guesswork.\n- **Shared 'common' library containing domain models** that forces lockstep upgrades.",
+  "best_practices_md": "- Boundaries by business capability; each service owns its data.\n- Prefer async events between services; sync calls with timeouts, retries (idempotent only) and circuit breakers.\n- Outbox for reliable event publishing; idempotent consumers.\n- Sagas with explicit compensations instead of distributed transactions.\n- Version APIs and events; make changes backward compatible.\n- OpenTelemetry tracing, structured logs with request IDs, RED metrics.\n- Start with a modular monolith; extract with evidence.",
+  "my_context_md": "Your work repo has 179 services (~600k lines) on one PostgreSQL — a large instance of the shared-database pattern discussed here. That's not automatically wrong (it's simple and allows SQL joins across domains), but it means schema changes, long transactions and connection usage in one service affect the others; `AmazonVendorBankRecon/db.py`'s PgBouncer setup is part of how such estates cope with connection limits. Useful exercise: for one domain (e.g. marketplace uploads), list which services read and write its tables — that's its real coupling map.",
+  "revision_notes_md": "- Service = business capability + owns its data + independent deploy.\n- Shared DB = distributed monolith: coupling, noisy neighbours, no independent schema changes.\n- Sync (HTTP/gRPC): simple, but latency adds and availability multiplies; timeouts + circuit breakers.\n- Async events: decoupled, resilient, eventually consistent; idempotent consumers.\n- Saga: local transactions + compensations (orchestration or choreography).\n- Outbox: write event in same tx; relay publishes at-least-once.\n- Observability: tracing, request IDs, RED metrics, DLQ dashboards.\n- Modular monolith first; extract when scaling/deploy/isolation demands it.",
+  "exercises_md": "1. Pick one domain from your services and map every service that reads or writes its tables; propose an owner and an API/event contract.\n2. Implement the outbox pattern with a Postgres table and a relay loop publishing to a local queue; kill the relay mid-batch and verify no event is lost (and duplicates are handled).\n3. Write an orchestrated saga for 'reserve inventory → charge → confirm' with compensations, and test failure at each step.\n4. Instrument two tiny FastAPI services with request-ID propagation and show one request's logs across both.",
+  "related": [
+    "be-system-design-fundamentals",
+    "be-background-tasks",
+    "message-queues",
+    "be-api-error-handling",
+    "py-clean-architecture",
+    "retries-backoff-idempotency"
+  ],
+  "flashcards": [
+    {
+      "front": "What problem does the outbox pattern solve?",
+      "back": "Dual writes: it records the event in the same DB transaction as the state change, so a crash can't commit one without the other."
+    },
+    {
+      "front": "What is a saga?",
+      "back": "A sequence of local transactions across services, with compensating actions to undo completed steps when a later step fails."
+    },
+    {
+      "front": "Availability of a request needing 3 sync services at 99.9% each?",
+      "back": "≈ 0.999³ ≈ 99.7%."
+    },
+    {
+      "front": "Why is a shared database an anti-pattern for microservices?",
+      "back": "Services become coupled through schema and load; no team can change tables or deploy independently."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Service A commits an order update to Postgres, then publishes `order.updated` to SQS. Occasionally consumers never receive the event. Best fix?",
+      "options": [
+        "Publish the event before committing",
+        "Write the event to an outbox table in the same transaction and relay it to SQS separately",
+        "Use a longer SQS visibility timeout",
+        "Retry the publish in a `finally` block"
+      ],
+      "answer_index": 1,
+      "explanation": "A crash between commit and publish loses the event; the outbox makes recording the event atomic with the change."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the strongest sign that a set of microservices is a 'distributed monolith'?",
+      "options": [
+        "They are written in the same language",
+        "They run on the same ECS cluster",
+        "They read and write each other's tables in one shared database and must deploy together",
+        "They use HTTP for some calls"
+      ],
+      "answer_index": 2,
+      "explanation": "Shared tables and lockstep deploys mean the coupling of a monolith with the operational cost of distribution."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In a saga, a step that undoes an earlier completed step (e.g. issuing a refund) is called a ____ action.",
+      "answers": [
+        "compensating",
+        "compensation"
+      ],
+      "explanation": "Sagas replace rollbacks across services with explicit compensations."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A component that stops calling a failing dependency for a while and fails fast instead is called a circuit ____.",
+      "answers": [
+        "breaker"
+      ],
+      "explanation": "Circuit breakers prevent cascading failures and give the dependency time to recover."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib code runs an orchestrated saga where one step fails. What does it print?",
+      "code": "log = []\n\ndef step(name, fail=False):\n    def do():\n        if fail:\n            raise RuntimeError(f\"{name} failed\")\n        log.append(f\"do {name}\")\n    def undo():\n        log.append(f\"undo {name}\")\n    return name, do, undo\n\nsaga = [step(\"reserve_stock\"), step(\"charge_card\"), step(\"create_shipment\", fail=True)]\ndone = []\ntry:\n    for name, do, undo in saga:\n        do()\n        done.append(undo)\nexcept RuntimeError as e:\n    log.append(str(e))\n    for undo in reversed(done):\n        undo()\nprint(\"\\n\".join(log))\n",
+      "answers": [
+        "do reserve_stock\ndo charge_card\ncreate_shipment failed\nundo charge_card\nundo reserve_stock"
+      ],
+      "explanation": "The first two local steps succeed; when the third fails, the orchestrator runs compensations for completed steps in reverse order. The failed step itself has nothing to undo."
+    },
+    {
+      "type": "debug",
+      "prompt": "The dashboard API sometimes takes 30+ seconds and then everything times out when the pricing service is slow. What's wrong?",
+      "code": "import requests\n\ndef dashboard(seller_id):\n    seller = requests.get(f\"http://catalog/sellers/{seller_id}\").json()\n    prices = requests.get(f\"http://pricing/sellers/{seller_id}/prices\").json()\n    stock = requests.get(f\"http://inventory/sellers/{seller_id}\").json()\n    return {\"seller\": seller, \"prices\": prices, \"stock\": stock}\n",
+      "answer": "- **No timeouts**: `requests` waits indefinitely by default, so a slow pricing service holds the dashboard's worker threads until all are busy → everything times out (cascading failure).\n- **Sequential sync chain**: latencies add up and availability multiplies.\n- **No fallback / circuit breaker**: one dependency's outage takes the whole page down.\n- No request-ID propagation for debugging.\n\nFix: explicit timeouts (`timeout=(1, 2)`), run the independent calls concurrently (async httpx + `asyncio.gather`), limited retries for idempotent GETs, a circuit breaker around pricing, and graceful degradation (return the dashboard with `prices: null` and a warning). Longer term, consider having pricing publish events into a read model the dashboard owns.",
+      "rubric": [
+        "Missing timeouts cause thread exhaustion/cascading failure",
+        "Sequential calls add latency; make them concurrent",
+        "Circuit breaker / fallback / graceful degradation",
+        "Propagate request IDs / consider async read model"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "A colleague proposes splitting your monolith into 20 microservices. Explain how you'd evaluate the proposal.",
+      "answer": "Start from the problem: what hurts today — deploy contention between teams, a component needing very different scaling, fault isolation, tech constraints? If none, microservices add network failures, distributed debugging, data consistency problems and ops overhead. Check team size (services should map to team ownership), domain clarity (boundaries must be stable — premature splits along wrong lines are expensive) and platform maturity (CI/CD per service, tracing, centralized logging, service templates). Data is the hard part: each service needs to own its tables; a shared database keeps the coupling. My usual recommendation: first make the monolith modular (enforced module boundaries, schema per module, internal APIs), then extract one or two services where there's clear evidence — e.g. the bursty ingestion workers — and measure.",
+      "rubric": [
+        "Start from concrete pain points, not fashion",
+        "Costs: network failures, consistency, ops/observability",
+        "Team ownership, stable boundaries, data ownership",
+        "Modular monolith first, extract incrementally with evidence"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you start untangling 100+ services that share one Postgres database, without a big-bang rewrite?",
+      "answer": "1. **Inventory** who reads/writes which tables (`pg_stat_statements`, per-service DB roles/`application_name`, code search).\n2. **Assign an owner** per table/domain; give each service its own DB role with least-privilege grants so new cross-domain access is visible and deliberate.\n3. For cross-domain reads, introduce **owner APIs, views or events** (outbox → consumers maintain their own read models) and migrate consumers one by one.\n4. Move owned tables into **per-domain schemas**, then, where useful, separate databases.\n5. Protect the shared DB meanwhile: PgBouncer, per-role connection limits, `statement_timeout`.\nDo it domain by domain, starting with the most painful coupling.",
+      "rubric": [
+        "Map table access per service",
+        "Assign ownership and per-service roles/permissions",
+        "Replace direct cross-domain access with APIs/events",
+        "Incremental schema/database separation and interim protections"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you keep data consistent across services without distributed transactions?",
+      "difficulty": "hard",
+      "answer_md": "Accept eventual consistency and make it reliable:\n- **Local transactions + outbox**: each service changes its own data and records the event in an outbox table in the same transaction; a relay publishes it (at-least-once).\n- **Idempotent consumers**: dedupe by event ID (processed-events table updated in the same transaction as the consumer's change) or natural-key upserts.\n- **Sagas** for multi-step workflows: e.g. order placed → inventory reserved → payment charged → order confirmed; on failure, compensations (release reservation, refund). Orchestration (a coordinator with explicit state machine stored in a table) is easier to reason about and monitor than choreography for complex flows.\n- **Reconciliation jobs** that compare sources of truth and fix drift — the safety net.\n- Design the UX for intermediate states ('payment pending').\n2PC/XA is avoided because it couples availability of all participants and isn't supported by most queues/HTTP APIs."
+    },
+    {
+      "question": "Sync HTTP calls vs asynchronous events between services: how do you choose?",
+      "difficulty": "medium",
+      "answer_md": "Use **synchronous** calls when the caller needs an answer *now* to continue — e.g. checking a permission or fetching a price for a response — and the dependency is fast and highly available. Protect them with timeouts, retries only for idempotent requests, circuit breakers and fallbacks, and keep chains short.\n\nUse **asynchronous events/queues** when the caller doesn't need the result immediately — notifying other services that a report was processed, triggering embeddings, sending emails — or when work is slow or bursty. Benefits: temporal decoupling (consumer can be down), load leveling, easy fan-out to new consumers. Costs: eventual consistency, need for idempotency, DLQs and harder tracing.\n\nA common hybrid: services keep **local read models** fed by events, so the request path reads local data instead of calling other services synchronously — e.g. the dashboard service maintains its own seller/pricing projections."
+    }
+  ]
+}

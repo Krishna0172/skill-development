@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty %}
+{% block title %}Knowledge base{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Knowledge base</h1><p>Every concept in one place — explanation, code, mistakes, your notes and an assessment. Reference content is seeded; status, notes and scores are yours.</p></div>
+  <div class="actions"><a class="btn primary" href="/topics/new">+ New topic</a></div>
+</div>
+<form class="grid g4 mb" method="get" action="/topics">
+  <input name="q" value="{{ q }}" placeholder="Search titles, explanations, code, notes…">
+  <select name="track"><option value="">All tracks</option>{% for k, v in [("python", "Python Mastery"), ("backend", "Backend Engineering"), ("ai", "AI Engineering")] %}<option value="{{ k }}" {{ 'selected' if k == track }}>{{ v }}</option>{% endfor %}</select>
+  <select name="status"><option value="">Any status</option>{% for s in ["not_started", "learning", "practised", "learned", "needs_revision", "difficult", "mastered"] %}<option value="{{ s }}" {{ 'selected' if s == status }}>{{ s|label }}</option>{% endfor %}</select>
+  <div class="row"><select name="skill_id"><option value="">Any skill</option>{% for sid, name in skills %}<option value="{{ sid }}" {{ 'selected' if sid|string == skill_id }}>{{ name }}</option>{% endfor %}</select><button class="btn">Filter</button></div>
+</form>
+<div class="small faint mb">{{ rows|length }} topics</div>
+{% if not rows %}{{ empty("No topics match", "Try a different search or clear filters.") }}{% endif %}
+<div class="grid g3">
+  {% for t in rows %}
+    <a class="card" href="/topics/{{ t.id }}" style="color:inherit;text-decoration:none">
+      <div class="body">
+        <div class="between"><h3>{{ t.title }}</h3>{{ badge(t.status) }}</div>
+        <p class="small muted" style="margin:6px 0 8px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden">{{ t.summary }}</p>
+        <div class="row tiny faint">{{ t.skill or t.category }} · {{ badge(t.difficulty) }}{% if t.review and t.review.is_active %}<span style="margin-left:auto">revise {{ t.review.due_date|rel }}</span>{% endif %}</div>
+      </div>
+    </a>
+  {% endfor %}
+</div>
+{% endblock %}

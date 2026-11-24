@@ -1,0 +1,186 @@
+{
+  "slug": "sql-constraints-keys",
+  "title": "Constraints and keys: PK, FK, UNIQUE, CHECK, NOT NULL",
+  "skill": "database-design",
+  "extra_skills": [
+    "postgresql"
+  ],
+  "category": "Database",
+  "difficulty": "beginner",
+  "tags": [
+    "constraints",
+    "primary-key",
+    "foreign-key",
+    "unique",
+    "check",
+    "on-delete"
+  ],
+  "summary": "Constraints are rules the database enforces on every write: a column cannot be empty, a value must be unique, a row must point at an existing parent, a number must be positive. They keep bad data out no matter which service or script writes to the table.",
+  "why_md": "- Application-level validation can be bypassed (a second service, a script, a bug); constraints cannot.\n- Foreign keys and unique constraints are what make joins and upserts trustworthy.\n- `ON DELETE` rules decide what happens to child rows, which matters in every delete you write.\n- Interview staples: PK vs UNIQUE, FK actions, why NULL and UNIQUE interact oddly.",
+  "details_md": "### NOT NULL\nThe column must have a value. Make it the default choice; allow NULL only when 'unknown' is a real state.\n\n### PRIMARY KEY\nIdentifies each row uniquely: implies `UNIQUE` plus `NOT NULL`, and creates an index. A table has at most one primary key, which may be composite (`PRIMARY KEY (order_id, line_no)`). Typical choices: `bigint` identity or `uuid`. A natural key (like an email) can change, so surrogate ids are common.\n\n### UNIQUE\nNo two rows may share the value (or combination of values). Backed by an index. A table can have many. NULLs are considered distinct from each other, so a UNIQUE column can hold several NULLs. PostgreSQL 15+ lets you say `UNIQUE NULLS NOT DISTINCT` to change that.\n\n### FOREIGN KEY\n`customer_id bigint REFERENCES customers(id)` means every value must exist in the parent table's key (or be NULL unless also NOT NULL). It guarantees you cannot create an order for a customer that does not exist, nor delete that customer while orders remain (by default).\nThe `ON DELETE` action chooses what happens when the parent row is deleted:\n- `NO ACTION` / `RESTRICT` (default): refuse the delete. (NO ACTION can be deferred to commit; RESTRICT cannot.)\n- `CASCADE`: delete the child rows too.\n- `SET NULL` / `SET DEFAULT`: keep children, clear the reference.\nSimilarly `ON UPDATE`. Note: PostgreSQL does not index the referencing column automatically; add an index on the FK column yourself, or deletes on the parent and joins on the child become slow.\n\n### CHECK\nAn arbitrary boolean condition per row: `CHECK (price >= 0)`, `CHECK (status IN ('new','paid','shipped'))`. A row is rejected only if the condition is **false**; if it evaluates to NULL it passes, so pair CHECK with NOT NULL when needed.\n\n### Naming and adding later\nName constraints (`CONSTRAINT price_nonneg CHECK (...)`) so error messages and migrations are readable. Add later with `ALTER TABLE ... ADD CONSTRAINT`. On large tables add as `NOT VALID` first and then `VALIDATE CONSTRAINT`, which avoids a long blocking lock.\n\n### Errors you will see\nViolations raise errors with SQLSTATE codes: `23502` not-null, `23503` foreign key, `23505` unique, `23514` check. In Python catch the specific psycopg2 exceptions (`UniqueViolation`, `ForeignKeyViolation`), not bare `except`.",
+  "code_md": "```sql\nCREATE TABLE customers (\n    id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    email text NOT NULL UNIQUE,\n    name  text NOT NULL\n);\n\nCREATE TABLE orders (\n    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    customer_id bigint NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,\n    status      text   NOT NULL DEFAULT 'new',\n    total       numeric(12,2) NOT NULL,\n    CONSTRAINT status_valid CHECK (status IN ('new','paid','shipped','cancelled')),\n    CONSTRAINT total_nonneg CHECK (total >= 0)\n);\nCREATE INDEX ON orders (customer_id);   -- FK columns are NOT indexed automatically\n```\n```sql\n-- Child rows that disappear with the parent\nCREATE TABLE order_lines (\n    order_id bigint REFERENCES orders(id) ON DELETE CASCADE,\n    line_no  int,\n    sku      text NOT NULL,\n    PRIMARY KEY (order_id, line_no)          -- composite key\n);\n```\n```sql\n-- Adding a constraint safely to a big table\nALTER TABLE orders ADD CONSTRAINT total_nonneg CHECK (total >= 0) NOT VALID;\nALTER TABLE orders VALIDATE CONSTRAINT total_nonneg;\n```\n```python\nimport psycopg2.errors as pe\ntry:\n    cur.execute(\"INSERT INTO customers (email, name) VALUES (%s, %s)\", (email, name))\nexcept pe.UniqueViolation:\n    ...  # email already registered\n```",
+  "use_cases_md": "- `UNIQUE (marketplace, external_order_id)` so re-importing a report cannot create duplicates.\n- FK from `order_lines` to `orders` with `ON DELETE CASCADE`.\n- `CHECK (status IN (...))` keeps invalid workflow states out of the table.\n- Composite primary keys on link tables such as `product_tags(product_id, tag_id)`.\n- UNIQUE constraint as the target of `INSERT ... ON CONFLICT`.",
+  "mistakes_md": "- **Relying only on app validation**: another writer or script slips bad data in. Add constraints.\n- **No index on the FK column**: slow joins and slow parent deletes. Create it.\n- **`ON DELETE CASCADE` everywhere**: one delete can wipe large trees. Choose RESTRICT unless children truly belong to the parent.\n- **Expecting UNIQUE to stop multiple NULLs**: NULLs are distinct (unless `NULLS NOT DISTINCT`).\n- **CHECK on a nullable column**: NULL passes the check. Add NOT NULL.\n- **Natural keys that change** (emails, phone numbers) as primary keys: use a surrogate id plus a UNIQUE constraint.",
+  "best_practices_md": "- Every table has a primary key.\n- Default to NOT NULL.\n- Name your constraints.\n- Index every foreign-key column that is used in joins or parent deletes.\n- Choose ON DELETE deliberately: RESTRICT for independent entities, CASCADE for owned children.\n- Add constraints to large tables with NOT VALID then VALIDATE.\n- Handle violations with specific exception classes.",
+  "my_context_md": "",
+  "revision_notes_md": "- PK = UNIQUE + NOT NULL + index; one per table, can be composite.\n- UNIQUE allows many NULLs (unless NULLS NOT DISTINCT, PG15+).\n- FK: child value must exist in parent; ON DELETE RESTRICT/NO ACTION, CASCADE, SET NULL, SET DEFAULT.\n- PostgreSQL does not auto-index FK columns.\n- CHECK rejects only false; NULL passes.\n- Error codes: 23502 not null, 23503 FK, 23505 unique, 23514 check.\n- `NOT VALID` + `VALIDATE CONSTRAINT` for big tables.\n- Name constraints.",
+  "exercises_md": "1. Create `customers` and `orders` as above, then try to insert an order for a missing customer and read the error code.\n2. Insert two rows with NULL in a UNIQUE column and explain why it works; then rebuild it with `NULLS NOT DISTINCT`.\n3. Create child rows with `ON DELETE CASCADE`, delete the parent and count the survivors; repeat with RESTRICT.\n4. Write a Python snippet that catches `UniqueViolation` and returns a friendly 'already exists' message.",
+  "related": [
+    "sql-data-types-ddl",
+    "database-normalization",
+    "postgres-upsert",
+    "sql-joins"
+  ],
+  "flashcards": [
+    {
+      "front": "What does PRIMARY KEY imply?",
+      "back": "UNIQUE + NOT NULL, backed by an index; one per table (may be composite)."
+    },
+    {
+      "front": "Can a UNIQUE column hold several NULLs?",
+      "back": "Yes, NULLs are treated as distinct (unless NULLS NOT DISTINCT in PG15+)."
+    },
+    {
+      "front": "What does ON DELETE CASCADE do?",
+      "back": "Deleting the parent row automatically deletes the child rows referencing it."
+    },
+    {
+      "front": "Does PostgreSQL index FK columns automatically?",
+      "back": "No; create the index yourself."
+    },
+    {
+      "front": "When does a CHECK constraint reject a row?",
+      "back": "Only when the condition is false; NULL result passes."
+    },
+    {
+      "front": "SQLSTATE for unique violation?",
+      "back": "23505 (foreign key 23503, not null 23502, check 23514)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which is true of a PRIMARY KEY?",
+      "options": [
+        "A table can have several",
+        "It is unique and not null",
+        "It cannot be composite",
+        "It may contain NULL"
+      ],
+      "answer_index": 1,
+      "explanation": "PK = UNIQUE + NOT NULL; one per table, composite allowed."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Order rows reference customers. Deleting a customer with orders under the default FK rule does what?",
+      "options": [
+        "Deletes orders",
+        "Sets customer_id NULL",
+        "Raises an error and refuses",
+        "Deletes silently"
+      ],
+      "answer_index": 2,
+      "explanation": "Default is NO ACTION: the delete is refused."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A CHECK (price >= 0) column receives NULL. What happens?",
+      "options": [
+        "Accepted, since the check is not false",
+        "Converted to 0",
+        "Error 23514",
+        "Rejected"
+      ],
+      "answer_index": 0,
+      "explanation": "NULL gives unknown, which passes a CHECK."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A rule that every order must point to an existing customer is enforced with a ____ key.",
+      "answers": [
+        "foreign"
+      ],
+      "explanation": "FOREIGN KEY ... REFERENCES."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To delete child rows automatically use ON DELETE ____.",
+      "answers": [
+        "cascade"
+      ],
+      "explanation": "CASCADE propagates the delete."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.execute(\"create table u(id integer primary key, email text unique)\")\nc.execute(\"insert into u(email) values ('a@x.com')\")\ntry:\n    c.execute(\"insert into u(email) values ('a@x.com')\")\nexcept sqlite3.IntegrityError as e:\n    print(\"error:\", e)\nc.execute(\"insert into u(email) values (NULL)\")\nc.execute(\"insert into u(email) values (NULL)\")\nprint(c.execute(\"select count(*) from u\").fetchone()[0])",
+      "answers": [
+        "error: UNIQUE constraint failed: u.email\n3"
+      ],
+      "explanation": "The duplicate is rejected; two NULLs are allowed, giving 3 rows."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.execute(\"pragma foreign_keys = on\")\nc.executescript(\"create table p(id integer primary key);\"\n                \"create table ch(id integer primary key, pid integer references p(id) on delete cascade);\"\n                \"insert into p values (1),(2);\"\n                \"insert into ch values (10,1),(11,1),(12,2);\")\nc.execute(\"delete from p where id = 1\")\nprint(c.execute(\"select id from ch\").fetchall())\ntry:\n    c.execute(\"insert into ch values (13, 99)\")\nexcept sqlite3.IntegrityError as e:\n    print(e)",
+      "answers": [
+        "[(12,)]\nFOREIGN KEY constraint failed"
+      ],
+      "explanation": "Cascade removed children of parent 1; inserting an unknown parent violates the FK."
+    },
+    {
+      "type": "debug",
+      "prompt": "Deleting an old customer is slow and joins from orders to customers are slow too. The schema is below. What is missing?",
+      "code": "CREATE TABLE orders (\n    id bigint PRIMARY KEY,\n    customer_id bigint NOT NULL REFERENCES customers(id)\n);",
+      "answer": "PostgreSQL does not create an index on the referencing column. Deleting a customer must scan orders to check for children, and joins on customer_id scan too. Add one.\n```sql\nCREATE INDEX orders_customer_id_idx ON orders (customer_id);\n```",
+      "rubric": [
+        "No automatic index on FK column",
+        "Add an index on customer_id",
+        "Impact: parent deletes and child joins"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the ON DELETE options for a foreign key to a junior developer.",
+      "answer": "When a parent row is deleted the database consults the child's FK rule. NO ACTION/RESTRICT refuses the delete while children exist. CASCADE deletes the children too. SET NULL keeps children but blanks the reference. Choose CASCADE only for children that cannot exist without the parent, such as order lines.",
+      "rubric": [
+        "RESTRICT / NO ACTION refuse",
+        "CASCADE deletes children",
+        "SET NULL clears the reference",
+        "Pick based on ownership"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why add database constraints when the application already validates input?",
+      "answer": "The database is the last line of defence: it protects against bugs, other services, manual scripts and race conditions (two requests passing an app-level 'does it exist?' check simultaneously; a UNIQUE constraint is race-free). Constraints also document the rules and let the planner and tools rely on them.",
+      "rubric": [
+        "Other writers bypass app code",
+        "Race conditions need UNIQUE",
+        "Constraints document the model"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "PRIMARY KEY vs UNIQUE?",
+      "difficulty": "easy",
+      "answer_md": "A primary key identifies the row: unique, not null, one per table. UNIQUE enforces uniqueness only, allows NULLs (multiple, by default), and a table may have many. Foreign keys can reference either, as long as the target is unique."
+    },
+    {
+      "question": "What happens with NULL in a foreign key column?",
+      "difficulty": "easy",
+      "answer_md": "A NULL FK is not checked: the row is allowed and has no parent (default MATCH SIMPLE). If a parent is mandatory declare the column NOT NULL."
+    },
+    {
+      "question": "How would you add a CHECK constraint to a 500M-row table without long blocking?",
+      "difficulty": "medium",
+      "answer_md": "`ALTER TABLE t ADD CONSTRAINT c CHECK (...) NOT VALID;` takes a brief lock and enforces the rule for new writes. Then `ALTER TABLE t VALIDATE CONSTRAINT c;` scans existing rows with a weaker lock that allows reads and writes."
+    },
+    {
+      "question": "Why can ON DELETE CASCADE be dangerous?",
+      "difficulty": "medium",
+      "answer_md": "A single delete can remove huge numbers of rows through several levels, holds locks for long, produces lots of WAL and surprises people reading the code. Prefer RESTRICT for independent business entities and use CASCADE only for strictly owned children."
+    }
+  ]
+}

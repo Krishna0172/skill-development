@@ -1,0 +1,142 @@
+{
+  "slug": "refactor-split-god-function",
+  "title": "Refactor: split a do-everything function into parse / validate / transform",
+  "category": "refactoring",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "backend-architecture",
+  "concepts": [
+    "single responsibility",
+    "pure functions",
+    "testability",
+    "extract function"
+  ],
+  "related_topics": [
+    "py-clean-architecture",
+    "py-solid-design-principles",
+    "pytest-essentials"
+  ],
+  "problem_md": "**Refactor-your-own-habits kata.** `process_report` is a ~60-line function that parses CSV, validates and transforms in one loop. It works, but you can't test validation without building CSV text, and every new marketplace copy-pastes it. Split it - **keeping `process_report`'s output identical** - into:\n\n```python\ndef parse_lines(csv_text: str) -> list[dict]       # header -> lower-cased keys, values stripped, blank lines skipped\ndef validate_row(row: dict) -> list[str]           # [] when valid; messages exactly as today, in the same order\ndef transform_row(row: dict) -> dict               # valid raw row -> typed output row\ndef process_report(csv_text: str) -> dict          # orchestrates the three\n```\n\nValidation messages: `order_id: required`, `qty: must be a positive integer`, `unit_price: must be a number >= 0`, `channel: unknown '<value>'`. A missing key counts as an empty string. `line` in `rejected` is the 1-based data-line number (blank lines not counted).\n\nTests use the harness `call(\"<function name>\", *args)`, so all four functions must exist at module level.",
+  "examples": [
+    {
+      "input": "call('validate_row', {'order_id': '', 'qty': '0', 'unit_price': '5', 'channel': 'ebay'})",
+      "output": "['order_id: required', 'qty: must be a positive integer', \"channel: unknown 'ebay'\"]"
+    },
+    {
+      "input": "call('transform_row', {'order_id':'A1','sku':'ab-1','qty':'2','unit_price':'9.99','channel':'Amazon'})",
+      "output": "{'order_id':'A1','sku':'AB-1','qty':2,'unit_price':9.99,'channel':'amazon','line_total':19.98}"
+    }
+  ],
+  "hints": [
+    "Cut along the existing comments-in-your-head: the header/zip code becomes `parse_lines`; the four checks become `validate_row` (small helpers like `_is_positive_int(s)` remove the try/except flags); the `out[...]` block becomes `transform_row`.",
+    "`process_report` then reads: `for line_no, row in enumerate(parse_lines(text), 1): errs = validate_row(row); ...`. Run the old tests (here: the `process_report` cases) after each extraction."
+  ],
+  "starter_code": "def process_report(csv_text):\n    rows = []\n    rejected = []\n    lines = csv_text.splitlines()\n    header = None\n    line_no = 0\n    for raw in lines:\n        if not raw.strip():\n            continue\n        if header is None:\n            header = [h.strip().lower() for h in raw.split(',')]\n            continue\n        line_no += 1\n        parts = [p.strip() for p in raw.split(',')]\n        row = dict(zip(header, parts))\n        errs = []\n        if not row.get('order_id'):\n            errs.append('order_id: required')\n        qty_ok = True\n        try:\n            q = int(row.get('qty', ''))\n            if q < 1:\n                qty_ok = False\n        except ValueError:\n            qty_ok = False\n        if not qty_ok:\n            errs.append('qty: must be a positive integer')\n        price_ok = True\n        try:\n            p = float(row.get('unit_price', ''))\n            if p < 0:\n                price_ok = False\n        except ValueError:\n            price_ok = False\n        if not price_ok:\n            errs.append('unit_price: must be a number >= 0')\n        ch = row.get('channel', '').lower()\n        if ch not in ('amazon', 'flipkart', 'myntra'):\n            errs.append(f\"channel: unknown '{row.get('channel', '')}'\")\n        if errs:\n            rejected.append({'line': line_no, 'errors': errs})\n            continue\n        qty = int(row['qty'])\n        price = float(row['unit_price'])\n        out = {}\n        out['order_id'] = row['order_id']\n        out['sku'] = row.get('sku', '').upper()\n        out['qty'] = qty\n        out['unit_price'] = price\n        out['channel'] = row['channel'].lower()\n        out['line_total'] = round(qty * price, 2)\n        rows.append(out)\n    return {'rows': rows, 'rejected': rejected}\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). Tests call call(\"<function name>\", *args).\n# ---------------------------------------------------------------------------\ndef call(name, *args):\n    fn = globals().get(name)\n    if fn is None:\n        raise NameError(f\"function {name!r} is not defined yet\")\n    return fn(*args)\n",
+  "solution_code": "CHANNELS = ('amazon', 'flipkart', 'myntra')\n\n\ndef parse_lines(csv_text):\n    lines = [ln for ln in csv_text.splitlines() if ln.strip()]\n    if not lines:\n        return []\n    header = [h.strip().lower() for h in lines[0].split(',')]\n    return [dict(zip(header, (p.strip() for p in ln.split(',')))) for ln in lines[1:]]\n\n\ndef _is_positive_int(text):\n    try:\n        return int(text) >= 1\n    except ValueError:\n        return False\n\n\ndef _is_non_negative_number(text):\n    try:\n        return float(text) >= 0\n    except ValueError:\n        return False\n\n\ndef validate_row(row):\n    errors = []\n    if not row.get('order_id'):\n        errors.append('order_id: required')\n    if not _is_positive_int(row.get('qty', '')):\n        errors.append('qty: must be a positive integer')\n    if not _is_non_negative_number(row.get('unit_price', '')):\n        errors.append('unit_price: must be a number >= 0')\n    channel = row.get('channel', '')\n    if channel.lower() not in CHANNELS:\n        errors.append(f\"channel: unknown '{channel}'\")\n    return errors\n\n\ndef transform_row(row):\n    qty = int(row['qty'])\n    price = float(row['unit_price'])\n    return {\n        'order_id': row['order_id'],\n        'sku': row.get('sku', '').upper(),\n        'qty': qty,\n        'unit_price': price,\n        'channel': row['channel'].lower(),\n        'line_total': round(qty * price, 2),\n    }\n\n\ndef process_report(csv_text):\n    rows, rejected = [], []\n    for line_no, row in enumerate(parse_lines(csv_text), start=1):\n        errors = validate_row(row)\n        if errors:\n            rejected.append({'line': line_no, 'errors': errors})\n        else:\n            rows.append(transform_row(row))\n    return {'rows': rows, 'rejected': rejected}\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). Tests call call(\"<function name>\", *args).\n# ---------------------------------------------------------------------------\ndef call(name, *args):\n    fn = globals().get(name)\n    if fn is None:\n        raise NameError(f\"function {name!r} is not defined yet\")\n    return fn(*args)\n",
+  "solution_md": "Each function now has one reason to change: `parse_lines` (file format), `validate_row` (business rules), `transform_row` (output shape), `process_report` (flow). All are pure - input in, value out - so each is tested with a literal dict, no CSV or DB needed. The flag variables (`qty_ok`, `price_ok`) disappear into tiny predicates, and the orchestrator reads like the spec.\n\nRefactor safely: first pin current behaviour with tests on `process_report` (characterisation tests), then extract one function at a time, re-running them after each step. Behaviour must not change during a refactor - fix bugs in a separate commit.\n\nNext step for many marketplaces: keep `process_report` generic and inject per-marketplace `parse`/`validate`/`transform` via a registry (his `ECSMarketplaceDataUpload` dispatcher is the natural home).",
+  "tests": {
+    "function": "call",
+    "cases": [
+      {
+        "args": [
+          "process_report",
+          "order_id,sku,qty,unit_price,channel\nA1,ab-1,2,9.99,Amazon\n\nA2,cd-2,0,5,ebay\n,x,1,1,myntra\n"
+        ],
+        "kwargs": {},
+        "expected": {
+          "rows": [
+            {
+              "order_id": "A1",
+              "sku": "AB-1",
+              "qty": 2,
+              "unit_price": 9.99,
+              "channel": "amazon",
+              "line_total": 19.98
+            }
+          ],
+          "rejected": [
+            {
+              "line": 2,
+              "errors": [
+                "qty: must be a positive integer",
+                "channel: unknown 'ebay'"
+              ]
+            },
+            {
+              "line": 3,
+              "errors": [
+                "order_id: required"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          "parse_lines",
+          " Order_ID , SKU ,Qty\n\nA1, s1 ,3\n"
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "order_id": "A1",
+            "sku": "s1",
+            "qty": "3"
+          }
+        ]
+      },
+      {
+        "args": [
+          "validate_row",
+          {
+            "order_id": "",
+            "qty": "0",
+            "unit_price": "5",
+            "channel": "ebay"
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "order_id: required",
+          "qty: must be a positive integer",
+          "channel: unknown 'ebay'"
+        ]
+      },
+      {
+        "args": [
+          "validate_row",
+          {
+            "order_id": "A9",
+            "qty": "1"
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "unit_price: must be a number >= 0",
+          "channel: unknown ''"
+        ]
+      },
+      {
+        "args": [
+          "transform_row",
+          {
+            "order_id": "A1",
+            "sku": "ab-1",
+            "qty": "2",
+            "unit_price": "9.99",
+            "channel": "Amazon"
+          }
+        ],
+        "kwargs": {},
+        "expected": {
+          "order_id": "A1",
+          "sku": "AB-1",
+          "qty": 2,
+          "unit_price": 9.99,
+          "channel": "amazon",
+          "line_total": 19.98
+        }
+      }
+    ]
+  }
+}

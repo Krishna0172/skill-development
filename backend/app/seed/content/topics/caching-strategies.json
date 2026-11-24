@@ -1,0 +1,123 @@
+{
+  "slug": "caching-strategies",
+  "title": "Caching Strategies: Cache-Aside, TTLs, Invalidation and Redis",
+  "skill": "caching-redis",
+  "extra_skills": [
+    "system-design",
+    "backend-architecture"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "caching",
+    "redis",
+    "cache-aside",
+    "ttl",
+    "invalidation",
+    "stampede"
+  ],
+  "summary": "A cache keeps copies of expensive-to-get data somewhere faster (process memory or Redis) so repeated reads skip the slow source. The most common pattern is cache-aside: check the cache, on a miss load from the database and store the result with a TTL. The hard parts are deciding when cached data is stale (invalidation) and preventing many requests from rebuilding the same expired key at once (stampede).",
+  "details_md": "### Where caches live\n- **In-process** (`functools.lru_cache`, `cachetools.TTLCache`, a module-level dict in Lambda): fastest (nanoseconds), but per process, lost on restart, and inconsistent across instances.\n- **Distributed** (Redis/Valkey, Memcached; on AWS, ElastiCache): shared by all instances, sub-millisecond over the network, survives app restarts.\n- **HTTP/CDN** (`Cache-Control`, `ETag`, CloudFront, API Gateway caching): caches whole responses close to clients.\n- **Database-side**: PostgreSQL's shared buffers, materialized views, summary tables. Sometimes the right \"cache\" is a precomputed table.\n\n### Patterns\n- **Cache-aside (lazy loading)**: the app reads the cache; on a miss it reads the DB and writes the cache. Simple and resilient (if the cache is down, fall back to the DB). Downside: first request is slow, and data can be stale until TTL or invalidation.\n- **Read-through**: the cache library loads on miss itself (same idea, logic inside the cache layer).\n- **Write-through**: writes go to the cache and the DB together, so the cache is always warm for written keys, at the cost of slower writes and cached data nobody reads.\n- **Write-behind (write-back)**: write to the cache, flush to the DB asynchronously. Fast, but you risk data loss; rarely the right choice for business data.\n\n### Invalidation and freshness\n- **TTL**: every entry expires; choose based on how stale the data may be (config: minutes; prices: seconds; reports: hours). Add **jitter** (±10%) so keys created together don't expire together.\n- **Explicit invalidation**: delete the key when the source changes (`DEL config:org:7` after updating org config). Prefer *delete* over *update* to avoid race conditions where an older value overwrites a newer one.\n- **Versioned keys**: `report:v3:org:7`; bump the version to invalidate a whole family without scanning.\n- Event-driven invalidation (DB triggers, change streams, pub/sub) for multi-instance in-process caches.\n\n### Stampede (dogpile) protection\nWhen a hot key expires, hundreds of requests miss at once and all hit the database. Mitigations: a **lock / single-flight** (`SET lock:key 1 NX EX 10`, only the winner rebuilds and others wait briefly or serve stale data), **early probabilistic refresh**, **stale-while-revalidate** (serve the old value while one worker refreshes), and TTL jitter.\n\n### Redis essentials\n- Data types: strings, hashes, lists, sets, sorted sets, streams; `INCR` for counters and rate limits; `EXPIRE`/`TTL`.\n- `SET key value EX 300 NX`: set with expiry only if absent (locks, idempotency keys).\n- Eviction when memory is full: `maxmemory-policy` (`allkeys-lru` for a pure cache; `noeviction` would make writes fail).\n- Redis is single-threaded per command: avoid `KEYS *` (blocks the server; use `SCAN`) and huge values.\n- Persistence (RDB/AOF) exists, but treat a cache as **disposable**: the system must work, just slower, if it is empty.\n\n### What to cache (and not)\nGood: read-heavy, rarely changing, expensive data (per-tenant config, reference data, aggregated dashboards, external API responses with rate limits). Bad: rapidly changing data needing strong consistency (inventory counts during checkout, account balances), or user-specific data keyed carelessly (cache-poisoning or data-leak risk if the key omits the tenant/user).\n\n### Measuring\nTrack hit rate, latency, evictions and memory. A cache with a 20% hit rate adds complexity and latency for little gain.",
+  "code_md": "```python\n# 1) Cache-aside with Redis (redis-py), JSON serialisation, TTL with jitter\nimport json, random\nimport redis\n\nr = redis.Redis(host=\"localhost\", port=6379, decode_responses=True)\n\ndef get_org_config(conn, orgid: int) -> dict:\n    key = f\"cfg:v1:org:{orgid}\"                 # versioned, tenant-scoped key\n    cached = r.get(key)\n    if cached is not None:\n        return json.loads(cached)               # hit\n\n    with conn.cursor() as cur:                  # miss: load from the source of truth\n        cur.execute(\"SELECT channel, settings FROM org_channels WHERE orgid = %s\", (orgid,))\n        cfg = {ch: s for ch, s in cur.fetchall()}\n\n    ttl = 300 + random.randint(-30, 30)         # jitter avoids synchronised expiry\n    r.set(key, json.dumps(cfg), ex=ttl)\n    return cfg\n\ndef update_org_config(conn, orgid: int, channel: str, settings: dict):\n    with conn, conn.cursor() as cur:\n        cur.execute(\"UPDATE org_channels SET settings = %s WHERE orgid = %s AND channel = %s\",\n                    (json.dumps(settings), orgid, channel))\n    r.delete(f\"cfg:v1:org:{orgid}\")             # invalidate after the DB commit\n```\n\n```python\n# 2) Stampede protection with a short Redis lock (single-flight)\nimport time\n\ndef get_dashboard(orgid: int) -> dict:\n    key, lock = f\"dash:org:{orgid}\", f\"lock:dash:org:{orgid}\"\n    for _ in range(50):\n        val = r.get(key)\n        if val:\n            return json.loads(val)\n        if r.set(lock, \"1\", nx=True, ex=30):   # only one worker rebuilds\n            try:\n                data = build_dashboard(orgid)    # expensive SQL\n                r.set(key, json.dumps(data), ex=600)\n                return data\n            finally:\n                r.delete(lock)\n        time.sleep(0.1)                         # others wait briefly, then re-check\n    return build_dashboard(orgid)               # fallback: don't fail the request\n```\n\n```python\n# 3) In-process caches: lru_cache and TTLCache (per process / per Lambda environment)\nfrom functools import lru_cache\nfrom cachetools import TTLCache, cached\n\n@lru_cache(maxsize=1024)                        # no expiry: only for immutable data\ndef channel_display_name(code: str) -> str:\n    return {\"amz\": \"Amazon\", \"flk\": \"Flipkart\"}.get(code, code)\n\n_cfg_cache = TTLCache(maxsize=500, ttl=120)     # entries expire after 2 minutes\n\n@cached(_cfg_cache)\ndef load_settings(orgid: int) -> dict:\n    return fetch_settings_from_db(orgid)\n```\n\n```bash\n# 4) Redis CLI basics\nSET cfg:v1:org:7 '{\"amazon\":{\"fee\":0.12}}' EX 300   # value with 5-minute TTL\nTTL cfg:v1:org:7                                    # seconds remaining\nINCR rate:org:7:2024-05-01T10:15                    # counter (e.g. rate limiting)\nEXPIRE rate:org:7:2024-05-01T10:15 60\nSCAN 0 MATCH cfg:v1:* COUNT 100                     # never KEYS * in production\nCONFIG GET maxmemory-policy                         # allkeys-lru for a pure cache\n```",
+  "use_cases_md": "- Per-tenant configuration and reference data read on every request or job.\n- Expensive dashboard aggregates that can be a few minutes stale.\n- Responses from rate-limited third-party APIs (marketplace or courier APIs).\n- Rate limiting and idempotency keys with Redis `INCR`/`SET NX EX`.\n- Session storage and short-lived tokens.",
+  "mistakes_md": "- **No TTL**: stale data lives forever and memory fills up. Always set an expiry, even if long.\n- **Updating the cache instead of deleting on writes**: race conditions can store an older value last. Delete and let the next read repopulate.\n- **Invalidating before the DB commit**: a reader repopulates the old value before the commit lands. Invalidate after commit.\n- **Keys missing tenant/user scope**: one customer sees another's data. Include `orgid`/user ID in every key.\n- **Caching data that must be exact** (stock levels at checkout, balances): wrong decisions. Read from the source of truth.\n- **`KEYS *` in production**: blocks Redis. Use `SCAN` or versioned keys.\n- **Treating the cache as the database**: data lost on eviction/restart. Keep a durable source of truth.\n- **Caching errors or empty results without thought**: either hammering the DB on repeated misses or caching a transient failure. Cache \"not found\" briefly; don't cache exceptions.",
+  "best_practices_md": "- Start with cache-aside and TTLs; add complexity only when measurements justify it.\n- Namespaced, versioned, tenant-scoped keys: `app:entity:v2:org:{id}`.\n- TTL jitter and single-flight rebuilds for hot keys.\n- Fail open: if Redis is unavailable, serve from the source (with timeouts on Redis calls).\n- Monitor hit rate, evictions, memory and latency.\n- Use `allkeys-lru` (or `allkeys-lfu`) eviction for pure caches.\n- Document each cached item's staleness tolerance.",
+  "my_context_md": "You haven't used a caching layer yet; it's a listed gap. A natural first candidate in your own system is the per-org configuration read from `fs-organisations-channels-db`. It changes rarely and is needed for every upload, so a module-level `TTLCache` (which survives warm Lambda invocations or the lifetime of an ECS task) or a Redis cache-aside layer keyed by org would remove repeated reads. In an interview you can say, honestly, that you know where caching would fit in your pipeline and which trade-offs you'd watch: TTL staleness after a config change, and including the org ID in every key.",
+  "related": [
+    "dynamodb-essentials",
+    "message-queues",
+    "aws-lambda-essentials",
+    "explain-analyze",
+    "python-decorators",
+    "rest-api-design"
+  ],
+  "flashcards": [
+    {
+      "front": "Describe cache-aside.",
+      "back": "App checks the cache; on a miss reads the DB, stores the result with a TTL, and returns it. Writes go to the DB and invalidate the key."
+    },
+    {
+      "front": "Why delete rather than update a cache key on writes?",
+      "back": "Concurrent updates can write an older value last; deleting forces a fresh read from the source of truth."
+    },
+    {
+      "front": "What is a cache stampede and two fixes?",
+      "back": "Many requests rebuild an expired hot key at once. Fixes: lock/single-flight (SET NX EX), stale-while-revalidate, TTL jitter."
+    },
+    {
+      "front": "Redis command for 'set if absent with expiry'?",
+      "back": "`SET key value NX EX 30`"
+    },
+    {
+      "front": "Eviction policy for a pure Redis cache?",
+      "back": "allkeys-lru (or allkeys-lfu); noeviction makes writes fail when memory is full."
+    },
+    {
+      "front": "Downside of in-process caches with multiple instances?",
+      "back": "Each instance has its own copy; invalidation doesn't propagate, so instances can disagree."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Hundreds of requests hit the database every 5 minutes exactly when a popular key expires. Best fix?",
+      "options": [
+        "Use a lock so one request rebuilds while others wait or get stale data",
+        "Remove the TTL",
+        "Use KEYS * to refresh",
+        "Switch to write-behind"
+      ],
+      "answer_index": 0,
+      "explanation": "Single-flight rebuilds (plus jitter) prevent the stampede."
+    },
+    {
+      "question": "Which is the riskiest data to cache?",
+      "options": [
+        "Channel display names",
+        "Org configuration with a 2-minute TTL",
+        "Available stock at checkout",
+        "A daily sales dashboard"
+      ],
+      "answer_index": 2,
+      "explanation": "Stock at checkout needs strong consistency; stale values cause overselling."
+    },
+    {
+      "question": "When should a cache entry be invalidated on update?",
+      "options": [
+        "Before starting the DB transaction",
+        "After the DB transaction commits",
+        "Never; wait for the TTL",
+        "Only on restart"
+      ],
+      "answer_index": 1,
+      "explanation": "Invalidating before commit lets a concurrent reader re-cache the old value."
+    },
+    {
+      "question": "Which pattern writes to cache and DB synchronously on every write?",
+      "options": [
+        "Cache-aside",
+        "Write-behind",
+        "Read-through",
+        "Write-through"
+      ],
+      "answer_index": 3,
+      "explanation": "Write-behind is asynchronous; write-through updates both in the write path."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you add caching to a slow endpoint? What questions do you ask first?",
+      "difficulty": "medium",
+      "answer_md": "Questions first:\n1. **Is caching the right fix?** Check `EXPLAIN ANALYZE` first; a missing index or N+1 queries might be the real problem.\n2. **Read/write ratio and access skew**: is the same data read often? (A low hit rate means caching adds complexity for nothing.)\n3. **Staleness tolerance**: how stale can the response be: seconds, minutes, hours?\n4. **Key dimensions**: what makes responses differ (org, user, query params)? These must all be in the key.\n5. **Invalidation triggers**: what writes change this data?\n\nThen implement **cache-aside** in Redis:\n```python\nkey = f\"orders:summary:v1:org:{orgid}:{day}\"\nif (hit := r.get(key)) is not None: return json.loads(hit)\ndata = run_query(orgid, day)\nr.set(key, json.dumps(data), ex=300 + random.randint(0, 30))\n```\nInvalidate (delete) on relevant writes after commit; protect hot keys from stampedes; set short timeouts on Redis and fall back to the DB if it's unavailable; and track hit rate and latency to confirm the benefit. For expensive aggregates, also consider a summary table or materialized view, which is often a better \"cache\" for reporting data."
+    },
+    {
+      "question": "Explain the trade-offs between cache-aside, write-through and write-behind.",
+      "difficulty": "hard",
+      "answer_md": "- **Cache-aside**: the application manages the cache. Reads populate on miss; writes update the DB and **delete** the key.\n  - Resilient (cache down means slower, not broken); only requested data is cached.\n  - First read after expiry or invalidation is slow; there's a small window for stale data; stampedes are possible on hot keys.\n- **Write-through**: every write updates the DB and the cache synchronously.\n  - Cache is fresh for written keys; reads after writes are hits.\n  - Higher write latency; caches data that may never be read; you still need TTLs and failure handling (DB write ok but cache write fails, so invalidate on error).\n- **Write-behind**: writes go to the cache and are flushed to the DB asynchronously in batches.\n  - Very fast writes and absorbs bursts.\n  - **Risk of data loss** if the cache fails before flushing; complex ordering and consistency. Suitable for metrics or counters, rarely for orders or payments.\n\nIn practice: cache-aside with TTL plus delete-on-write covers most backend needs. Write-through is useful for read-after-write-heavy data like user sessions or profiles. Write-behind only where losing a few seconds of data is acceptable."
+    },
+    {
+      "question": "How do you keep in-process caches consistent across multiple service instances?",
+      "difficulty": "medium",
+      "answer_md": "Each instance (ECS task, Lambda environment, Gunicorn worker) has its own memory, so invalidating on one doesn't affect the others. Options:\n\n1. **Short TTLs**: accept bounded staleness (e.g. 60 s). Simplest; fine for config and reference data.\n2. **Shared cache instead**: move to Redis so there's one copy to invalidate. Costs a network hop.\n3. **Two-level cache**: a small in-process L1 with a very short TTL in front of a Redis L2 with a longer TTL. Most reads are nanosecond hits; staleness is bounded by the L1 TTL.\n4. **Broadcast invalidation**: on change, publish an event (Redis pub/sub, SNS) that every instance subscribes to and uses to evict its local key. More moving parts, and messages can be missed, so keep TTLs as a safety net.\n5. **Version check**: store a cheap `config_version` in Redis/DB; instances compare it before using local data and reload when it changes.\n\nFor Lambda, module-level caches live only as long as the execution environment and can't receive broadcasts, so short TTLs (option 1) or an L2 in Redis are the practical choices."
+    }
+  ]
+}

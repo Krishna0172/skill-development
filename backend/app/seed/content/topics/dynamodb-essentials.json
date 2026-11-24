@@ -1,0 +1,123 @@
+{
+  "slug": "dynamodb-essentials",
+  "title": "DynamoDB Essentials: Keys, Query vs Scan, GSIs and Conditional Writes",
+  "skill": "dynamodb",
+  "extra_skills": [
+    "boto3",
+    "database-design",
+    "system-design"
+  ],
+  "category": "Cloud & DevOps",
+  "difficulty": "intermediate",
+  "tags": [
+    "aws",
+    "dynamodb",
+    "nosql",
+    "boto3",
+    "gsi",
+    "single-table-design"
+  ],
+  "summary": "DynamoDB is AWS's serverless key-value and document database. Every item is found by its primary key: a partition key, optionally plus a sort key. You design tables around your access patterns, because you can only Query efficiently by key (or by a secondary index); Scan reads the whole table. It scales almost without limit, but it has no joins and only limited ad-hoc querying.",
+  "details_md": "### Data model\n- **Table**: a collection of **items** (up to 400 KB each) with flexible attributes.\n- **Primary key**: either a **partition key** (PK) alone, or **PK + sort key** (SK). The PK is hashed to choose a physical partition; items sharing a PK form an **item collection** sorted by SK.\n- Types: String, Number, Binary, Boolean, Null, List, Map, and sets.\n\n### Reading\n- `GetItem`: one item by full key, the cheapest read.\n- `Query`: all items with one PK value, optionally filtered by SK conditions (`=`, `<`, `between`, `begins_with`), in SK order, forward or reverse. Efficient.\n- `Scan`: reads every item in the table, then optionally filters. Expensive and slow; avoid in request paths.\n- A **FilterExpression** is applied *after* items are read, so you still pay for everything read.\n- Results are paged at **1 MB**; continue with `LastEvaluatedKey` / `ExclusiveStartKey`.\n- Reads are **eventually consistent** by default (half the cost); `ConsistentRead=True` gives strongly consistent reads on the table and LSIs, but not on GSIs.\n\n### Writing\n`PutItem` (create/replace), `UpdateItem` (`UpdateExpression` with SET/REMOVE/ADD; atomic counters), `DeleteItem`. A **ConditionExpression** makes a write conditional (`attribute_not_exists(pk)` for create-only, `#status = :expected` for optimistic locking). A failed condition raises `ConditionalCheckFailedException`. `BatchWriteItem` (25 items, not atomic, may return `UnprocessedItems`), and `TransactWriteItems` (up to 100 items, all-or-nothing, at double the cost).\n\n### Secondary indexes\n- **GSI** (global): a different PK/SK, can be added any time, has its own capacity, and is **eventually consistent**. Up to 20 per table by default.\n- **LSI** (local): same PK, different SK; must be defined **at table creation**; adds a 10 GB limit per item collection.\n- Project only the attributes you need. **Sparse indexes**: items lacking the index key aren't in the index, which is handy for \"only pending jobs\".\n\n### Capacity and partitions\n- **On-demand** (pay per request; the usual default now) or **provisioned** RCU/WCU with auto scaling.\n- 1 RCU = one strongly consistent 4 KB read/s (or two eventually consistent); 1 WCU = one 1 KB write/s.\n- Each partition handles about 3,000 RCU and 1,000 WCU. A **hot partition key** (e.g. one huge tenant, or the date as PK) throttles even when total capacity is fine. Choose high-cardinality PKs.\n\n### Other features\n**TTL** (expire items automatically, deleted asynchronously, typically within a few days of expiry), **Streams** (change feed to Lambda), **PITR** backups, global tables (multi-region).\n\n### Design approach\nList access patterns first, then design keys. Patterns such as composite sort keys (`ORG#7#STATUS#PENDING`), **single-table design** (several entity types sharing a table with generic `PK`/`SK` attributes), and GSI overloading let one Query answer a complex request. If you need ad-hoc filtering, joins or aggregates, a relational database (or exporting to S3 + Athena) fits better.\n\n### boto3 specifics\n`boto3.resource(\"dynamodb\").Table(name)` auto-converts types but requires **`Decimal` instead of float**. Use `boto3.dynamodb.conditions.Key/Attr` to build expressions. Reserved words (`status`, `name`, `date`) need `ExpressionAttributeNames` (`#s`).",
+  "code_md": "```python\n# 1) Table access with boto3 (resource API) and Decimal\nfrom decimal import Decimal\nimport boto3\nfrom boto3.dynamodb.conditions import Key, Attr\n\ntable = boto3.resource(\"dynamodb\", region_name=\"ap-south-1\").Table(\"sync-jobs\")\n\ntable.put_item(Item={\n    \"pk\": \"ORG#7\",                         # partition key: tenant\n    \"sk\": \"JOB#2024-05-01T10:00:00#abc\",   # sort key: time-ordered job id\n    \"status\": \"PENDING\",\n    \"channel\": \"amazon\",\n    \"attempts\": 0,\n    \"amount\": Decimal(\"1499.50\"),          # floats are rejected: use Decimal\n})\n```\n\n```python\n# 2) Query (efficient) vs Scan (reads everything) + pagination\nresp = table.query(\n    KeyConditionExpression=Key(\"pk\").eq(\"ORG#7\") & Key(\"sk\").begins_with(\"JOB#2024-05\"),\n    FilterExpression=Attr(\"status\").eq(\"PENDING\"),   # applied AFTER reading; still billed\n    ScanIndexForward=False,                          # newest first\n)\nitems = resp[\"Items\"]\nwhile \"LastEvaluatedKey\" in resp:                    # results are paged at 1 MB\n    resp = table.query(\n        KeyConditionExpression=Key(\"pk\").eq(\"ORG#7\"),\n        ExclusiveStartKey=resp[\"LastEvaluatedKey\"],\n    )\n    items.extend(resp[\"Items\"])\n```\n\n```python\n# 3) Conditional writes: create-once and claim-a-job (optimistic concurrency)\nfrom botocore.exceptions import ClientError\n\ntry:\n    table.update_item(\n        Key={\"pk\": \"ORG#7\", \"sk\": \"JOB#2024-05-01T10:00:00#abc\"},\n        UpdateExpression=\"SET #s = :running, attempts = attempts + :one\",\n        ConditionExpression=\"#s = :pending\",            # only if still pending\n        ExpressionAttributeNames={\"#s\": \"status\"},      # 'status' is a reserved word\n        ExpressionAttributeValues={\":running\": \"RUNNING\", \":pending\": \"PENDING\", \":one\": 1},\n        ReturnValues=\"ALL_NEW\",\n    )\nexcept ClientError as e:\n    if e.response[\"Error\"][\"Code\"] == \"ConditionalCheckFailedException\":\n        pass   # another worker claimed it first\n    else:\n        raise\n```\n\n```python\n# 4) GSI query + batch writer + TTL attribute\nimport time\n# Sparse GSI \"pending-index\": PK = pending_org, SK = created_at (eventually consistent).\n# pending_org is set (e.g. \"ORG#7\") only while a job is PENDING and REMOVEd when it is claimed,\n# so the index holds only pending jobs and isn't keyed on a low-cardinality status value.\npending = table.query(\n    IndexName=\"pending-index\",\n    KeyConditionExpression=Key(\"pending_org\").eq(\"ORG#7\"),\n)[\"Items\"]\n\nwith table.batch_writer(overwrite_by_pkeys=[\"pk\", \"sk\"]) as bw:   # batches of 25, retries unprocessed\n    for i in range(100):\n        bw.put_item(Item={\"pk\": \"ORG#7\", \"sk\": f\"LOG#{i:05d}\",\n                          \"expires_at\": int(time.time()) + 7 * 86400})  # TTL attribute (epoch seconds)\n```",
+  "use_cases_md": "- Job/request tracking tables (sync requests, task status) keyed by tenant + job ID.\n- Session stores, idempotency keys and rate-limit counters (with TTL and conditional writes).\n- High-scale key-value lookups with predictable single-digit-millisecond latency.\n- Event-driven pipelines via DynamoDB Streams into Lambda.\n- Per-tenant configuration lookups by key.",
+  "mistakes_md": "- **Using Scan in request paths**: reads and bills for the whole table. Model the access pattern with keys or a GSI and use Query.\n- **Thinking FilterExpression reduces cost**: it filters after reading. Push selectivity into key conditions.\n- **Low-cardinality partition keys** (status, date): hot partitions and throttling. Use high-cardinality keys; shard if needed (`STATUS#PENDING#<0-9>`).\n- **Ignoring pagination**: you silently process only the first 1 MB. Loop on `LastEvaluatedKey`.\n- **Passing Python floats with the resource API**: TypeError. Use `Decimal` (e.g. `json.loads(s, parse_float=Decimal)`).\n- **Expecting strong consistency from a GSI**: GSIs are always eventually consistent.\n- **Read-then-write logic without conditions**: race conditions. Use `ConditionExpression` or transactions.\n- **Designing like a relational schema** (one table per entity, joins in code): many round trips. Design from access patterns.",
+  "best_practices_md": "- Write down access patterns before choosing keys.\n- Use composite sort keys for hierarchical or time-ordered queries (`begins_with`, `between`).\n- Use conditional writes for idempotency and optimistic locking.\n- Prefer on-demand capacity unless traffic is steady and predictable.\n- Use sparse GSIs for \"work queue\" style lookups.\n- Enable PITR on important tables; use TTL for ephemeral data.\n- Use `batch_writer()` for bulk loads and handle throttling with SDK retries (adaptive retry mode).",
+  "my_context_md": "You use DynamoDB for `fs-sync-requests-db`, which holds automation sync jobs. Job tables like that work well when the key matches how jobs are looked up (for example, tenant as partition key and a time-ordered job ID as sort key) and when status changes use conditional `UpdateItem` calls, so two workers can't both pick up the same job. If you ever need \"all pending jobs\" across tenants, a sparse GSI on status is the DynamoDB-native answer rather than a Scan. Compare this with your PostgreSQL side: in DynamoDB, the cross-org reporting you do with SQL GROUP BY and joins would need a different approach (export to S3/Athena, or precomputed items).",
+  "related": [
+    "aws-lambda-essentials",
+    "database-normalization",
+    "caching-strategies",
+    "message-queues",
+    "retries-backoff-idempotency"
+  ],
+  "flashcards": [
+    {
+      "front": "Two kinds of DynamoDB primary keys?",
+      "back": "Simple (partition key only) and composite (partition key + sort key)."
+    },
+    {
+      "front": "Query vs Scan?",
+      "back": "Query reads one partition key's items (optionally a sort key range); Scan reads the entire table."
+    },
+    {
+      "front": "Does a FilterExpression reduce consumed read capacity?",
+      "back": "No. It's applied after items are read; you pay for everything read."
+    },
+    {
+      "front": "GSI vs LSI?",
+      "back": "GSI: any PK/SK, can be added later, eventually consistent. LSI: same PK, different SK, only at table creation, supports strong reads."
+    },
+    {
+      "front": "How do you do create-if-not-exists in DynamoDB?",
+      "back": "PutItem with `ConditionExpression=\"attribute_not_exists(pk)\"`."
+    },
+    {
+      "front": "Max item size and Query page size?",
+      "back": "400 KB per item; 1 MB of data per Query/Scan page (continue with LastEvaluatedKey)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "You need all jobs for org 7 created in May 2024. Best key design?",
+      "options": [
+        "PK = created_date, Scan with filter",
+        "PK = job_id only, Scan",
+        "PK = 'ORG#7', SK = 'JOB#<iso timestamp>#id', Query with begins_with",
+        "PK = status"
+      ],
+      "answer_index": 2,
+      "explanation": "A Query on the tenant partition with a sort-key prefix reads only matching items."
+    },
+    {
+      "question": "boto3 resource put_item fails with 'Float types are not supported'. Fix?",
+      "options": [
+        "Enable Streams",
+        "Use strings for all numbers",
+        "Switch to Scan",
+        "Convert floats to Decimal"
+      ],
+      "answer_index": 3,
+      "explanation": "The resource API's serializer requires Decimal for numbers."
+    },
+    {
+      "question": "Which read can NOT be strongly consistent?",
+      "options": [
+        "Query on a GSI",
+        "Query on an LSI",
+        "GetItem on the base table",
+        "Query on the base table"
+      ],
+      "answer_index": 0,
+      "explanation": "GSIs are replicated asynchronously and only support eventually consistent reads."
+    },
+    {
+      "question": "A table is throttling although total consumed capacity is far below the limit. Likely cause?",
+      "options": [
+        "Too many GSIs",
+        "A hot partition key",
+        "TTL is enabled",
+        "Items are too small"
+      ],
+      "answer_index": 1,
+      "explanation": "Per-partition throughput limits apply; skewed keys concentrate traffic on one partition."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you design a DynamoDB table? Walk through your approach.",
+      "difficulty": "medium",
+      "answer_md": "1. **List access patterns first**, with frequency and latency needs: \"get job by id\", \"list jobs for an org newest first\", \"find all pending jobs\", \"update job status safely\".\n2. **Choose the partition key** for high cardinality and even traffic (e.g. `ORG#<id>`), and the **sort key** for ordering/range needs (`JOB#<timestamp>#<id>`).\n3. **Map each pattern** to GetItem/Query on the table or an index:\n   - get job: `GetItem(pk, sk)`\n   - org's jobs: `Query(pk = ORG#7, ScanIndexForward=False)`\n   - pending jobs: a **sparse GSI** on `pending_since` that is only set while status is PENDING, removed when done.\n4. **Concurrency**: conditional updates (`#status = :pending`) for claiming jobs; `attribute_not_exists` for idempotent creates.\n5. **Lifecycle**: TTL for old jobs, Streams if downstream processing reacts to changes.\n6. **Capacity**: on-demand to start; watch for hot keys in CloudWatch (`ThrottledRequests`) and Contributor Insights.\n7. **Validate** that no pattern needs a Scan. If many ad-hoc analytical queries are needed, keep a relational store or export to S3 for Athena."
+    },
+    {
+      "question": "When would you choose DynamoDB over PostgreSQL, and vice versa?",
+      "difficulty": "medium",
+      "answer_md": "**DynamoDB fits when:**\n- Access patterns are known and key-based (get by id, list by owner sorted by time).\n- You need predictable low latency at very high or spiky scale with no servers to manage.\n- You're serverless (Lambda) and want IAM-based access without managing connection pools.\n- Data per item is self-contained: job status, sessions, idempotency keys, device state.\n\n**PostgreSQL fits when:**\n- You need joins, ad-hoc queries, aggregates, window functions, reporting.\n- Strong relational integrity: foreign keys, constraints, multi-row transactions.\n- Access patterns evolve frequently; adding an index is easy, whereas redesigning DynamoDB keys means migrating data.\n- Reconciliation-style work that compares large sets of rows.\n\nMany systems use both: PostgreSQL as the system of record for transactional and analytical data, DynamoDB for high-throughput operational state like job queues or per-request metadata. The trade-off is flexibility (SQL) vs predictable scale and operational simplicity (DynamoDB)."
+    },
+    {
+      "question": "How do you implement optimistic locking or idempotent writes in DynamoDB?",
+      "difficulty": "hard",
+      "answer_md": "Use **ConditionExpression**, which DynamoDB evaluates atomically with the write.\n\n**Optimistic locking with a version attribute:**\n```python\ntable.update_item(\n    Key={\"pk\": pk, \"sk\": sk},\n    UpdateExpression=\"SET #s = :new, version = version + :one\",\n    ConditionExpression=\"version = :expected\",\n    ExpressionAttributeNames={\"#s\": \"status\"},\n    ExpressionAttributeValues={\":new\": \"DONE\", \":expected\": 3, \":one\": 1},\n)\n```\nIf another writer bumped the version, you get `ConditionalCheckFailedException`; re-read and retry or abort.\n\n**Idempotent creates** (e.g. dedupe an incoming request by request id):\n```python\ntable.put_item(Item={\"pk\": f\"REQ#{request_id}\", \"sk\": \"META\", \"expires_at\": ttl},\n               ConditionExpression=\"attribute_not_exists(pk)\")\n```\nA duplicate request fails the condition, so you return the earlier result instead of processing it again. TTL cleans up old keys.\n\n**Multi-item atomicity**: `TransactWriteItems` (up to 100 actions) with conditions on each, for example creating a job and incrementing a per-org counter together. It costs 2x per item and can fail with `TransactionCanceledException` under contention, so retry with backoff. Each `ConditionalCheckFailedException` still consumes write capacity, so avoid hot-contention designs."
+    }
+  ]
+}

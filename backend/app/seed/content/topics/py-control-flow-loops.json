@@ -1,0 +1,176 @@
+{
+  "slug": "py-control-flow-loops",
+  "title": "Control flow and loops",
+  "skill": "python",
+  "extra_skills": [],
+  "category": "Python",
+  "difficulty": "beginner",
+  "tags": [
+    "if",
+    "for",
+    "while",
+    "loops",
+    "basics"
+  ],
+  "summary": "Control flow decides which code runs and how many times. You will use if/elif/else to branch and for/while to repeat, plus break, continue and the loop-else clause. Written for someone who has never programmed in Python.",
+  "why_md": "- Every real program branches and repeats; this is the skeleton of your logic.\n- Python's `for` iterates over *things* (lists, files, rows), not counters, which changes how you write loops.\n- Clean loops (`enumerate`, `zip`, early `continue`) are what reviewers look for.",
+  "details_md": "### if / elif / else\nPython uses indentation (4 spaces) to mark a block. The first condition that is true runs and the rest are skipped:\n\n```python\nif score >= 90:\n    grade = \"A\"\nelif score >= 75:\n    grade = \"B\"\nelse:\n    grade = \"C\"\n```\nConditions use the truthiness rules from the previous topic. A one-line form is the conditional expression: `grade = \"pass\" if score >= 40 else \"fail\"`.\n\n### for loops iterate over a sequence\n```python\nfor item in [\"pen\", \"book\"]:\n    print(item)\n```\n`for` works on anything iterable: lists, strings, dicts, files, `range`. `range(5)` yields 0,1,2,3,4 (stop excluded); `range(2, 10, 3)` yields 2,5,8.\n\nHelpful partners:\n- `enumerate(items, start=1)` gives `(index, item)` pairs so you never need `i = i + 1`.\n- `zip(a, b)` walks two sequences together and stops at the shorter.\n- Looping a dict: `for k, v in d.items():`.\n\n### while loops\n`while condition:` repeats while the condition stays true. Use it when you do not know the count in advance (retry until success, read until empty). Always make sure something changes the condition, otherwise it runs forever.\n\n### break, continue, else\n- `break` leaves the loop immediately.\n- `continue` skips to the next iteration.\n- `else` on a loop runs only if the loop finished without `break`. It is useful for 'search, and do something if not found'.\n\n### pass and the match statement\n`pass` is a do-nothing placeholder. Python 3.10+ also has `match`/`case` for pattern matching on shapes of data, a tidy replacement for long `elif` chains on one value:\n\n```python\nmatch status:\n    case 200: msg = \"ok\"\n    case 404: msg = \"missing\"\n    case _:   msg = \"other\"\n```\n\n### Don't change a list while looping over it\nRemoving items from the list you are iterating skips elements. Loop over a copy (`for x in items[:]`) or build a new list.\n\n### Truthiness-based loops\n`while queue:` runs until the list is empty, a common idiom.\n\n### Nesting and readability\nPrefer early `continue` over deep nesting: `if not row: continue` keeps the main logic flat.",
+  "code_md": "```python\n# 1. branching\nqty = 12\nif qty == 0:\n    status = \"out of stock\"\nelif qty < 5:\n    status = \"low\"\nelse:\n    status = \"ok\"\nprint(status)\n```\n\n```python\n# 2. enumerate + zip\nskus = [\"A1\", \"B2\", \"C3\"]\nprices = [10, 20, 30]\nfor n, (sku, price) in enumerate(zip(skus, prices), start=1):\n    print(n, sku, price)\n```\n\n```python\n# 3. while with a counter and break\nattempts = 0\nwhile True:\n    attempts += 1\n    if attempts == 3:\n        break\nprint(\"stopped after\", attempts)\n```\n\n```python\n# 4. for/else search\nfor x in [4, 8, 15]:\n    if x % 5 == 0:\n        print(\"found\", x)\n        break\nelse:\n    print(\"no multiple of 5\")\n```",
+  "use_cases_md": "- Looping over rows of an uploaded CSV and skipping blank lines with `continue`.\n- Retrying an API call up to N times with a `for attempt in range(3)` loop.\n- Mapping HTTP status codes to messages with `match`.\n- Walking two parallel lists (order ids and totals) with `zip`.",
+  "mistakes_md": "- **Off-by-one with range**: `range(5)` stops at 4.\n- **Infinite while**: forgetting to update the condition variable.\n- **Mutating a list while iterating** it.\n- **C-style counters**: `for i in range(len(x))` when `for item in x` or `enumerate` is cleaner.\n- **Mixing tabs and spaces** in indentation.\n- **Using `=` instead of `==`** in a condition (a SyntaxError in Python, but still a common slip).",
+  "best_practices_md": "- Iterate over items directly; use `enumerate` when you need the index.\n- Use `zip` for parallel sequences (`strict=True` in 3.10+ to catch length mismatches).\n- Keep nesting shallow with early `continue`/`return`.\n- Give loops a clear exit condition.\n- Use `match` when branching on one value with many cases.",
+  "my_context_md": "",
+  "revision_notes_md": "- Blocks are defined by indentation (4 spaces).\n- `if / elif / else`; first true branch wins.\n- `for x in iterable`; `range(stop)` / `range(start, stop, step)`.\n- `enumerate(seq, start=1)` for index + item; `zip(a, b)` for parallel.\n- `while cond:` when the count is unknown; ensure it can end.\n- `break` exits, `continue` skips, loop `else` runs if no break.\n- Do not modify a list while iterating it.\n- `match/case` (3.10+) for pattern matching.",
+  "exercises_md": "1. Print FizzBuzz for 1..30 using `if/elif/else`.\n2. Given a list of order totals, loop once to compute the count and sum of totals over 500.\n3. Write a `while` loop that halves a number until it is below 1 and counts the steps.\n4. Use `for/else` to find the first negative number in a list and print a message if none exists.",
+  "related": [
+    "py-variables-types-operators",
+    "py-lists-tuples-sets-dicts-basics",
+    "py-comprehensions",
+    "python-generators-iterators"
+  ],
+  "flashcards": [
+    {
+      "front": "What does `range(2, 10, 3)` produce?",
+      "back": "2, 5, 8 (start included, stop excluded, step 3)."
+    },
+    {
+      "front": "What does `enumerate` give you?",
+      "back": "(index, item) pairs; `start=` sets the first index."
+    },
+    {
+      "front": "When does a loop's `else` run?",
+      "back": "Only if the loop ended normally, without `break`."
+    },
+    {
+      "front": "`break` vs `continue`?",
+      "back": "`break` exits the loop; `continue` jumps to the next iteration."
+    },
+    {
+      "front": "Why not remove items from a list while iterating?",
+      "back": "Indexes shift and elements get skipped. Iterate a copy or build a new list."
+    },
+    {
+      "front": "What does `zip` do with unequal lengths?",
+      "back": "Stops at the shortest (unless `strict=True`, which raises)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "How many times does `for i in range(3):` run its body?",
+      "options": [
+        "3",
+        "2",
+        "4",
+        "Depends"
+      ],
+      "answer_index": 0,
+      "explanation": "range(3) yields 0, 1, 2: three values."
+    },
+    {
+      "type": "mcq",
+      "prompt": "When does the `else` clause of a `for` loop execute?",
+      "options": [
+        "Always after the loop",
+        "Only if the loop did not break",
+        "Only if the loop never ran",
+        "Only on an exception"
+      ],
+      "answer_index": 1,
+      "explanation": "Loop-else runs when the loop completes without hitting break."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Best way to get both index and value?",
+      "options": [
+        "for i in range(len(x)): x[i]",
+        "while i < len(x):",
+        "for v in x: i += 1",
+        "for i, v in enumerate(x):"
+      ],
+      "answer_index": 3,
+      "explanation": "`enumerate` is the idiomatic pairing of index and item."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The keyword that skips the rest of the current iteration is ____.",
+      "answers": [
+        "continue"
+      ],
+      "explanation": "`continue` jumps to the next iteration."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`range(5)` produces the numbers 0 up to, but not including, ____.",
+      "answers": [
+        "5"
+      ],
+      "explanation": "stop is exclusive."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "for n, (a, b) in enumerate(zip(\"xyz\", [10, 20]), start=1):\n    print(n, a, b)\nprint(list(range(2, 10, 3)))\n",
+      "answers": [
+        "1 x 10\n2 y 20\n[2, 5, 8]"
+      ],
+      "explanation": "zip stops at 2 pairs; enumerate starts at 1; range with step 3 gives 2,5,8."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "for x in [4, 8, 15, 20]:\n    if x % 5 == 0:\n        print(\"found\", x)\n        break\nelse:\n    print(\"none\")\ni = 0\nwhile i < 3:\n    i += 1\n    if i == 2:\n        continue\n    print(\"i\", i)\n",
+      "answers": [
+        "found 15\ni 1\ni 3"
+      ],
+      "explanation": "15 is the first multiple of 5, so break skips else. In the while loop, i=2 is skipped by continue."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "orders = [10, 0, 25, 0, 40]\nfor o in orders:\n    if o == 0:\n        orders.remove(o)\nprint(orders)\ntotal = 0\nn = 5\nwhile n > 0:\n    total += n\n",
+      "answer": "Two bugs. Removing from `orders` while iterating shifts indexes and can skip elements; build a new list (`[o for o in orders if o != 0]`) or iterate a copy. The `while n > 0` loop never changes `n`, so it is infinite; add `n -= 1`.",
+      "rubric": [
+        "Identifies mutating list during iteration",
+        "Gives a safe alternative (copy / comprehension)",
+        "Spots the unchanging while condition and adds n -= 1"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between `for` and `while` and when you pick each.",
+      "answer": "`for` iterates over a known iterable (a list, a file, a range) and ends when it is exhausted; it is the default choice because it cannot run forever on finite data. `while` repeats while a condition holds and is used when the number of iterations is unknown: polling, retrying until success, reading until EOF. With `while` you must make sure the state in the condition changes or you break out.",
+      "rubric": [
+        "for = iterate an iterable",
+        "while = repeat on a condition, unknown count",
+        "while risks infinite loops"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is the loop `else` clause for? Give an example.",
+      "answer": "It runs when the loop finishes without `break`, so it means 'not found'. Example: scan a list for a valid SKU; on `break` you found it, in `else` you raise or log that none matched. It avoids a separate `found = False` flag.",
+      "rubric": [
+        "Runs only when no break happened",
+        "Replaces a found flag in search loops"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Why is `for i in range(len(items))` usually considered un-Pythonic?",
+      "difficulty": "easy",
+      "answer_md": "It adds indirection: you index back into the list when you could iterate directly. `for item in items` is shorter and works on any iterable (files, generators) that cannot be indexed. If you need the position use `enumerate(items)`. Index-based loops invite off-by-one errors. They are still right when you must modify by index or step through two structures with different logic."
+    },
+    {
+      "question": "What happens if you remove items from a list while looping over it?",
+      "difficulty": "medium",
+      "answer_md": "The list iterator holds an index. Removing an element shifts later items left, so the iterator skips the element that moved into the removed slot.\n\n```python\nxs = [1, 1, 2]\nfor x in xs:\n    if x == 1: xs.remove(x)\nprint(xs)  # [1, 2]\n```\nFix by iterating a copy (`xs[:]`), building a new list with a comprehension, or looping backwards by index."
+    },
+    {
+      "question": "Explain `zip(strict=True)` and why you might use it.",
+      "difficulty": "medium",
+      "answer_md": "By default `zip` silently stops at the shortest input, which can hide data loss when two lists should be the same length (e.g. ids and prices). Python 3.10 added `strict=True`, which raises `ValueError` if the iterables have different lengths. Use it when a length mismatch means a bug. Use `itertools.zip_longest` when you want to pad instead."
+    }
+  ]
+}

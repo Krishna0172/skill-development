@@ -1,0 +1,158 @@
+{
+  "slug": "py-clean-architecture",
+  "title": "Clean architecture for Python backends",
+  "skill": "backend-architecture",
+  "extra_skills": [
+    "python-oop",
+    "python-testing"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "layers",
+    "services",
+    "repositories",
+    "dependency-injection",
+    "ports-and-adapters",
+    "design-patterns",
+    "strategy",
+    "factory",
+    "registry"
+  ],
+  "summary": "Structuring a backend so business logic doesn't depend on frameworks, databases or AWS: handlers → services → repositories/adapters, dependencies injected as parameters, ports (Protocols) and adapters (psycopg2, boto3, HTTP), and the handful of design patterns that earn their keep in backends — strategy, factory, registry, repository, adapter — applied to a marketplace report processor.",
+  "why_md": "- Services written as one Flask view or one ECS `main()` with SQL, S3 and business rules interleaved become impossible to test or change safely.\n- Layering lets you swap Flask for FastAPI, psycopg2 for SQLAlchemy, or S3 for local files without touching business rules.\n- It is the backbone of system-design and 'how would you structure this service' interview rounds.\n- AI backends need the same seams: swap LLM providers, vector stores and prompt strategies behind ports.",
+  "details_md": "### Layers\n1. **Entry points / handlers**: Flask route, Lambda handler, ECS `main`, CLI. Parse input, call one service method, map results/errors to HTTP or exit codes. No business rules, no SQL.\n2. **Services (use cases)**: orchestrate a business operation — 'process upload', 'claim next job', 'record vote'. Contain the rules, transactions boundaries and decisions. Depend only on abstractions.\n3. **Domain**: plain data and pure functions (dataclasses, enums, validation, pandas transforms). No I/O.\n4. **Repositories / adapters**: the concrete edges — SQL via psycopg2, S3 via boto3, SES, SP-API over httpx. Translate between external formats and domain objects.\n\nThe **dependency rule**: arrows point inward. Services import Protocols, not `psycopg2` or `boto3`; adapters implement the Protocols. The composition root (handler/main) wires concrete adapters into services.\n\n### Ports and adapters (hexagonal)\nA *port* is an interface the core needs (`UploadRepo`, `FileStore`, `Notifier`, `LLMClient`) — in Python a `typing.Protocol`. An *adapter* implements it for a technology (`PgUploadRepo`, `S3FileStore`, `SesNotifier`) or for tests (`InMemoryUploadRepo`). Driving adapters (HTTP, queue consumer) call into the core; driven adapters are called by it.\n\n### Dependency injection by parameters\nNo framework needed: pass collaborators to `__init__` or functions; construct them in one place. FastAPI's `Depends` is the same idea with sugar.\n\n### Patterns that pay off\n- **Repository**: collection-like access to persisted data (`get`, `add`, `upsert_many`, `claim_next`) hiding SQL. Keeps SQL in one place per aggregate and makes services testable.\n- **Adapter**: wrap a third-party API in your own small interface (`FileStore.read(key)` over boto3), isolating SDK quirks and retries.\n- **Strategy**: interchangeable algorithms behind one interface — fee calculation per marketplace, parsing strategy per file format. In Python often just a function.\n- **Registry**: dict from key to strategy/class, populated by a decorator; lookup replaces `if/elif`. Combine with lazy imports for many plugins.\n- **Factory**: a function that builds the right configured object (`make_processor(report_type, settings)`), keeping construction logic out of callers.\n- **Unit of Work** (optionally): one object owning the transaction across several repositories (`with uow: ... uow.commit()`).\n\n### Applied: marketplace report processor\nHandler receives an S3 event → `UploadService.process(upload_id, key, report_type)` → service marks status `processing`, asks `FileStore` for bytes, gets a `ReportProcessor` strategy from the registry, runs the pure transform, calls `OrderRepo.upsert_many` in one transaction, marks status `done`/`failed`, notifies. Each processor contains only parsing and mapping rules.\n\n### Don't overdo it\nThree layers and a few Protocols is enough for most services. Avoid abstract base classes with one implementation, generic repositories for everything, and indirection that doesn't serve testing or replaceability.",
+  "code_md": "```python\n# ports.py - what the core needs (no boto3 / psycopg2 imports here)\nfrom typing import Protocol, Callable\nimport pandas as pd\n\nclass FileStore(Protocol):\n    def read(self, key: str) -> bytes: ...\n\nclass UploadRepo(Protocol):\n    def set_status(self, upload_id: str, status: str, error: str | None = None) -> None: ...\n\nclass OrderRepo(Protocol):\n    def upsert_many(self, df: pd.DataFrame) -> int: ...\n\n# registry of strategies: report_type -> pure transform\nProcessor = Callable[[bytes], pd.DataFrame]\nPROCESSORS: dict[str, Processor] = {}\n\ndef register(report_type: str):\n    def deco(fn: Processor) -> Processor:\n        PROCESSORS[report_type] = fn\n        return fn\n    return deco\n\n@register(\"amazon_settlement\")\ndef amazon_settlement(raw: bytes) -> pd.DataFrame:      # domain logic, no I/O\n    import io\n    df = pd.read_csv(io.BytesIO(raw), sep=\"\\t\", encoding=\"utf-8-sig\")\n    return df.rename(columns={\"order-id\": \"order_id\", \"amount\": \"amount\"})\n```\n\n```python\n# service.py - the use case, depends only on ports\nimport logging\nlogger = logging.getLogger(__name__)\n\nclass UnknownReportType(Exception): ...\n\nclass UploadService:\n    def __init__(self, files: FileStore, uploads: UploadRepo, orders: OrderRepo,\n                 processors: dict[str, Processor] = PROCESSORS):\n        self.files, self.uploads, self.orders, self.processors = files, uploads, orders, processors\n\n    def process(self, upload_id: str, key: str, report_type: str) -> int:\n        processor = self.processors.get(report_type)\n        if processor is None:\n            raise UnknownReportType(report_type)\n        self.uploads.set_status(upload_id, \"processing\")\n        try:\n            n = self.orders.upsert_many(processor(self.files.read(key)))\n        except Exception as e:\n            logger.exception(\"upload failed upload_id=%s\", upload_id)\n            self.uploads.set_status(upload_id, \"failed\", error=repr(e))\n            raise\n        self.uploads.set_status(upload_id, \"done\")\n        return n\n\n# adapters.py - concrete edges\nclass S3FileStore:\n    def __init__(self, client, bucket): self.client, self.bucket = client, bucket\n    def read(self, key): return self.client.get_object(Bucket=self.bucket, Key=key)[\"Body\"].read()\n\nclass PgOrderRepo:\n    def __init__(self, transaction): self.transaction = transaction   # e.g. db_transaction()\n    def upsert_many(self, df):\n        with self.transaction() as cur:\n            execute_values(cur, UPSERT_SQL, list(df.itertuples(index=False, name=None)))\n            return len(df)\n\n# main.py / handler - composition root\ndef handler(event, context):\n    svc = UploadService(S3FileStore(boto3.client(\"s3\"), BUCKET),\n                        PgUploadRepo(db_transaction), PgOrderRepo(db_transaction))\n    rec = event[\"Records\"][0]\n    return svc.process(rec[\"upload_id\"], rec[\"key\"], rec[\"report_type\"])\n```",
+  "use_cases_md": "- Marketplace upload pipeline: handler → `UploadService` → registry of processors → `OrderRepo` upsert, with status tracking in `UploadRepo`.\n- Job runner: `JobRepo.claim_next()` (SKIP LOCKED SQL inside the repository), `JobService.run_one()`, executor in the entry point.\n- LLM chat backend: `ChatService` depending on `LLMClient`, `MessageRepo`, `CostTracker` ports; swap providers or use fakes in tests.\n- Fee/commission calculation as a strategy per marketplace.\n- Moving a Flask service to FastAPI by rewriting only the handler layer.",
+  "mistakes_md": "- **SQL and HTTP in handlers**: rules can't be reused from a CLI/job or tested without the framework. Fix: thin handlers calling services.\n- **Services importing psycopg2/boto3 directly**: no seams. Fix: depend on Protocols; inject adapters.\n- **Repositories leaking cursors or SQL fragments** to services. Fix: methods speak domain language (`claim_next_job()`), return domain objects.\n- **Transaction boundaries scattered** (commit inside each repo method). Fix: service or unit-of-work owns the transaction.\n- **Global singletons** (`conn`, `s3`) imported everywhere. Fix: construct in the composition root and pass down.\n- **Architecture astronautics**: five layers, generic base repos, interfaces with one implementation and no test use. Fix: add structure where change and testing demand it.",
+  "best_practices_md": "- Three practical layers: handlers, services (+ pure domain), repositories/adapters.\n- Dependencies point inward; core imports no frameworks or SDKs.\n- Wire everything in one composition root; inject via parameters.\n- Repositories own SQL; one per aggregate/table group; return domain objects.\n- Registry + strategy for per-marketplace behaviour; factories for construction.\n- Test services with in-memory fakes, repositories against a real Postgres.\n- Keep it proportional to the service's size and rate of change.",
+  "my_context_md": "Several pieces of this architecture already exist in his code: `ECSMarketplaceDataUpload` has a **registry dispatcher with lazy importlib imports** for 150+ processors plus upload-status tracking and deadlock retry (registry + strategy + a natural `UploadRepo`); `ForcesightJobSchedulerAndRunner` separates `job_repo.py`, `lock.py` and `runner.py` (a repository layer around `FOR UPDATE SKIP LOCKED`); `AmazonVendorBankRecon/db.py`'s `db_transaction()` context manager is a ready-made transaction adapter to inject into repositories; `ECSInventoryPriceTracking/app/fetchers/spapi.py` is effectively an adapter around SP-API with a `@dataclass` config. The gap is consistency: with 641 functions over 100 lines and 342 `global` statements, the next step is moving rules out of long processor functions into services/pure functions and passing connections and clients in rather than using globals.",
+  "revision_notes_md": "- Layers: handler (I/O mapping) → service (use case, rules, transaction) → domain (pure) → repositories/adapters (SQL, AWS, HTTP).\n- Dependency rule: core depends on Protocols (ports); adapters implement them.\n- Composition root wires concrete adapters; DI = pass parameters.\n- Repository: domain-language data access, SQL in one place.\n- Adapter: wrap SDKs behind your interface.\n- Strategy + registry: per-key behaviour without if/elif; factory builds configured objects.\n- Service/UoW owns transactions.\n- Tests: services with fakes, repos with real Postgres.\n- Proportionality: don't add layers that don't pay for themselves.",
+  "exercises_md": "1. Draw the current flow of one `ECSMarketplaceDataUpload` processor and mark which lines belong to handler, service, domain and repository layers.\n2. Define `FileStore`, `UploadRepo` and `OrderRepo` Protocols; implement S3/Pg adapters and in-memory fakes; write a service test that covers success, unknown report type and failure status.\n3. Move the `SKIP LOCKED` claim query from wherever it's called into a `JobRepo.claim_next(worker_id)` method and test it with two connections against a test database.\n4. Implement a fee-calculation strategy registry for two marketplaces using a decorator, with a test that unknown marketplaces raise a clear error.",
+  "related": [
+    "py-solid-design-principles",
+    "registry-dispatcher-pattern",
+    "be-dependency-injection",
+    "py-testing-mocking",
+    "be-microservices",
+    "be-system-design-fundamentals"
+  ],
+  "flashcards": [
+    {
+      "front": "What is the dependency rule in clean/hexagonal architecture?",
+      "back": "Source dependencies point inward: business logic depends on abstractions (ports), never on frameworks, DB drivers or SDKs; adapters depend on the core."
+    },
+    {
+      "front": "Port vs adapter?",
+      "back": "Port = interface the core needs (`OrderRepo` Protocol). Adapter = concrete implementation for a technology (`PgOrderRepo`) or tests (`InMemoryOrderRepo`)."
+    },
+    {
+      "front": "What belongs in a handler?",
+      "back": "Parsing/validating input, calling one service method, mapping results and exceptions to the transport (HTTP status, exit code). No SQL, no business rules."
+    },
+    {
+      "front": "Strategy vs registry?",
+      "back": "Strategy = interchangeable algorithm behind one interface. Registry = mapping from key to strategy (often filled by a decorator) so selection needs no if/elif."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "In a layered backend, where should the `SELECT … FOR UPDATE SKIP LOCKED` job-claim query live?",
+      "options": [
+        "In a repository method such as `JobRepo.claim_next()`",
+        "In the Flask/ECS handler",
+        "In the service, built with an f-string",
+        "In the domain dataclass"
+      ],
+      "answer_index": 0,
+      "explanation": "Repositories own SQL; services call `claim_next()` in domain terms."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which pattern best replaces a 150-branch `if report_type == ...` chain selecting processing logic?",
+      "options": [
+        "Singleton",
+        "Observer",
+        "Template method with deep inheritance",
+        "Registry of strategies keyed by report type"
+      ],
+      "answer_index": 3,
+      "explanation": "A dict registry maps keys to strategies; new types are added without editing the dispatcher."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The single place where concrete adapters are constructed and wired into services (e.g. `main()` or the Lambda handler) is called the composition ____.",
+      "answers": [
+        "root"
+      ],
+      "explanation": "Composition root."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In hexagonal architecture, an interface the core defines for something it needs (like `OrderRepo`) is called a ____.",
+      "answers": [
+        "port"
+      ],
+      "explanation": "Ports are implemented by adapters."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "PROCESSORS = {}\n\ndef register(name):\n    def deco(cls):\n        PROCESSORS[name] = cls\n        return cls\n    return deco\n\n@register(\"amazon\")\nclass AmazonProcessor:\n    def process(self, rows): return [r.upper() for r in rows]\n\n@register(\"flipkart\")\nclass FlipkartProcessor:\n    def process(self, rows): return rows[::-1]\n\ndef dispatch(market, rows):\n    cls = PROCESSORS.get(market)\n    return cls().process(rows) if cls else f\"unsupported: {market}\"\n\nprint(sorted(PROCESSORS))\nprint(dispatch(\"amazon\", [\"a\", \"b\"]), dispatch(\"flipkart\", [\"a\", \"b\"]))\nprint(dispatch(\"meesho\", []))",
+      "answers": [
+        "['amazon', 'flipkart']\n['A', 'B'] ['b', 'a']\nunsupported: meesho"
+      ],
+      "explanation": "The decorator registers each class at definition time; dispatch is a dict lookup with an explicit fallback."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class InMemoryUploadRepo:\n    def __init__(self):\n        self.status = {}\n    def set_status(self, uid, s):\n        self.status[uid] = s\n\nclass UploadService:\n    def __init__(self, repo, parser):\n        self.repo, self.parser = repo, parser\n    def run(self, uid, raw):\n        self.repo.set_status(uid, \"processing\")\n        try:\n            rows = self.parser(raw)\n        except ValueError:\n            self.repo.set_status(uid, \"failed\")\n            return 0\n        self.repo.set_status(uid, \"done\")\n        return len(rows)\n\nrepo = InMemoryUploadRepo()\nsvc = UploadService(repo, lambda raw: [int(x) for x in raw.split(\",\")])\nprint(svc.run(\"u1\", \"1,2,3\"), svc.run(\"u2\", \"1,x\"))\nprint(repo.status)",
+      "answers": [
+        "3 0\n{'u1': 'done', 'u2': 'failed'}"
+      ],
+      "explanation": "The service is tested with an in-memory adapter: no database needed to verify status transitions."
+    },
+    {
+      "type": "debug",
+      "prompt": "This Flask view works but is hard to test and impossible to reuse from the ECS job. What's wrong and how would you restructure it?",
+      "code": "@app.post(\"/uploads/<upload_id>/process\")\ndef process(upload_id):\n    conn = psycopg2.connect(DSN)\n    cur = conn.cursor()\n    cur.execute(f\"SELECT key, report_type FROM uploads WHERE id = '{upload_id}'\")\n    key, rtype = cur.fetchone()\n    body = boto3.client(\"s3\").get_object(Bucket=\"reports\", Key=key)[\"Body\"].read()\n    if rtype == \"amazon\":\n        df = parse_amazon(body)\n    elif rtype == \"flipkart\":\n        df = parse_flipkart(body)\n    for row in df.itertuples():\n        cur.execute(\"INSERT INTO orders VALUES (%s, %s)\", (row.order_id, row.qty))\n    conn.commit()\n    return {\"ok\": True}",
+      "answer": "All layers are mixed in the handler: SQL (with an injectable f-string), S3 access, dispatch by if/elif, and per-row inserts, with dependencies created inline. Nothing can be tested without Postgres + AWS, and the ECS job can't reuse it.\n\n```python\n# handler: transport only\n@app.post(\"/uploads/<upload_id>/process\")\ndef process(upload_id):\n    try:\n        n = upload_service.process(upload_id)       # built in the composition root\n    except UploadNotFound:\n        return {\"error\": \"not found\"}, 404\n    return {\"rows\": n}\n\n# service: rules, depends on ports\nclass UploadService:\n    def __init__(self, uploads, files, orders, processors):\n        ...\n    def process(self, upload_id):\n        up = self.uploads.get(upload_id)            # parameterised SQL in repo\n        df = self.processors[up.report_type](self.files.read(up.key))\n        return self.orders.upsert_many(df)          # execute_values in repo\n```\nThe ECS job calls the same `UploadService`.",
+      "rubric": [
+        "Handler mixes transport, SQL, S3 and business logic",
+        "Extract a service depending on injected repositories/adapters",
+        "Replace if/elif with a registry of processors",
+        "Fix SQL injection (parameters) and per-row inserts (batch) in the repository"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd structure a marketplace report processing service so it's testable and easy to extend, as in a system-design interview.",
+      "answer": "I'd use three layers with dependencies pointing inward. The entry points — an S3-event Lambda/ECS consumer and an admin HTTP endpoint — only parse input and call `UploadService.process(upload_id)`. The service owns the use case: load upload metadata from `UploadRepo`, mark it processing, fetch bytes through a `FileStore` port, pick a processor strategy from a registry keyed by report type, run the pure transform (DataFrame in, DataFrame out), write with `OrderRepo.upsert_many` in one transaction (idempotent ON CONFLICT so retries are safe), and set status done/failed. Ports are Protocols; adapters wrap psycopg2 (`execute_values`, deadlock retry) and boto3. Adding a marketplace means adding one registered processor module (lazily imported), no dispatcher edits. Tests: processors with small DataFrames, the service with in-memory fakes, repositories against a real Postgres, and one end-to-end test with a sample file.",
+      "rubric": [
+        "Thin entry points → service use case → repositories/adapters",
+        "Ports (Protocols) with injected adapters; composition root",
+        "Registry/strategy for per-marketplace processors (open for extension)",
+        "Testing strategy per layer; idempotent writes/status tracking"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the repository pattern and what are its benefits and costs?",
+      "difficulty": "medium",
+      "answer_md": "A repository presents persisted data as a collection-like object with domain-level methods — `get(order_id)`, `upsert_many(rows)`, `claim_next_job(worker)` — and hides the SQL/driver behind it.\n\n**Benefits**: SQL lives in one place per aggregate (easier to optimise and review for injection), services read in business terms, and services can be tested with an in-memory repository.\n\n**Costs**: another layer to maintain; the temptation to build a generic `BaseRepository` that hides Postgres features you actually need (`ON CONFLICT`, `SKIP LOCKED`, JSONB). With raw psycopg2 that's fine — keep repository methods specific and let them use Postgres fully.\n\nTransactions: let the service (or a unit-of-work) own the transaction and pass the cursor/connection to repositories, so several repository calls commit atomically."
+    },
+    {
+      "question": "Explain ports and adapters with a concrete Python example.",
+      "difficulty": "medium",
+      "answer_md": "The core defines **ports** — what it needs — as Protocols:\n\n```python\nclass LLMClient(Protocol):\n    def complete(self, prompt: str) -> str: ...\n```\n\n**Adapters** implement them for real technology or tests:\n\n```python\nclass HttpLLMClient:          # wraps a provider SDK/HTTP API\n    def complete(self, prompt): ...\n\nclass FakeLLM:\n    def __init__(self, answer): self.answer = answer\n    def complete(self, prompt): return self.answer\n```\n\nThe service depends only on the port: `ChatService(llm: LLMClient, messages: MessageRepo)`. The composition root decides which adapter to plug in. Benefits: tests are fast and deterministic, providers can be swapped, and SDK quirks (retries, auth, rate limits) are contained in the adapter. 'Driving' adapters (HTTP handlers, queue consumers) call into the core; 'driven' adapters (DB, S3, LLM) are called by it."
+    },
+    {
+      "question": "When is clean architecture overkill?",
+      "difficulty": "easy",
+      "answer_md": "When the code is small, short-lived or unlikely to change: a one-off backfill script, a 50-line Lambda that copies an S3 object, a prototype. Adding ports, adapters and services there adds files and indirection without paying back in testability or replaceability.\n\nSigns you need it: the same business rule is needed from multiple entry points (API and job), tests require real AWS/DB for logic that has nothing to do with them, functions have grown past hundreds of lines mixing SQL and rules, or you're planning to swap a component (Flask → FastAPI, provider A → B).\n\nA pragmatic middle ground: start with pure functions for business rules and pass dependencies as parameters. Introduce Protocols and repository classes when a second implementation (often a test fake) appears."
+    }
+  ]
+}

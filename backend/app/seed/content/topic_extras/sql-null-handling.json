@@ -1,0 +1,65 @@
+{
+  "slug": "sql-null-handling",
+  "why_md": "- Marketplace reports arrive with missing columns; NULL handling decides whether merges keep or destroy data.\n- Three-valued logic causes silent bugs: rows vanish from `<>` filters, NOT IN returns nothing, unique constraints allow duplicate NULLs.\n- AI pipelines also produce partial records; the same COALESCE/NULLIF patterns apply.\n- A favourite interview topic because it exposes real-world SQL experience.",
+  "revision_notes_md": "- Any comparison with NULL (`=`, `<>`, `<`) is UNKNOWN; WHERE keeps only TRUE.\n- Use `IS NULL` / `IS NOT NULL`; `IS DISTINCT FROM` for NULL-safe inequality.\n- `COALESCE(a, b, c)` returns the first non-NULL; `NULLIF(a, b)` returns NULL when a = b.\n- `total / NULLIF(count, 0)` avoids division by zero.\n- Aggregates ignore NULLs; `SUM` of nothing is NULL; `COUNT(col)` skips NULLs.\n- `'x' || NULL` is NULL in PostgreSQL (use `concat()` to treat NULL as '').\n- Unique constraints treat NULLs as distinct unless `UNIQUE NULLS NOT DISTINCT` (PG 15+).\n- `ORDER BY` puts NULLs last ascending in PostgreSQL; control with NULLS FIRST/LAST.",
+  "exercises_md": "1. Take an orders table with a nullable status. Write the 'not cancelled' filter three ways (`<>`, `IS DISTINCT FROM`, `COALESCE`) and verify the counts differ as expected.\n2. Write an upsert that merges two partial marketplace reports into one row so that a report with a missing column never overwrites an existing value, then write a test that proves it.",
+  "my_context_md": "Your `INSERT ... ON CONFLICT DO UPDATE SET col = COALESCE(EXCLUDED.col, t.col)` pattern in `python-postgres` is a direct application of NULL handling: a report that lacks a value doesn't wipe out a value an earlier report set. The flip side to remember: with that pattern you can never deliberately clear a column back to NULL via the upsert.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "For a NULL-safe 'not equal' comparison in PostgreSQL, write `status IS ____ FROM 'RTO'`.",
+      "answers": [
+        "distinct"
+      ],
+      "explanation": "IS DISTINCT FROM treats NULL as a comparable value, returning TRUE for NULL vs 'RTO'."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`SELECT revenue / ____(orders, 0)` returns NULL instead of a division-by-zero error when orders is 0.",
+      "answers": [
+        "nullif"
+      ],
+      "explanation": "NULLIF(orders, 0) turns 0 into NULL, and anything divided by NULL is NULL."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE o(id INT, status TEXT);\nINSERT INTO o VALUES (1,'paid'),(2,'rto'),(3,NULL);\n''')\na = db.execute(\"SELECT COUNT(*) FROM o WHERE status <> 'rto'\").fetchone()[0]\nb = db.execute(\"SELECT COUNT(*) FROM o WHERE status IS NOT 'rto'\").fetchone()[0]\nc = db.execute(\"SELECT COUNT(*) FROM o WHERE COALESCE(status,'') <> 'rto'\").fetchone()[0]\nprint(a, b, c)",
+      "answers": [
+        "1 2 2"
+      ],
+      "explanation": "`<>` with NULL is UNKNOWN, so row 3 is dropped. SQLite's `IS NOT` (PostgreSQL: IS DISTINCT FROM) and COALESCE keep it."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\nr = db.execute('''SELECT COALESCE(NULL, NULL, 'x'),\n  NULLIF(5, 5), 10 / NULLIF(0, 0), NULL = NULL,\n  (SELECT SUM(v) FROM (SELECT 1 AS v) WHERE 0)''').fetchone()\nprint(r)",
+      "answers": [
+        "('x', None, None, None, None)"
+      ],
+      "explanation": "COALESCE picks 'x'; NULLIF(5,5) is NULL; dividing by NULL is NULL; NULL = NULL is UNKNOWN (NULL); SUM over zero rows is NULL."
+    },
+    {
+      "type": "debug",
+      "prompt": "This merge upsert is meant to keep existing values when the new report lacks them, but existing values never get updated even when a new value arrives. Fix it.",
+      "code": "INSERT INTO orders AS t (id, orgid, ship_date, carrier)\nVALUES (%s, %s, %s, %s)\nON CONFLICT (id, orgid) DO UPDATE SET\n  ship_date = COALESCE(t.ship_date, EXCLUDED.ship_date),\n  carrier   = COALESCE(t.carrier, EXCLUDED.carrier);",
+      "answer": "The COALESCE arguments are reversed. `COALESCE(t.col, EXCLUDED.col)` keeps the **old** value whenever one exists, so new data only fills empty columns.\n\n```sql\nON CONFLICT (id, orgid) DO UPDATE SET\n  ship_date = COALESCE(EXCLUDED.ship_date, t.ship_date),\n  carrier   = COALESCE(EXCLUDED.carrier, t.carrier);\n```\nNow the new value wins when present; the old value is kept only when the incoming value is NULL.",
+      "rubric": [
+        "Argument order of COALESCE is reversed",
+        "COALESCE returns the first non-NULL argument",
+        "New value first: COALESCE(EXCLUDED.col, t.col)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain SQL's three-valued logic and two bugs it causes in production queries.",
+      "answer": "SQL predicates can be TRUE, FALSE or UNKNOWN. Any comparison involving NULL yields UNKNOWN, and `WHERE` keeps only TRUE rows. `NOT UNKNOWN` is still UNKNOWN.\n\nBug 1 — vanishing rows: `WHERE status <> 'cancelled'` silently drops rows with NULL status. Fix: `status IS DISTINCT FROM 'cancelled'`.\n\nBug 2 — NOT IN with NULL: `WHERE sku NOT IN (SELECT sku FROM sales)` returns nothing if any sales.sku is NULL, because `x <> NULL` is UNKNOWN for every row. Fix: NOT EXISTS.\n\nAlso: unique constraints let multiple NULLs through (each NULL is distinct), so `ON CONFLICT` on a nullable column won't dedupe — use NOT NULL columns or `NULLS NOT DISTINCT` (PG 15+).",
+      "rubric": [
+        "TRUE/FALSE/UNKNOWN; WHERE keeps only TRUE",
+        "<> / = with NULL drops rows; use IS DISTINCT FROM",
+        "NOT IN with NULL returns nothing; use NOT EXISTS",
+        "Unique constraints treat NULLs as distinct"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "slug": "registry-dispatcher-pattern",
+  "why_md": "A registry maps a key (report type, event name, tool name) to a handler, replacing giant if/elif chains with data. It's the backbone of plugin systems, webhook routers, job runners and - importantly for AI work - LLM tool calling, where the model returns a tool name and your code dispatches to the function. Explaining one you built, with its trade-offs, is strong interview material.",
+  "revision_notes_md": "- Registry = dict `key -> handler` (or a spec pointing to `module:function`).\n- Dispatcher looks up the key and calls the handler; unknown keys raise a clear error.\n- Handlers share one interface (same signature / Protocol) -> interchangeable (Strategy).\n- Lazy imports (`importlib.import_module`) keep cold start cheap and isolate broken modules.\n- Cache resolved handlers (`functools.cache`) to import each module once.\n- Detect duplicate keys when building the registry - `dict()` silently keeps the last one.\n- Registration decorators let handlers self-register (but require importing the module).\n- Test: every registered key resolves to a callable (one parametrised test).",
+  "exercises_md": "1. Build a registry of 3 fake report processors stored as `\"module:function\"` strings, resolved lazily with `importlib`, with duplicate-key detection and a clear `UnknownReportType` error.\n2. Write a parametrised pytest that imports every registered handler and checks it's callable with the expected signature (`inspect.signature`).",
+  "my_context_md": "ECSMarketplaceDataUpload is exactly this pattern: a registry dispatcher with lazy `importlib` imports routing 150+ marketplace report processors, plus upload status tracking and deadlock retry around it. Being able to explain why lazy imports, how unknown types fail, and how you'd test all registrations is a ready-made interview story from your own code.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To import a processor module by its string name at dispatch time, call importlib.____('processors.amazon_orders').",
+      "answers": [
+        "import_module"
+      ],
+      "explanation": "Lazy import on first use."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Registries make handlers interchangeable behind one interface; this is the ____ design pattern.",
+      "answers": [
+        "strategy",
+        "strategy pattern"
+      ],
+      "explanation": "Each handler is a strategy selected at runtime."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "SPECS = [(\"amazon\", \"a1\"), (\"flipkart\", \"f1\"), (\"amazon\", \"a2\")]\nregistry = dict(SPECS)\nprint(registry)\n\nseen, dupes = set(), []\nfor key, _ in SPECS:\n    if key in seen:\n        dupes.append(key)\n    seen.add(key)\nprint(dupes)\nprint(registry.get(\"meesho\", \"unknown\"))",
+      "answers": [
+        "{'amazon': 'a2', 'flipkart': 'f1'}\n['amazon']\nunknown"
+      ],
+      "explanation": "dict() keeps the last value for a duplicate key silently, which is why explicit duplicate detection matters."
+    },
+    {
+      "type": "debug",
+      "prompt": "Adding a typo'd report type silently processes nothing. What's wrong?",
+      "code": "HANDLERS = {\"amazon_orders\": process_amazon_orders,\n            \"flipkart_orders\": process_flipkart_orders}\n\ndef dispatch(report_type, df):\n    handler = HANDLERS.get(report_type)\n    if handler:\n        return handler(df)",
+      "answer": "Unknown keys fall through and return `None` - the upload is reported as fine but nothing was processed. Fail loudly with a specific error the status tracker can record:\n\n```python\nclass UnknownReportType(ValueError):\n    pass\n\ndef dispatch(report_type, df):\n    try:\n        handler = HANDLERS[report_type]\n    except KeyError:\n        raise UnknownReportType(f\"no processor for {report_type!r}\") from None\n    return handler(df)\n```",
+      "rubric": [
+        "Silent None for unknown keys hides failures",
+        "Raise a specific exception with the bad key",
+        "Status tracking can then record a clear error"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the trade-offs of lazy imports in a registry of 150+ processors.",
+      "answer": "Lazy imports load a processor module only when its report type is dispatched. Pros: faster cold start (important on Lambda), lower memory, and a broken or heavy module affects only its own report type. Cons: import errors surface at runtime instead of startup, so a test that imports every registered module is essential; first call pays the import cost; and static tools see string references, not real imports. Mitigate by caching resolved handlers and validating the registry in CI.",
+      "rubric": [
+        "Faster startup / lower memory, isolates broken modules",
+        "Errors only appear at dispatch time",
+        "Mitigate with a test importing all handlers + caching"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "An LLM returns `{\"tool\": \"get_order_status\", \"args\": {...}}`. The cleanest way to execute it is:",
+      "options": [
+        "eval() the tool name",
+        "A long if/elif chain",
+        "Look up the tool name in a registry dict of allowed functions and call it with validated args",
+        "getattr on the globals() module"
+      ],
+      "answer_index": 2,
+      "explanation": "A registry is an explicit allow-list - same pattern as report dispatch."
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, kv %}
+{% block title %}{{ p.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><div class="small faint"><a href="/projects">Projects</a> · {{ "Work" if p.kind == "professional" else "Personal" }}</div>
+    <h1>{{ p.name }}</h1>
+    <div class="row">{{ badge(p.status) }}{% for t in p.tech or [] %}<span class="chip">{{ t }}</span>{% endfor %}</div>
+  </div>
+  <div class="actions"><a class="btn {{ 'primary' if not edit }}" href="/projects/{{ p.id }}{{ '' if edit else '?edit=1' }}">{{ "Close editor" if edit else "Edit" }}</a></div>
+</div>
+
+{% if edit %}
+<form method="post" action="/projects/{{ p.id }}/edit" class="card mb"><div class="body form-grid">
+  <input type="hidden" name="links" value="1">
+  <div class="grid g4">
+    <label class="field" style="grid-column:span 2">Name<input name="name" value="{{ p.name }}" required></label>
+    <label class="field">Kind<select name="kind"><option value="personal" {{ 'selected' if p.kind == 'personal' }}>Personal</option><option value="professional" {{ 'selected' if p.kind == 'professional' }}>Work</option></select></label>
+    <label class="field">Status<select name="status">{% for s in statuses %}<option value="{{ s }}" {{ 'selected' if s == p.status }}>{{ s|label }}</option>{% endfor %}</select></label>
+  </div>
+  <div class="grid g4">
+    <label class="field">Organisation<input name="organization" value="{{ p.organization or '' }}"></label>
+    <label class="field">Role<input name="role" value="{{ p.role or '' }}"></label>
+    <label class="field">Start<input type="date" name="start_date" value="{{ p.start_date or '' }}"></label>
+    <label class="field">End<input type="date" name="end_date" value="{{ p.end_date or '' }}"></label>
+  </div>
+  <label class="field">Tech <span class="hint">comma-separated</span><input name="tech" value="{{ (p.tech or [])|join(', ') }}"></label>
+  <label class="field">Summary<textarea name="summary" rows="2">{{ p.summary or '' }}</textarea></label>
+  <label class="field">Source path <span class="hint">where the code lives (read-only reference)</span><input name="source_path" value="{{ p.source_path or '' }}"></label>
+  <div class="grid g2">
+    {% set linked_s = p.skills|map(attribute="id")|list %}{% set linked_t = p.topics|map(attribute="id")|list %}
+    <label class="field">Skills <span class="hint">ctrl/cmd-click to select several</span><select name="skill_ids" multiple size="8">{% for sid, name in all_skills %}<option value="{{ sid }}" {{ 'selected' if sid in linked_s }}>{{ name }}</option>{% endfor %}</select></label>
+    <label class="field">Topics<select name="topic_ids" multiple size="8">{% for tid, title in all_topics %}<option value="{{ tid }}" {{ 'selected' if tid in linked_t }}>{{ title }}</option>{% endfor %}</select></label>
+  </div>
+  {% for key, heading in sections %}
+    <label class="field">{{ heading }}<textarea name="{{ key }}" rows="{{ 5 if p[key] else 2 }}">{{ p[key] or '' }}</textarea></label>
+  {% endfor %}
+  <div><button class="btn primary">Save project</button></div>
+</div></form>
+<form method="post" action="/projects/{{ p.id }}/delete" class="row mb"><input name="confirm" placeholder='Type "delete" to remove this project' style="max-width:300px"><button class="btn danger">Delete project</button></form>
+{% endif %}
+
+<div class="grid g-side">
+  <div class="stack">
+    {% call card() %}
+      {% if p.summary %}<p class="muted" style="margin-top:0">{{ p.summary }}</p>{% endif %}
+      {% set ns = namespace(any=false) %}
+      {% for key, heading in sections %}{% if p[key] %}{% set ns.any = true %}
+        <div class="topic-section mt"><h3>{{ heading }}</h3><div class="md">{{ p[key]|md }}</div></div>
+      {% endif %}{% endfor %}
+      {% if not ns.any %}<p class="small faint">No documentation yet — <a href="/projects/{{ p.id }}?edit=1">add sections</a>.</p>{% endif %}
+    {% endcall %}
+
+    {% call card("Work items", flush=True) %}
+      <div id="items">
+      {% if p["item_list"] %}
+        <table class="table">
+        {% for it in p["item_list"] %}
+          <tr>
+            <td>{{ badge(it.kind) }}</td>
+            <td style="width:55%" class="{{ 'faint' if it.status == 'done' }}">{{ it.title }}{% if it.description %}<div class="tiny faint">{{ it.description[:140] }}</div>{% endif %}</td>
+            <td><form method="post" action="/project-items/{{ it.id }}" class="inline-form"><select name="status" onchange="this.form.requestSubmit()" style="max-width:130px">{% for s in item_statuses %}<option value="{{ s }}" {{ 'selected' if s == it.status }}>{{ s|label }}</option>{% endfor %}</select><noscript><button class="btn sm">Set</button></noscript></form></td>
+            <td style="text-align:right"><form method="post" action="/project-items/{{ it.id }}/delete" class="inline-form"><button class="btn sm ghost" title="Delete item">✕</button></form></td>
+          </tr>
+        {% endfor %}
+        </table>
+      {% endif %}
+      <form method="post" action="/projects/{{ p.id }}/items" class="body row">
+        <select name="kind" style="max-width:140px">{% for k in item_kinds %}<option value="{{ k }}" {{ 'selected' if k == 'task' }}>{{ k|label }}</option>{% endfor %}</select>
+        <input name="title" placeholder="New item…" required>
+        <button class="btn">Add</button>
+      </form>
+      </div>
+    {% endcall %}
+  </div>
+
+  <div class="stack">
+    {% call card("Overview") %}
+      {% if p.organization %}{{ kv("Organisation", p.organization) }}{% endif %}
+      {% if p.role %}{{ kv("Role", p.role) }}{% endif %}
+      {% if p.start_date %}{{ kv("Period", (p.start_date|date) ~ " – " ~ ((p.end_date|date) if p.end_date else "now")) }}{% endif %}
+      {{ kv("Items done", p.items_done ~ " / " ~ p.items_total) }}
+      {{ kv("Hours logged", p.hours_logged|hours) }}
+      {% if p.source_path %}<div class="tiny faint mt">{{ p.source_path }}</div>{% endif %}
+      {% if p.evidence_note %}<div class="callout small mt">{{ p.evidence_note }}</div>{% endif %}
+    {% endcall %}
+    {% if p.skills %}{% call card("Skills") %}<div class="chips">{% for s in p.skills %}<a class="chip" href="/skills/{{ s.id }}">{{ s.name }}</a>{% endfor %}</div>{% endcall %}{% endif %}
+    {% if p.topics %}{% call card("Topics") %}<ul class="list compact">{% for t in p.topics %}<li><a href="/topics/{{ t.id }}">{{ t.title }}</a> {{ badge(t.status) }}</li>{% endfor %}</ul>{% endcall %}{% endif %}
+    {% if p.interview %}{% call card("Interview questions") %}<ul class="list compact">{% for q in p.interview %}<li class="small"><a href="/interview?q={{ q.question[:40]|urlencode }}">{{ q.question[:90] }}</a> {{ badge(q.status) }}</li>{% endfor %}</ul>{% endcall %}{% endif %}
+  </div>
+</div>
+{% endblock %}

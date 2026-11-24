@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en" class="{{ theme }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}DevGrowth{% endblock %} · DevGrowth</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230078d4'/><path d='M8 22l6-12 4 8 3-5 3 9' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/pygments.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/editor.js" defer></script>
+</head>
+<body hx-boost="true">
+<input type="checkbox" id="nav-open" hidden>
+<div class="shell">
+  <aside class="sidebar no-print">
+    <a class="brand" href="/"><span class="logo">DG</span> DevGrowth</a>
+    <nav class="nav">
+      {% set nav = [
+        ("Daily", [("/", "Today"), ("/dashboard", "Dashboard"), ("/revision", "Revision"), ("/tracker", "Tracker")]),
+        ("Learn", [("/learn/python", "Python Mastery"), ("/learn/backend", "Backend Engineering"), ("/learn/ai", "AI Engineering"),
+                   ("/topics", "Knowledge base"), ("/practice", "Coding practice"), ("/playground", "Python playground"), ("/interview", "Interview prep")]),
+        ("Track", [("/skills", "My skills"), ("/projects", "Projects"), ("/claims", "Resume stories"), ("/targets", "Targets & goals"),
+                   ("/analytics", "Analytics"), ("/reports", "Reports"), ("/settings", "Data & settings")]),
+      ] %}
+      {% for group, links in nav %}
+        <div class="group">{{ group }}</div>
+        {% for href, text in links %}
+          {% set active = (path == href) or (href != "/" and path.startswith(href)) %}
+          <a href="{{ href }}" class="{{ 'active' if active }}">{{ text }}
+            {% if href == "/revision" and due_count %}<span class="count">{{ due_count }}</span>{% endif %}
+          </a>
+        {% endfor %}
+      {% endfor %}
+    </nav>
+    <div class="sidebar-foot">Local only · 127.0.0.1 · offline</div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar no-print">
+      <label for="nav-open" class="btn ghost menu-toggle" aria-label="Open navigation">☰</label>
+      <form class="search" action="/search" method="get" role="search">
+        <input type="search" name="q" placeholder="Search everything…  (press /)" value="{{ q or '' }}" aria-label="Search" accesskey="k">
+      </form>
+      <span class="spacer"></span>
+      {% if timer %}
+        <form method="post" action="/timer/stop" class="row">
+          <span class="badge accent" title="Timer running since {{ timer.started_at|datetime }}">● {{ timer.title or timer.topic or timer.skill or timer.kind }} · <span data-since="{{ timer.started_at }}">{{ timer.minutes|minutes }}</span></span>
+          <button class="btn sm">Stop</button>
+        </form>
+      {% else %}
+        <form method="post" action="/timer/start"><button class="btn sm" title="Start a study timer">▶ Timer</button></form>
+      {% endif %}
+      <details class="pop">
+        <summary class="btn sm primary">+ Log activity</summary>
+        <div class="pop-body">{% include "partials/quick_add.html" %}</div>
+      </details>
+      <a class="btn sm ghost" href="/theme?next={{ path|urlq }}" title="Switch light/dark theme" hx-boost="false">{{ "☀" if theme == "dark" else "☾" }}</a>
+    </header>
+
+    <main class="content">
+      {% if msg %}<div class="alert ok">{{ msg }}</div>{% endif %}
+      {% if err %}<div class="alert err">{{ err }}</div>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+<script>
+  // Minimal JS: "/" focuses search; running timer ticks; Tab inserts spaces in code editors.
+  document.addEventListener("keydown", e => {
+    if (e.key === "/" && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
+      e.preventDefault(); document.querySelector(".topbar input[type=search]").focus();
+    }
+  });
+  document.addEventListener("keydown", e => {
+    const t = e.target;
+    if (e.key === "Tab" && t.classList && t.classList.contains("code")) {
+      e.preventDefault();
+      const s = t.selectionStart; t.setRangeText("    ", s, t.selectionEnd, "end");
+    }
+  });
+  setInterval(() => document.querySelectorAll("[data-since]").forEach(el => {
+    const m = Math.max(0, Math.floor((Date.now() - new Date(el.dataset.since)) / 60000));
+    el.textContent = m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+  }), 30000);
+</script>
+</body>
+</html>

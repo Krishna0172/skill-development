@@ -1,0 +1,65 @@
+{
+  "slug": "sql-ctes",
+  "why_md": "- CTEs make long reporting and ETL SQL readable by naming each step — essential in a raw-SQL codebase without an ORM.\n- Data-modifying CTEs (`WITH moved AS (DELETE ... RETURNING *) INSERT ...`) let you do multi-step changes atomically in one statement.\n- Recursive CTEs handle hierarchies (category trees, BOMs) and date series.\n- Interviewers ask about CTE inlining (PG 12+) and MATERIALIZED vs NOT MATERIALIZED.",
+  "revision_notes_md": "- `WITH name AS (...)` defines a named subquery scoped to one statement.\n- PG 12+: non-recursive, side-effect-free CTEs referenced once are inlined; referenced twice → materialized.\n- Force behaviour with `AS MATERIALIZED` / `AS NOT MATERIALIZED`.\n- `WITH RECURSIVE`: anchor `UNION ALL` recursive part; stops when the recursive part returns no rows.\n- Guard recursion with a depth limit or `CYCLE` clause (PG 14+).\n- Data-modifying CTEs always execute exactly once and see the same snapshot; use RETURNING to pass rows on.\n- For huge intermediate results reused many times, a temp table with an index can beat a CTE.",
+  "exercises_md": "1. Rewrite a long nested-subquery report into a chain of CTEs (one per step: filter, de-dup, aggregate, join). Check with EXPLAIN that performance didn't change.\n2. Write a single statement that moves processed rows from a staging table into an archive table using `WITH moved AS (DELETE ... RETURNING *) INSERT INTO archive SELECT * FROM moved`.",
+  "my_context_md": "CTEs are already part of your daily SQL in the `python-postgres` services (listed alongside RETURNING and `UPDATE ... FROM`). The next step is knowing when PostgreSQL inlines vs materializes them, and using data-modifying CTEs with RETURNING to collapse multi-statement psycopg2 sequences into one atomic statement.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To reference a CTE from within itself (e.g. walking a category tree) you write WITH ____.",
+      "answers": [
+        "recursive"
+      ],
+      "explanation": "WITH RECURSIVE enables self-referencing CTEs."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To stop PostgreSQL 12+ from inlining a CTE, declare it `AS ____ (...)`.",
+      "answers": [
+        "materialized"
+      ],
+      "explanation": "AS MATERIALIZED forces the CTE to be computed once and stored."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\nrows = db.execute('''\nWITH RECURSIVE n(x) AS (\n  SELECT 1\n  UNION ALL\n  SELECT x * 2 FROM n WHERE x < 20\n)\nSELECT group_concat(x, ',') FROM n''').fetchone()\nprint(rows[0])",
+      "answers": [
+        "1,2,4,8,16,32"
+      ],
+      "explanation": "The recursion continues while x < 20: 16 < 20 produces 32, then 32 fails the condition and recursion stops."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE cat(id INT, parent INT, name TEXT);\nINSERT INTO cat VALUES (1,NULL,'root'),(2,1,'shoes'),(3,2,'running'),(4,1,'bags');\n''')\nq = '''WITH RECURSIVE t(id, name, depth) AS (\n  SELECT id, name, 0 FROM cat WHERE id = 2\n  UNION ALL\n  SELECT c.id, c.name, t.depth + 1 FROM cat c JOIN t ON c.parent = t.id\n)\nSELECT name, depth FROM t ORDER BY depth'''\nprint(db.execute(q).fetchall())",
+      "answers": [
+        "[('shoes', 0), ('running', 1)]"
+      ],
+      "explanation": "Starting from 'shoes', the recursive step only finds its child 'running'; 'bags' belongs to root."
+    },
+    {
+      "type": "debug",
+      "prompt": "This recursive CTE never finishes on production data. Why, and how do you fix it?",
+      "code": "WITH RECURSIVE chain AS (\n  SELECT id, parent_id FROM categories WHERE id = 42\n  UNION ALL\n  SELECT c.id, c.parent_id\n  FROM categories c JOIN chain ch ON c.id = ch.parent_id\n)\nSELECT * FROM chain;\n-- data contains a bad row where a category is its own ancestor",
+      "answer": "The data contains a cycle (A → B → A), so the recursive part keeps producing rows forever. `UNION ALL` never removes repeats.\n\nFixes:\n```sql\n-- PG 14+\nWITH RECURSIVE chain AS (\n  SELECT id, parent_id FROM categories WHERE id = 42\n  UNION ALL\n  SELECT c.id, c.parent_id FROM categories c JOIN chain ch ON c.id = ch.parent_id\n) CYCLE id SET is_cycle USING path\nSELECT * FROM chain WHERE NOT is_cycle;\n```\nOr track a depth column and stop at e.g. `depth < 50`, or use `UNION` (dedupes identical rows). Also fix the data / add a constraint.",
+      "rubric": [
+        "Cycle in the data causes infinite recursion",
+        "UNION ALL never removes duplicates",
+        "Use CYCLE clause, depth limit, or path array to stop"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how CTE execution changed in PostgreSQL 12 and how you'd control it.",
+      "answer": "Before PG 12 every CTE was an **optimization fence**: computed fully and stored, so filters from the outer query were not pushed into it. A `WITH all_orders AS (SELECT * FROM orders) SELECT ... WHERE id = 5` scanned the whole table.\n\nFrom PG 12, a non-recursive CTE without side effects that is referenced **once** is inlined like a subquery, so predicates are pushed down and indexes used. If referenced **twice or more**, it is still materialized by default.\n\nControl:\n- `WITH x AS MATERIALIZED (...)` — compute once (good for an expensive result reused, or to stop a bad plan).\n- `WITH x AS NOT MATERIALIZED (...)` — inline even if referenced twice (good when each use is selective).\n\nData-modifying and recursive CTEs are always materialized/executed once.",
+      "rubric": [
+        "Pre-12 CTEs were optimization fences",
+        "PG 12+ inlines single-reference side-effect-free CTEs",
+        "Multiple references still materialize by default",
+        "MATERIALIZED / NOT MATERIALIZED override"
+      ]
+    }
+  ]
+}

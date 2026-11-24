@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, kv, empty %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Settings & data</h1><p>Everything stays on this computer. Back up before big changes; restoring or importing always saves your current data first.</p></div></div>
+<div class="grid g-side">
+  <div class="stack">
+    {% call card("Backups", flush=True) %}
+      <form method="post" action="/settings/backup" class="body row"><button class="btn primary">Create backup now</button><span class="small faint">A daily backup is also made automatically.</span></form>
+      {% if backups %}
+      <table class="table">
+        {% for b in backups %}
+          <tr>
+            <td class="small">{{ b.created_at|date }} <span class="faint num">{{ b.created_at[11:16] }}</span></td>
+            <td>{% if b.label %}<span class="badge">{{ b.label }}</span>{% endif %}</td>
+            <td class="small faint num">{{ (b.size_bytes / 1024)|round|int }} KB</td>
+            <td style="text-align:right;white-space:nowrap">
+              <a class="btn sm ghost" href="/api/backups/{{ b.name }}" hx-boost="false">Download</a>
+              <details class="pop" style="display:inline-block"><summary class="btn sm">Restore</summary>
+                <div class="pop-body card" style="right:0"><form method="post" action="/settings/backups/{{ b.name }}/restore" class="body form-grid" style="min-width:260px">
+                  <p class="small" style="margin:0">Replace all current data with this backup? Your current data is backed up first.</p>
+                  <button class="btn danger">Yes, restore</button></form></div></details>
+              <form method="post" action="/settings/backups/{{ b.name }}/delete" class="inline-form"><button class="btn sm ghost" title="Delete backup">✕</button></form>
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+      {% else %}<div class="body">{{ empty("No backups yet") }}</div>{% endif %}
+    {% endcall %}
+
+    {% call card("Export & import") %}
+      <div class="row"><a class="btn" href="/api/data/export" hx-boost="false">Export everything (JSON)</a><a class="btn" href="/api/reports/sessions.csv" hx-boost="false">Sessions CSV</a></div>
+      <form method="post" action="/settings/import" enctype="multipart/form-data" class="form-grid mt" hx-boost="false">
+        <label class="field">Import an export file <span class="hint">replaces ALL current data; a safety backup is taken first</span><input type="file" name="file" accept=".json,application/json" required></label>
+        <div><button class="btn danger">Import and replace</button></div>
+      </form>
+    {% endcall %}
+  </div>
+  <div class="stack">
+    {% call card("About") %}
+      {{ kv("Version", meta.version) }}
+      {% if meta.database_size_bytes %}{{ kv("Database size", (meta.database_size_bytes / 1024 / 1024)|round(2) ~ " MB") }}{% endif %}
+      <div class="small muted mt">Database</div><div class="tiny" style="overflow-wrap:anywhere">{{ meta.database }}</div>
+      <div class="small muted mt">Backups folder</div><div class="tiny" style="overflow-wrap:anywhere">{{ meta.backup_dir }}</div>
+    {% endcall %}
+    {% call card("Theme") %}<a class="btn" href="/theme?next=/settings" hx-boost="false">Switch to {{ "light" if theme == "dark" else "dark" }}</a>{% endcall %}
+  </div>
+</div>
+{% endblock %}

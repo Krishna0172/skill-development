@@ -1,0 +1,66 @@
+{
+  "slug": "sql-distinct-customers-per-channel",
+  "title": "Unique and guest customers per channel",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "easy",
+  "skill": "sql-aggregations",
+  "concepts": [
+    "COUNT(*) vs COUNT(col)",
+    "COUNT(DISTINCT)",
+    "GROUP BY",
+    "NULLs in aggregates"
+  ],
+  "related_topics": [
+    "sql-group-by",
+    "sql-null-handling"
+  ],
+  "problem_md": "For the channel performance dashboard you need, per channel, how many orders were placed, how many **distinct\nregistered customers** placed them, and how many orders were **guest checkouts** (`customer_id IS NULL`).\n\n```sql\nCREATE TABLE channels (\n  channel_id INTEGER PRIMARY KEY,\n  name       TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  order_id    INTEGER PRIMARY KEY,\n  channel_id  INTEGER NOT NULL,\n  customer_id INTEGER,           -- NULL = guest checkout\n  order_date  TEXT NOT NULL\n);\n```\n\n**Task.** Return `channel_name`, `order_count`, `unique_customers`, `guest_orders` for every channel that has\norders. Guests must **not** be counted as a customer. Order by `channel_name`.",
+  "examples": [
+    {
+      "input": "Myntra orders by customers 10, 10, 11 and one guest (NULL)",
+      "output": "channel_name | order_count | unique_customers | guest_orders\nMyntra       | 4           | 2                | 1"
+    }
+  ],
+  "hints": [
+    "`COUNT(*)` counts rows; `COUNT(col)` counts non-NULL values; `COUNT(DISTINCT col)` counts distinct non-NULL values.",
+    "Guest orders = rows where customer_id is NULL. You can derive it from two counts, or with conditional aggregation.",
+    "`COUNT(*)`, `COUNT(DISTINCT o.customer_id)`, `COUNT(*) - COUNT(o.customer_id)`."
+  ],
+  "starter_code": "-- Write your query here\nSELECT c.name AS channel_name,\n       COUNT(*) AS order_count\nFROM orders o\nJOIN channels c ON c.channel_id = o.channel_id\nGROUP BY c.name\n",
+  "solution_code": "SELECT c.name                         AS channel_name,\n       COUNT(*)                       AS order_count,\n       COUNT(DISTINCT o.customer_id)  AS unique_customers,\n       COUNT(*) - COUNT(o.customer_id) AS guest_orders\nFROM orders o\nJOIN channels c ON c.channel_id = o.channel_id\nGROUP BY c.channel_id, c.name\nORDER BY channel_name;",
+  "solution_md": "**The three COUNTs:**\n\n| expression | counts |\n|---|---|\n| `COUNT(*)` | every row in the group |\n| `COUNT(customer_id)` | rows where `customer_id` is not NULL |\n| `COUNT(DISTINCT customer_id)` | distinct non-NULL values - NULLs are ignored, so guests are never \"a customer\" |\n\nSo `guest_orders = COUNT(*) - COUNT(customer_id)`. An equivalent, more explicit form is conditional aggregation:\n`SUM(CASE WHEN o.customer_id IS NULL THEN 1 ELSE 0 END)` or, in PostgreSQL (and SQLite >= 3.30),\n`COUNT(*) FILTER (WHERE o.customer_id IS NULL)`.\n\nBlinkit shows why `COUNT(DISTINCT)` matters: 4 orders, 2 guests, and 2 distinct registered customers (10 and 13).\n\n**Performance.** `COUNT(DISTINCT ...)` needs a sort or hash per group and is noticeably more expensive than\n`COUNT(*)` on big tables. For dashboards over millions of orders consider pre-aggregating per day/channel, or\napproximate distinct counts (e.g. HyperLogLog extensions) when exactness isn't required.",
+  "tests": {
+    "schema_sql": "CREATE TABLE channels (\n  channel_id INTEGER PRIMARY KEY,\n  name       TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  order_id    INTEGER PRIMARY KEY,\n  channel_id  INTEGER NOT NULL,\n  customer_id INTEGER,           -- NULL = guest checkout\n  order_date  TEXT NOT NULL\n);\n\nINSERT INTO channels VALUES (1,'Myntra'),(2,'Nykaa'),(3,'Blinkit'),(4,'Zepto');\n\nINSERT INTO orders VALUES\n (1,1,10,'2024-03-01'),\n (2,1,10,'2024-03-02'),\n (3,1,11,'2024-03-02'),\n (4,1,NULL,'2024-03-03'),\n (5,2,12,'2024-03-01'),\n (6,2,12,'2024-03-04'),\n (7,2,12,'2024-03-05'),\n (8,3,10,'2024-03-01'),\n (9,3,NULL,'2024-03-01'),\n (10,3,NULL,'2024-03-02'),\n (11,3,13,'2024-03-03');",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "channel_name",
+        "order_count",
+        "unique_customers",
+        "guest_orders"
+      ],
+      "rows": [
+        [
+          "Blinkit",
+          4,
+          2,
+          2
+        ],
+        [
+          "Myntra",
+          4,
+          2,
+          1
+        ],
+        [
+          "Nykaa",
+          3,
+          1,
+          0
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

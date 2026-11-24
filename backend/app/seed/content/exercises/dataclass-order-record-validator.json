@@ -1,0 +1,182 @@
+{
+  "slug": "dataclass-order-record-validator",
+  "title": "Typed dataclass record validator",
+  "category": "advanced-python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "python-typing",
+  "concepts": [
+    "dataclasses",
+    "__post_init__",
+    "type hints",
+    "validation errors",
+    "dataclasses.fields"
+  ],
+  "related_topics": [
+    "python-oop-dataclasses",
+    "python-typing",
+    "be-pydantic-validation"
+  ],
+  "problem_md": "Before inserting rows parsed from a marketplace report, validate them into a typed record instead of passing raw dicts around.\n\n```python\n@dataclass(frozen=True)\nclass OrderRecord:\n    order_id: str\n    sku: str\n    qty: int\n    price: float\n    channel: str\n\ndef validate_rows(rows: list[dict]) -> dict\n```\n\nRules (check fields in **declaration order**, report only the first failing field per row):\n- any declared field missing from the dict -> error `\"<field>: missing\"`\n- `order_id`, `sku`: non-empty `str` after `strip()` (store stripped) -> `\"<field>: must be a non-empty string\"`\n- `qty`: an `int` (but **not** `bool`) `>= 1` -> `\"qty: must be an int >= 1\"`\n- `price`: `int` or `float` (not `bool`) `>= 0`, stored as `float` -> `\"price: must be a number >= 0\"`\n- `channel`: one of `amazon`, `flipkart`, `myntra` (case-insensitive, stored lower-case) -> `\"channel: unknown '<value>'\"`\n- extra keys are ignored.\n\nPut the checks in `__post_init__` (raising `ValueError(message)`) so an invalid `OrderRecord` can never exist; `validate_rows` returns `{\"valid\": [dataclasses.asdict(rec), ...], \"errors\": [{\"index\": i, \"error\": msg}, ...]}`.",
+  "examples": [
+    {
+      "input": "validate_rows([{'order_id':' A1 ','sku':'S','qty':2,'price':10,'channel':'Amazon'}, {'order_id':'A2','sku':'S','qty':0,'price':1,'channel':'amazon'}])",
+      "output": "{'valid': [{'order_id':'A1','sku':'S','qty':2,'price':10.0,'channel':'amazon'}], 'errors': [{'index':1,'error':'qty: must be an int >= 1'}]}"
+    }
+  ],
+  "hints": [
+    "With `frozen=True` you can't assign in `__post_init__` normally - use `object.__setattr__(self, 'price', float(self.price))`.",
+    "In `validate_rows`, check missing keys with `[f.name for f in dataclasses.fields(OrderRecord)]`, then `OrderRecord(**{name: row[name] ...})` inside `try/except ValueError as e`."
+  ],
+  "starter_code": "from dataclasses import dataclass, asdict, fields\n\n\n@dataclass(frozen=True)\nclass OrderRecord:\n    order_id: str\n    sku: str\n    qty: int\n    price: float\n    channel: str\n\n    def __post_init__(self):\n        # TODO: validate and normalise\n        pass\n\n\ndef validate_rows(rows):\n    valid, errors = [], []\n    for i, row in enumerate(rows):\n        valid.append(asdict(OrderRecord(**row)))\n    return {'valid': valid, 'errors': errors}\n",
+  "solution_code": "from dataclasses import dataclass, asdict, fields\n\nCHANNELS = {'amazon', 'flipkart', 'myntra'}\n\n\ndef _is_number(v):\n    return isinstance(v, (int, float)) and not isinstance(v, bool)\n\n\n@dataclass(frozen=True)\nclass OrderRecord:\n    order_id: str\n    sku: str\n    qty: int\n    price: float\n    channel: str\n\n    def __post_init__(self):\n        for name in ('order_id', 'sku'):\n            value = getattr(self, name)\n            if not isinstance(value, str) or not value.strip():\n                raise ValueError(f'{name}: must be a non-empty string')\n            object.__setattr__(self, name, value.strip())\n        if not (isinstance(self.qty, int) and not isinstance(self.qty, bool) and self.qty >= 1):\n            raise ValueError('qty: must be an int >= 1')\n        if not (_is_number(self.price) and self.price >= 0):\n            raise ValueError('price: must be a number >= 0')\n        object.__setattr__(self, 'price', float(self.price))\n        if not isinstance(self.channel, str) or self.channel.lower() not in CHANNELS:\n            raise ValueError(f\"channel: unknown '{self.channel}'\")\n        object.__setattr__(self, 'channel', self.channel.lower())\n\n\nFIELD_NAMES = [f.name for f in fields(OrderRecord)]\n\n\ndef validate_rows(rows):\n    valid, errors = [], []\n    for i, row in enumerate(rows):\n        missing = [n for n in FIELD_NAMES if n not in row]\n        if missing:\n            errors.append({'index': i, 'error': f'{missing[0]}: missing'})\n            continue\n        try:\n            rec = OrderRecord(**{n: row[n] for n in FIELD_NAMES})\n        except ValueError as e:\n            errors.append({'index': i, 'error': str(e)})\n            continue\n        valid.append(asdict(rec))\n    return {'valid': valid, 'errors': errors}\n",
+  "solution_md": "Validation in `__post_init__` makes invalid records unrepresentable: if you hold an `OrderRecord`, it is clean. `frozen=True` keeps it that way (and makes it hashable), so normalisation goes through `object.__setattr__`. Note `isinstance(True, int)` is `True` - `bool` must be excluded explicitly, a classic bug when JSON contains `true`.\n\n`validate_rows` catches only `ValueError` (the error type we raise) and collects per-row errors instead of dropping rows - bad rows get reported. Building kwargs from `fields()` ignores extra keys and gives the missing-field check for free. O(rows x fields).\n\nType hints alone validate nothing at runtime. Pydantic v2 (`BaseModel`, `field_validator`) does this declaratively with coercion and aggregated errors - this exercise is what it automates.",
+  "tests": {
+    "function": "validate_rows",
+    "cases": [
+      {
+        "args": [
+          [
+            {
+              "order_id": " A1 ",
+              "sku": "S",
+              "qty": 2,
+              "price": 10,
+              "channel": "Amazon"
+            },
+            {
+              "order_id": "A2",
+              "sku": "S",
+              "qty": 0,
+              "price": 1,
+              "channel": "amazon"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "valid": [
+            {
+              "order_id": "A1",
+              "sku": "S",
+              "qty": 2,
+              "price": 10.0,
+              "channel": "amazon"
+            }
+          ],
+          "errors": [
+            {
+              "index": 1,
+              "error": "qty: must be an int >= 1"
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "order_id": "A3",
+              "sku": "S",
+              "qty": 1,
+              "channel": "myntra"
+            },
+            {
+              "order_id": "A4",
+              "sku": "  ",
+              "qty": 1,
+              "price": 1.5,
+              "channel": "myntra"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "valid": [],
+          "errors": [
+            {
+              "index": 0,
+              "error": "price: missing"
+            },
+            {
+              "index": 1,
+              "error": "sku: must be a non-empty string"
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "order_id": "A5",
+              "sku": "S",
+              "qty": true,
+              "price": 1,
+              "channel": "flipkart"
+            },
+            {
+              "order_id": "A6",
+              "sku": "S",
+              "qty": 3,
+              "price": -1,
+              "channel": "flipkart"
+            },
+            {
+              "order_id": "A7",
+              "sku": "S",
+              "qty": 3,
+              "price": 9.99,
+              "channel": "meesho"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "valid": [],
+          "errors": [
+            {
+              "index": 0,
+              "error": "qty: must be an int >= 1"
+            },
+            {
+              "index": 1,
+              "error": "price: must be a number >= 0"
+            },
+            {
+              "index": 2,
+              "error": "channel: unknown 'meesho'"
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "order_id": "A8",
+              "sku": "X9",
+              "qty": 5,
+              "price": 0,
+              "channel": "FLIPKART",
+              "extra": 1
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "valid": [
+            {
+              "order_id": "A8",
+              "sku": "X9",
+              "qty": 5,
+              "price": 0.0,
+              "channel": "flipkart"
+            }
+          ],
+          "errors": []
+        }
+      }
+    ]
+  }
+}

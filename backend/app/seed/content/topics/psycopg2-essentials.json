@@ -1,0 +1,125 @@
+{
+  "slug": "psycopg2-essentials",
+  "title": "psycopg2 Essentials: Connections, Cursors, Batching and Pooling",
+  "skill": "psycopg2",
+  "extra_skills": [
+    "python",
+    "postgresql",
+    "transactions-concurrency"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "psycopg2",
+    "psycopg3",
+    "python",
+    "postgresql",
+    "execute_values",
+    "connection-pool",
+    "copy"
+  ],
+  "summary": "psycopg2 is the standard Python driver for PostgreSQL: you open a connection, get a cursor, run parameterised SQL with %s placeholders, and commit. It starts a transaction implicitly on your first statement, so nothing is saved until you commit. For speed, send rows in batches (execute_values, execute_batch, COPY) and reuse connections through a pool.",
+  "details_md": "### Connections and transactions\n- `psycopg2.connect(dsn)` opens one TCP connection to a server process. Opening one costs a few milliseconds (more with TLS), so reuse connections.\n- psycopg2 is **not autocommit by default**: the first `execute` issues an implicit `BEGIN`. You must `conn.commit()` or `conn.rollback()`. Forgetting leaves the session **idle in transaction**, holding locks and blocking VACUUM.\n- `with conn:` wraps a **transaction**: it commits on success and rolls back on exception, but it does **not close** the connection. (psycopg 3's `with psycopg.connect()` *does* close it.)\n- `conn.autocommit = True` is needed for statements that can't run in a transaction block (`CREATE INDEX CONCURRENTLY`, `VACUUM`).\n- After an error, the transaction is aborted until you roll back.\n\n### Parameters\nAlways pass values separately: `cur.execute(\"... WHERE id = %s\", (oid,))`. psycopg2 quotes and escapes them safely on the client side. Note the one-element tuple `(oid,)`. Lists adapt to arrays (`= ANY(%s)`), `dict`s work with `%(name)s`, and `Json(obj)` adapts to json/jsonb. **Identifiers** (table or column names) cannot be parameters; build them with `psycopg2.sql.SQL` and `sql.Identifier`.\n\n### Fetching\n`fetchone()`, `fetchmany(n)`, `fetchall()`. `cursor_factory=RealDictCursor` returns dict rows. A **named (server-side) cursor**, `conn.cursor(name=\"exp\")`, streams large results in chunks of `itersize` rows instead of loading everything into memory (it must stay inside a transaction).\n\n### Batching: the biggest performance lever\n- `cur.executemany(sql, rows)`: in psycopg2 this is just a loop, **one round trip per row**. Slow.\n- `extras.execute_batch(cur, sql, rows, page_size=100)`: concatenates many statements into one round trip per page. Typically an order of magnitude faster.\n- `extras.execute_values(cur, \"INSERT ... VALUES %s\", rows, page_size=1000)`: builds **one multi-row INSERT** per page, usually the fastest non-COPY option, and supports `fetch=True` with `RETURNING`.\n- `cur.copy_expert(\"COPY t (cols) FROM STDIN WITH (FORMAT csv)\", file_like)`: the fastest bulk load. COPY has no `ON CONFLICT`, so COPY into a staging table, then `INSERT ... SELECT ... ON CONFLICT`.\n\n### Pooling\n`psycopg2.pool.SimpleConnectionPool` (single thread) and `ThreadedConnectionPool` (thread-safe) with `getconn()` / `putconn()`. Always return connections in `finally`, and roll back any open transaction before returning. For many processes or Lambdas, an external pooler (PgBouncer or RDS Proxy) caps total server connections; PostgreSQL connections are processes and `max_connections` is finite.\n\n### Error handling\nImport specific classes from `psycopg2.errors` (`UniqueViolation`, `DeadlockDetected`, `SerializationFailure`), or inspect `e.pgcode`. Base classes: `psycopg2.OperationalError` (connection problems), `psycopg2.IntegrityError`, `psycopg2.DatabaseError`.\n\n### psycopg 3 (the modern successor)\n`pip install \"psycopg[binary]\"`, `import psycopg`. Key differences: `with psycopg.connect()` closes the connection; **server-side parameter binding** by default; `cur.executemany()` is efficient (uses pipeline mode); a cleaner COPY API (`with cur.copy(\"COPY ... FROM STDIN\") as cp: cp.write_row(row)`); native `async` support (`AsyncConnection`); a separate `psycopg_pool.ConnectionPool`; and row factories (`dict_row`). New projects should prefer psycopg 3; psycopg2 remains widespread and maintained.",
+  "code_md": "```python\n# 1) Connect, parameterise, commit safely\nimport psycopg2\nfrom psycopg2.extras import RealDictCursor\n\nconn = psycopg2.connect(host=\"db\", dbname=\"shop\", user=\"app\", password=\"...\", connect_timeout=5)\n\nwith conn:                                    # transaction: COMMIT on success / ROLLBACK on error\n    with conn.cursor(cursor_factory=RealDictCursor) as cur:\n        cur.execute(\n            \"SELECT id, status, total FROM orders WHERE orgid = %s AND id = ANY(%s)\",\n            (7, [101, 102, 103]),             # never f-strings: values sent as parameters\n        )\n        for row in cur.fetchall():\n            print(row[\"id\"], row[\"status\"])\n# conn is still open here; call conn.close() when done\n```\n\n```python\n# 2) Bulk upsert: execute_values (one multi-row INSERT per page)\nfrom psycopg2.extras import execute_values, execute_batch\n\nrows = [(101, 7, \"SKU-1\", 25), (102, 7, \"SKU-2\", 0)]\n\nwith conn, conn.cursor() as cur:\n    execute_values(\n        cur,\n        \"INSERT INTO inventory (id, orgid, sku, qty) VALUES %s \"\n        \"ON CONFLICT (id, orgid) DO NOTHING\",\n        rows,\n        page_size=1000,\n    )\n\n# execute_batch: many statements per round trip (useful for UPDATEs)\nwith conn, conn.cursor() as cur:\n    execute_batch(cur, \"UPDATE orders SET status = %s WHERE id = %s AND orgid = %s\",\n                  [(\"DELIVERED\", 101, 7), (\"RTO\", 102, 7)], page_size=500)\n```\n\n```python\n# 3) COPY a pandas DataFrame into a staging table, then upsert set-based\nimport io\n\nbuf = io.StringIO()\ndf[[\"id\", \"orgid\", \"status\", \"total\"]].to_csv(buf, index=False, header=False)\nbuf.seek(0)\n\nwith conn, conn.cursor() as cur:\n    cur.execute(\"CREATE TEMP TABLE stg (LIKE orders INCLUDING DEFAULTS) ON COMMIT DROP\")\n    cur.copy_expert(\"COPY stg (id, orgid, status, total) FROM STDIN WITH (FORMAT csv)\", buf)\n    cur.execute(\"\"\"\n        INSERT INTO orders AS o (id, orgid, status, total)\n        SELECT id, orgid, status, total FROM stg\n        ON CONFLICT (id, orgid) DO UPDATE\n        SET status = COALESCE(EXCLUDED.status, o.status)\n    \"\"\")\n```\n\n```python\n# 4) Thread-safe pool + safe identifiers + psycopg 3 equivalent\nfrom psycopg2.pool import ThreadedConnectionPool\nfrom psycopg2 import sql\n\npool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=\"postgresql://app@db/shop\")\n\ndef count_rows(table: str) -> int:\n    conn = pool.getconn()\n    try:\n        with conn, conn.cursor() as cur:\n            cur.execute(sql.SQL(\"SELECT count(*) FROM {}\").format(sql.Identifier(table)))\n            return cur.fetchone()[0]\n    finally:\n        pool.putconn(conn)                    # always return the connection\n\n# psycopg 3\nimport psycopg\nwith psycopg.connect(\"postgresql://app@db/shop\") as conn:        # closes on exit\n    with conn.cursor() as cur:\n        cur.executemany(\"INSERT INTO t (a) VALUES (%s)\", [(1,), (2,)])  # pipelined, fast\n```",
+  "use_cases_md": "- ETL loaders writing pandas DataFrames into PostgreSQL in batches.\n- Raw-SQL data access layers (repository/manager classes) without an ORM.\n- Streaming large exports with server-side cursors.\n- Lambda or ECS jobs needing reused connections and retry-safe transactions.\n- Admin scripts with `autocommit` for DDL like `CREATE INDEX CONCURRENTLY`.",
+  "mistakes_md": "- **Building SQL with f-strings or `%` formatting**: SQL injection and quoting bugs. Pass params as the second argument; use `psycopg2.sql` for identifiers.\n- **`(value)` instead of `(value,)`**: not a tuple, so you get \"not all arguments converted\". Use a one-element tuple or list.\n- **Forgetting to commit**: data silently not saved, connection stuck idle-in-transaction. Use `with conn:`.\n- **Assuming `with conn:` closes the connection**: it only ends the transaction (in psycopg2). Close it or return it to the pool.\n- **Using `executemany` for large inserts in psycopg2**: one round trip per row. Use `execute_values`/`execute_batch`/COPY.\n- **Sharing one connection across threads for concurrent queries**: connections serialize statements and transactions get mixed. Use a pool, one connection per thread.\n- **Not handling an aborted transaction**: after an error every statement fails until `rollback()`.\n- **Opening a new connection per row or per small task**: connection overhead dominates. Reuse connections.",
+  "best_practices_md": "- Wrap DB access in a small class or helper module that owns connection setup, transactions and retries.\n- Set `connect_timeout`, `application_name`, and a `statement_timeout` (via `options=\"-c statement_timeout=30000\"`).\n- Use `execute_values` for inserts/upserts and COPY + staging for very large loads.\n- Commit per batch, not per row and not one giant transaction.\n- Catch specific `psycopg2.errors` classes and retry only transient ones (deadlock, serialization, connection drop).\n- Use server-side cursors for result sets that don't fit comfortably in memory.\n- Consider psycopg 3 for new code (async, pipelining, better COPY).",
+  "my_context_md": "This is your daily driver: the `DatabaseManager` class in helper.py wraps psycopg2 for ECSMarketplaceDataUpload, and the bulk writes use `execute_batch` from `psycopg2.extras`. Two upgrades worth knowing: `execute_values` sends a single multi-row INSERT per page and is usually faster than `execute_batch` for your `ON CONFLICT` upserts, and `copy_expert` into a temp staging table followed by one set-based upsert is the fastest path for very large report files. Your resume mentions connection pooling; be ready to explain `ThreadedConnectionPool` with `getconn`/`putconn` in a `finally` block, and why many concurrent Lambdas/containers need an external pooler like PgBouncer or RDS Proxy to stay under `max_connections`. Your deadlock-retry loop maps to catching `psycopg2.errors.DeadlockDetected`, rolling back, and re-running the batch.",
+  "related": [
+    "postgres-upsert",
+    "transactions-isolation",
+    "sqlalchemy-essentials",
+    "python-context-managers",
+    "explain-analyze",
+    "pandas-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "Does psycopg2 autocommit by default?",
+      "back": "No. The first statement opens a transaction implicitly; you must commit() (or use `with conn:`)."
+    },
+    {
+      "front": "What does `with conn:` do in psycopg2?",
+      "back": "Commits on success, rolls back on exception; it does NOT close the connection."
+    },
+    {
+      "front": "Fastest psycopg2 ways to insert many rows?",
+      "back": "COPY (copy_expert) > execute_values (multi-row VALUES) > execute_batch > executemany (per-row round trip)."
+    },
+    {
+      "front": "How do you safely insert a dynamic table name?",
+      "back": "`sql.SQL(\"SELECT * FROM {}\").format(sql.Identifier(name))` from psycopg2.sql."
+    },
+    {
+      "front": "How to stream a 10M-row result without loading it into memory?",
+      "back": "Use a named server-side cursor: `conn.cursor(name='x')`, iterate it (itersize rows per fetch)."
+    },
+    {
+      "front": "Thread-safe pool in psycopg2?",
+      "back": "`psycopg2.pool.ThreadedConnectionPool(min, max, dsn)` with getconn()/putconn()."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "`cur.execute('SELECT * FROM orders WHERE id = %s', (42))` raises an error. Why?",
+      "options": [
+        "%s should be ?",
+        "id must be quoted",
+        "(42) is an int, not a tuple",
+        "fetchone() is missing"
+      ],
+      "answer_index": 2,
+      "explanation": "Parameters must be a sequence or mapping; use (42,)."
+    },
+    {
+      "question": "In psycopg2, which call sends ONE multi-row INSERT statement per page?",
+      "options": [
+        "cur.executemany",
+        "extras.execute_batch",
+        "cur.callproc",
+        "extras.execute_values"
+      ],
+      "answer_index": 3,
+      "explanation": "execute_values expands VALUES %s into many row tuples; execute_batch concatenates separate statements."
+    },
+    {
+      "question": "A script inserted rows without errors, but they are not in the table. Most likely?",
+      "options": [
+        "Missing conn.commit()",
+        "Wrong cursor factory",
+        "The table has no primary key",
+        "The server uses MVCC"
+      ],
+      "answer_index": 0,
+      "explanation": "Uncommitted work is rolled back when the connection closes."
+    },
+    {
+      "question": "Which statement requires conn.autocommit = True in psycopg2?",
+      "options": [
+        "INSERT ... ON CONFLICT",
+        "CREATE INDEX CONCURRENTLY",
+        "SELECT ... FOR UPDATE",
+        "COPY ... FROM STDIN"
+      ],
+      "answer_index": 1,
+      "explanation": "CREATE INDEX CONCURRENTLY (and VACUUM) cannot run inside a transaction block."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you load a large DataFrame into PostgreSQL efficiently with psycopg2?",
+      "difficulty": "medium",
+      "answer_md": "Avoid per-row round trips. Options from simple to fastest:\n\n1. **`execute_values`** with a reasonable `page_size` (500–5000): one multi-row INSERT per page, supports `ON CONFLICT` and `RETURNING`.\n```python\nrows = list(df[[\"id\", \"orgid\", \"qty\"]].itertuples(index=False, name=None))\nexecute_values(cur, \"INSERT INTO inventory (id, orgid, qty) VALUES %s ON CONFLICT DO NOTHING\",\n               rows, page_size=2000)\n```\n2. **COPY** via `copy_expert` from an in-memory CSV buffer: the fastest bulk path. Because COPY can't upsert, load into a **temp staging table** and finish with one `INSERT ... SELECT ... ON CONFLICT ...`, which is also a single set-based statement the planner can optimise.\n\nAlso:\n- Convert NaN/NaT to `None` (or empty CSV fields) so they become NULL.\n- Deduplicate on the conflict key first.\n- Commit per chunk so a failure doesn't lose everything; make chunks retryable.\n- Sort by key to reduce deadlocks when loaders run concurrently.\n- Check `ANALYZE` afterwards if the table grew a lot."
+    },
+    {
+      "question": "What is SQL injection and how does psycopg2 prevent it?",
+      "difficulty": "easy",
+      "answer_md": "SQL injection happens when untrusted input is concatenated into SQL text, so the input becomes code:\n\n```python\n# VULNERABLE\ncur.execute(f\"SELECT * FROM orders WHERE customer = '{name}'\")\n# name = \"x' OR '1'='1\"  -> returns every order\n```\n\nWith psycopg2 you pass values separately:\n```python\ncur.execute(\"SELECT * FROM orders WHERE customer = %s\", (name,))\n```\npsycopg2 adapts each Python value to a correctly quoted and escaped SQL literal (psycopg 3 goes further and sends parameters separately using server-side binding). The value can never change the statement's structure.\n\nPlaceholders only work for **values**. For dynamic identifiers (table or column names, sort direction) use `psycopg2.sql`:\n```python\nfrom psycopg2 import sql\nq = sql.SQL(\"SELECT * FROM {} ORDER BY {}\").format(sql.Identifier(table), sql.Identifier(col))\n```\nand still whitelist which tables/columns are allowed. Never use `%` or f-strings to build queries, even for \"internal\" data like file contents, because marketplace CSVs are untrusted input too."
+    },
+    {
+      "question": "How do you manage database connections in AWS Lambda with psycopg2?",
+      "difficulty": "hard",
+      "answer_md": "Each Lambda execution environment handles one request at a time but is **reused** across invocations. Pattern:\n\n```python\nimport psycopg2\n_conn = None\n\ndef get_conn():\n    global _conn\n    if _conn is None or _conn.closed:\n        _conn = psycopg2.connect(DSN, connect_timeout=5)\n    return _conn\n\ndef handler(event, context):\n    conn = get_conn()\n    try:\n        with conn, conn.cursor() as cur:\n            cur.execute(\"...\")\n    except psycopg2.OperationalError:\n        global _conn\n        _conn = None            # stale or dropped connection: reconnect on next call\n        raise\n```\n\n- Create the connection **outside** the handler or lazily cache it globally, so warm invocations skip the connect cost.\n- An in-process pool adds little in Lambda (one request per environment at a time); the risk is **many concurrent environments** each holding a connection and exhausting `max_connections`. Use **RDS Proxy** or PgBouncer, and/or cap Lambda reserved concurrency.\n- Handle stale connections: frozen environments may find their TCP connection killed by an idle timeout.\n- Keep transactions short and never leave one open between invocations.\n- psycopg2 needs compiled libpq bindings: package `psycopg2-binary` built for Amazon Linux (or a layer/container image matching the Lambda architecture)."
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% from "macros.html" import question_form %}
+{% block title %}Revision session{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Revision session</h1><p>{{ done }} done</p></div>
+  <div class="actions"><a class="btn" href="/revision">End session</a></div></div>
+<div style="max-width:860px">
+  {{ question_form(q, done + (0 if auto_rating else 1), revealed=revealed) }}
+  {% if auto_rating %}
+    <div class="callout mt small">Recorded as <strong>{{ auto_rating|label }}</strong> — this question comes back {{ "tomorrow" if auto_rating == "forgot" else "soon" }}.</div>
+    <div class="row mt"><a class="btn primary" href="/revision/session?type={{ type }}&done={{ done }}">Next →</a></div>
+  {% else %}
+    <form method="post" action="/revision/session/{{ item.id }}/rate" class="row mt">
+      <input type="hidden" name="type" value="{{ type }}"><input type="hidden" name="done" value="{{ done }}"><input type="hidden" name="started" value="{{ started }}">
+      <span class="small muted">Correct — how did it feel?</span>
+      {% for value, text, tone in ratings %}<button class="btn {{ tone }}" name="rating" value="{{ value }}">{{ text }}</button>{% endfor %}
+    </form>
+  {% endif %}
+</div>
+{% endblock %}

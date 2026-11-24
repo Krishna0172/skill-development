@@ -1,0 +1,200 @@
+{
+  "slug": "ai-retrieval-recall-mrr",
+  "title": "Evaluate retrieval: recall@k and MRR@k",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "ai-evaluation",
+  "concepts": [
+    "recall@k",
+    "mean reciprocal rank",
+    "retrieval evaluation",
+    "golden datasets"
+  ],
+  "related_topics": [
+    "ai-rag-evaluation",
+    "ai-evaluation-observability",
+    "ai-model-evaluation"
+  ],
+  "problem_md": "You changed the chunk size - did retrieval get better? Measure it on a small golden set.\n\n```python\ndef evaluate(results: list[list[str]], relevant: list[list[str]], k: int) -> dict\n```\n\n`results[i]` is the ranked list of doc ids returned for query *i*; `relevant[i]` the ids judged relevant.\n- **recall@k** for a query = |relevant (as a set) found in the top k results| / |relevant set|.\n- **reciprocal rank@k** = `1 / rank` of the first relevant result within the top k (1-based), else 0.\n- Return `{\"recall_at_k\": mean, \"mrr_at_k\": mean, \"per_query\": [[recall, rr], ...]}` with every number rounded to 4 decimals.\n- `ValueError` if the lists differ in length, are empty, `k < 1`, or a query has no relevant ids.",
+  "examples": [
+    {
+      "input": "evaluate([['d3','d1','d7'], ['d2','d9']], [['d1','d4'], ['d5']], k=3)",
+      "output": "{'recall_at_k': 0.25, 'mrr_at_k': 0.25, 'per_query': [[0.5, 0.5], [0.0, 0.0]]}"
+    }
+  ],
+  "hints": [
+    "Per query: `top = results[i][:k]`, `rel = set(relevant[i])`, `hits = len(rel & set(top))`.",
+    "For RR: `next((1 / r for r, d in enumerate(top, 1) if d in rel), 0.0)`. Round per-query values and the means."
+  ],
+  "starter_code": "def evaluate(results, relevant, k):\n    recalls, rrs, per = [], [], []\n    for res, rel in zip(results, relevant):\n        hits = len([d for d in res if d in rel])\n        recall = hits / len(rel)\n        rr = 1 / (res.index(rel[0]) + 1) if rel[0] in res else 0.0\n        recalls.append(recall); rrs.append(rr); per.append([round(recall, 4), round(rr, 4)])\n    return {'recall_at_k': round(sum(recalls) / len(recalls), 4),\n            'mrr_at_k': round(sum(rrs) / len(rrs), 4), 'per_query': per}\n",
+  "solution_code": "def evaluate(results, relevant, k):\n    if len(results) != len(relevant) or not results:\n        raise ValueError('results and relevant must be non-empty and the same length')\n    if k < 1:\n        raise ValueError('k must be >= 1')\n    per_query = []\n    for res, rel_ids in zip(results, relevant):\n        rel = set(rel_ids)\n        if not rel:\n            raise ValueError('every query needs at least one relevant id')\n        top = res[:k]\n        recall = len(rel & set(top)) / len(rel)\n        rr = next((1 / rank for rank, d in enumerate(top, 1) if d in rel), 0.0)\n        per_query.append((recall, rr))\n    n = len(per_query)\n    return {\n        'recall_at_k': round(sum(r for r, _ in per_query) / n, 4),\n        'mrr_at_k': round(sum(rr for _, rr in per_query) / n, 4),\n        'per_query': [[round(r, 4), round(rr, 4)] for r, rr in per_query],\n    }\n",
+  "solution_md": "**Recall@k** answers \"did the right context make it into the prompt?\" - the metric that matters most for RAG, because the LLM can't use what wasn't retrieved. **MRR** rewards putting the first relevant doc near the top (matters when you truncate or the model over-weights early context). The starter ignores `k`, double counts duplicate results and only looks for the *first listed* relevant id.\n\nUse sets so duplicate ids don't inflate hits. Cost O(sum of k + |rel|).\n\nPractice: build 50-200 golden queries from real user questions (his chat product's message history is a source), track these metrics per pipeline change in CI, and add nDCG when relevance is graded. Frameworks like Ragas add LLM-judged context precision/recall.",
+  "tests": {
+    "function": "evaluate",
+    "cases": [
+      {
+        "args": [
+          [
+            [
+              "d3",
+              "d1",
+              "d7"
+            ],
+            [
+              "d2",
+              "d9"
+            ]
+          ],
+          [
+            [
+              "d1",
+              "d4"
+            ],
+            [
+              "d5"
+            ]
+          ],
+          3
+        ],
+        "kwargs": {},
+        "expected": {
+          "recall_at_k": 0.25,
+          "mrr_at_k": 0.25,
+          "per_query": [
+            [
+              0.5,
+              0.5
+            ],
+            [
+              0.0,
+              0.0
+            ]
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "a",
+              "b",
+              "c",
+              "d"
+            ]
+          ],
+          [
+            [
+              "d",
+              "a"
+            ]
+          ],
+          2
+        ],
+        "kwargs": {},
+        "expected": {
+          "recall_at_k": 0.5,
+          "mrr_at_k": 1.0,
+          "per_query": [
+            [
+              0.5,
+              1.0
+            ]
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "x",
+              "x",
+              "y"
+            ],
+            [
+              "p",
+              "q",
+              "r"
+            ],
+            [
+              "m"
+            ]
+          ],
+          [
+            [
+              "x",
+              "y"
+            ],
+            [
+              "r"
+            ],
+            [
+              "m"
+            ]
+          ],
+          3
+        ],
+        "kwargs": {},
+        "expected": {
+          "recall_at_k": 1.0,
+          "mrr_at_k": 0.7778,
+          "per_query": [
+            [
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              0.3333
+            ],
+            [
+              1.0,
+              1.0
+            ]
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "a"
+            ]
+          ],
+          [
+            [
+              "a"
+            ]
+          ],
+          1
+        ],
+        "kwargs": {},
+        "expected": {
+          "recall_at_k": 1.0,
+          "mrr_at_k": 1.0,
+          "per_query": [
+            [
+              1.0,
+              1.0
+            ]
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "a"
+            ]
+          ],
+          [
+            []
+          ],
+          1
+        ],
+        "raises": "ValueError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

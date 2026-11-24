@@ -1,0 +1,203 @@
+[
+  {
+    "slug": "dsa-big-o-membership-in-loop",
+    "category": "dsa",
+    "difficulty": "easy",
+    "skill": "dsa",
+    "question": "This function finds SKUs present in both today's and yesterday's inventory report. What is its time complexity, and how would you improve it?\n\n```python\ndef common_skus(today, yesterday):\n    result = []\n    for sku in today:\n        if sku in yesterday:      # yesterday is a list\n            result.append(sku)\n    return result\n```",
+    "answer_md": "**Complexity.** The loop runs `n` times (len(today)). Inside it, `sku in yesterday` on a **list** is a linear scan,\nO(m). Total: **O(n x m)** time, which is effectively quadratic - with two 200k-row reports that's up to\n4 x 10^10 comparisons. Space is O(k) for the result.\n\n**Improvement.** Build a `set` from one side first. Membership in a hash set is **O(1) on average**, so the whole\nthing becomes **O(n + m)** time and O(m) extra space:\n\n```python\ndef common_skus(today, yesterday):\n    seen = set(yesterday)              # O(m) to build\n    return [sku for sku in today if sku in seen]   # O(n)\n```\n\nOr `set(today) & set(yesterday)` if order and duplicates don't matter.\n\n**How to analyze in general:**\n- Count how many times the innermost operation runs as a function of the input sizes; keep the dominant term and\n  drop constants (O(2n + 10) -> O(n)).\n- Know the cost of built-ins: list `in`/`index`/`remove`/`insert(0, x)` are O(n); dict/set lookup and insert are\n  O(1) average; `list.append` is amortized O(1); `sorted` is O(n log n); slicing copies (O(k)).\n- Use separate variables for separate inputs (O(n x m), not O(n^2)) - it matters when one side is small.\n- Mention worst vs average case: hash lookups degrade to O(n) with pathological collisions, but that's rare.\n\nThis exact pattern (list membership inside a loop) is one of the most common causes of \"the job got slow when the\nseller got bigger\" in data-processing code.",
+    "tags": [
+      "complexity",
+      "big-o",
+      "hashing",
+      "sets"
+    ]
+  },
+  {
+    "slug": "dsa-hashmap-two-sum",
+    "category": "dsa",
+    "difficulty": "easy",
+    "skill": "dsa",
+    "question": "Given a list of settlement amounts and a target payout, return the indices of two amounts that add up to the target (assume exactly one solution). Explain the brute-force and the optimal approach.",
+    "answer_md": "**Brute force.** Check every pair with two nested loops: O(n^2) time, O(1) space. Fine for 50 items, hopeless for\n100k.\n\n**Optimal: one pass with a hash map.** For each value `x`, the partner we need is `target - x`. Keep a dictionary\nfrom *value seen so far* to *its index*; if the complement is already in the map, we're done.\n\n```python\ndef two_sum(amounts: list[int], target: int) -> tuple[int, int]:\n    seen: dict[int, int] = {}          # value -> index\n    for i, x in enumerate(amounts):\n        need = target - x\n        if need in seen:\n            return seen[need], i\n        seen[x] = i                    # insert AFTER checking, so x isn't paired with itself\n    raise ValueError(\"no pair found\")\n\ntwo_sum([1200, 349, 650, 225], 875)    # (2, 3)\n```\n\n**Complexity.** O(n) time (each lookup/insert is O(1) average) and O(n) space for the map - the classic\ntime-for-space trade.\n\n**Details interviewers look for:**\n- Insert after the lookup, otherwise `[5]` with target 10 would pair index 0 with itself.\n- Duplicates work: `[3, 3]`, target 6 -> (0, 1), because the first 3 is in the map when the second is processed.\n- Money as floats: `0.1 + 0.2 != 0.3`, so hash lookups on floats are unreliable. Use integer paise\n  (`round(x * 100)`) or `Decimal`.\n- Alternative when the input is already sorted: two pointers from both ends, O(n) time and O(1) space. If it's not\n  sorted, sorting costs O(n log n) and loses original indices unless you sort `(value, index)` pairs.",
+    "tags": [
+      "hashing",
+      "arrays",
+      "two-sum"
+    ]
+  },
+  {
+    "slug": "dsa-hashing-group-anagrams",
+    "category": "dsa",
+    "difficulty": "medium",
+    "skill": "dsa",
+    "question": "Group words that are anagrams of each other, e.g. `[\"listen\", \"silent\", \"enlist\", \"google\", \"gogole\", \"cat\"]`. What key do you use, and what is the complexity? How does this idea apply to grouping report rows?",
+    "answer_md": "**Idea.** Two words are anagrams iff they have the same multiset of letters. Map every word to a **canonical\nkey** that is identical for all anagrams, and group by that key in a dictionary.\n\n```python\nfrom collections import defaultdict\n\ndef group_anagrams(words: list[str]) -> list[list[str]]:\n    groups: dict[str, list[str]] = defaultdict(list)\n    for w in words:\n        key = \"\".join(sorted(w))        # 'listen' -> 'eilnst'\n        groups[key].append(w)\n    return list(groups.values())\n\n# [['listen', 'silent', 'enlist'], ['google', 'gogole'], ['cat']]\n```\n\n**Complexity.** For n words of max length k: sorting each word is O(k log k), so O(n * k log k) time, O(n * k)\nspace. A faster key is a letter-count tuple (26 counters), O(k) per word:\n\n```python\ndef key(w):\n    counts = [0] * 26\n    for ch in w:\n        counts[ord(ch) - ord(\"a\")] += 1\n    return tuple(counts)               # lists aren't hashable; tuples are\n```\n\n**Points worth stating:**\n- Dictionary keys must be **hashable and immutable** - hence `str` or `tuple`, not `list`.\n- Normalize first if the spec says so (lower-case, strip spaces).\n- `defaultdict(list)` avoids the \"if key not in dict\" boilerplate.\n\n**Real-world analogue.** This \"canonical key + group\" pattern is exactly how you dedupe or match messy data: e.g.\nmatch marketplace SKUs to your catalog by normalizing (`sku.strip().upper().replace(\" \", \"\")`), or group report\nrows by `(channel, order_ref)` before aggregating. It's what SQL `GROUP BY` does with a hash aggregate.",
+    "tags": [
+      "hashing",
+      "strings",
+      "grouping"
+    ]
+  },
+  {
+    "slug": "dsa-two-pointers-sorted-pairs",
+    "category": "dsa",
+    "difficulty": "easy",
+    "skill": "dsa",
+    "question": "You have a **sorted** list of order amounts. Count the pairs `(i < j)` whose sum is at most a budget. Why do two pointers work here, and what is the complexity compared to brute force?",
+    "answer_md": "**Brute force:** check all pairs, O(n^2).\n\n**Two pointers.** Put `lo` at the start and `hi` at the end of the sorted array.\n- If `a[lo] + a[hi] <= budget`, then `a[lo]` paired with **every** element from `lo+1` to `hi` also fits (they're\n  all <= `a[hi]`). That's `hi - lo` pairs at once; move `lo` right.\n- Otherwise the sum is too big; `a[hi]` can't pair with `a[lo]` or anything larger, so move `hi` left.\n\nEach step moves one pointer, so the loop runs at most n times.\n\n```python\ndef count_pairs_within(amounts: list[int], budget: int) -> int:\n    lo, hi, count = 0, len(amounts) - 1, 0\n    while lo < hi:\n        if amounts[lo] + amounts[hi] <= budget:\n            count += hi - lo\n            lo += 1\n        else:\n            hi -= 1\n    return count\n\ncount_pairs_within([100, 200, 300, 400, 500], 600)   # 6\n```\n\nTrace: `100+500 <= 600` -> 4 pairs (100 with 200..500), `lo` moves; `200+500` too big -> `hi` moves;\n`200+400 <= 600` -> 2 more pairs; then `300+400` too big and the pointers meet. Total 6.\n\n**Complexity.** O(n) after sorting; if the input isn't sorted, add O(n log n). O(1) extra space.\n\n**Why it works:** sortedness gives *monotonicity* - moving `lo` right only increases sums, moving `hi` left only\ndecreases them - so each comparison safely discards a whole row or column of the pair matrix.\n\nOther classic two-pointer uses: removing duplicates in-place from a sorted array (slow/fast pointers), merging two\nsorted lists (like merging two sorted report extracts), and checking palindromes.",
+    "tags": [
+      "two-pointers",
+      "sorting",
+      "arrays"
+    ]
+  },
+  {
+    "slug": "dsa-sliding-window-longest-unique",
+    "category": "dsa",
+    "difficulty": "medium",
+    "skill": "dsa",
+    "question": "Find the length of the longest substring without repeating characters (e.g. `\"abcabcbb\"` -> 3). Explain the sliding window technique and its complexity.",
+    "answer_md": "**Sliding window.** Maintain a window `[left, right]` that always satisfies the constraint (\"no repeats\"). Extend\n`right` one step at a time; when the new character breaks the constraint, move `left` forward until it's valid\nagain. Track the best window length seen.\n\nInstead of shrinking one by one, remember the **last index** of each character and jump `left` past it:\n\n```python\ndef longest_unique(s: str) -> int:\n    last_seen: dict[str, int] = {}\n    left = best = 0\n    for right, ch in enumerate(s):\n        if ch in last_seen and last_seen[ch] >= left:\n            left = last_seen[ch] + 1        # jump past the previous occurrence\n        last_seen[ch] = right\n        best = max(best, right - left + 1)\n    return best\n\nlongest_unique(\"abcabcbb\")  # 3 (\"abc\")\nlongest_unique(\"abba\")      # 2 - the `>= left` check stops `left` moving backwards\n```\n\n**Complexity.** Each index is visited by `right` once and `left` only moves forward: **O(n)** time, O(min(n,\nalphabet)) space. Brute force (check every substring) is O(n^2) or O(n^3).\n\n**When to reach for a sliding window:** contiguous subarrays/substrings with a constraint that is *monotonic* -\nif a window is invalid, every larger window containing it is invalid too. Examples: max sum of k consecutive days'\nrevenue (fixed window: add the new day, subtract the day leaving), shortest period whose orders exceed a target,\n\"at most k distinct SKUs\".\n\n**Fixed-size variant** (7-day rolling revenue) in O(n):\n\n```python\ndef rolling_sum(xs, k):\n    window = sum(xs[:k]); out = [window]\n    for i in range(k, len(xs)):\n        window += xs[i] - xs[i - k]\n        out.append(window)\n    return out\n```\n\nSame idea as SQL's `SUM() OVER (ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`.",
+    "tags": [
+      "sliding-window",
+      "strings",
+      "hashing"
+    ]
+  },
+  {
+    "slug": "dsa-stack-valid-brackets",
+    "category": "dsa",
+    "difficulty": "easy",
+    "skill": "dsa",
+    "question": "Check whether a string of brackets `()[]{}` is balanced, e.g. `\"{[()]}\"` is valid and `\"([)]\"` is not. Why is a stack the right structure?",
+    "answer_md": "**Why a stack.** Brackets must close in the **reverse order** they were opened - last opened, first closed. That's\nLIFO, exactly what a stack gives you.\n\n**Algorithm.** Scan left to right. Push every opener. On a closer, the top of the stack must be its matching\nopener; pop it. If the stack is empty when a closer arrives, or the top doesn't match, it's invalid. At the end the\nstack must be empty (no unclosed openers).\n\n```python\ndef is_balanced(s: str) -> bool:\n    pairs = {\")\": \"(\", \"]\": \"[\", \"}\": \"{\"}\n    stack: list[str] = []\n    for ch in s:\n        if ch in \"([{\":\n            stack.append(ch)\n        elif ch in pairs:\n            if not stack or stack.pop() != pairs[ch]:\n                return False\n    return not stack\n\nis_balanced(\"{[()]}\")  # True\nis_balanced(\"([)]\")    # False - ']' arrives while '(' is on top\nis_balanced(\"((\")      # False - leftovers\n```\n\n**Complexity.** O(n) time, O(n) space in the worst case (all openers).\n\n**Python notes.** A list is an efficient stack (`append`/`pop` at the end are O(1)). For a **queue**, don't use\n`list.pop(0)` (O(n)); use `collections.deque` with `popleft()` (O(1)).\n\n**Where stacks show up in practice:** parsing nested structures (JSON, expressions), undo history, DFS without\nrecursion (avoids Python's recursion limit on deep category trees), and \"monotonic stack\" problems like \"next\ngreater element\" (e.g. for each day, how many days until a higher sales day) in O(n).",
+    "tags": [
+      "stack",
+      "strings",
+      "parsing"
+    ]
+  },
+  {
+    "slug": "dsa-bfs-shortest-path-grid",
+    "category": "dsa",
+    "difficulty": "medium",
+    "skill": "dsa",
+    "question": "A warehouse floor is a grid where `0` is walkable and `1` is a rack. Find the minimum number of steps from the packing station to a target shelf (4-directional moves). Why BFS and not DFS?",
+    "answer_md": "**Why BFS.** In an unweighted graph (every move costs 1), breadth-first search explores nodes in order of distance:\nfirst everything 1 step away, then 2 steps, and so on. The first time BFS reaches the target, that path is the\nshortest. DFS dives down one path and may find a long route first; it would need to explore everything to be sure.\n\n```python\nfrom collections import deque\n\ndef shortest_path(grid, start, target):\n    rows, cols = len(grid), len(grid[0])\n    queue = deque([(start, 0)])          # (cell, distance)\n    visited = {start}\n    while queue:\n        (r, c), dist = queue.popleft()\n        if (r, c) == target:\n            return dist\n        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):\n            nr, nc = r + dr, c + dc\n            if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] == 0 and (nr, nc) not in visited:\n                visited.add((nr, nc))    # mark when ENQUEUED, not when dequeued\n                queue.append(((nr, nc), dist + 1))\n    return -1                            # unreachable\n```\n\n**Complexity.** Each cell is enqueued at most once and has 4 neighbours: **O(R x C)** time and space.\n\n**Key details:**\n- Use `deque` - `list.pop(0)` would make BFS quadratic.\n- Mark cells visited when you enqueue them; marking on dequeue lets the same cell be queued many times.\n- Return a sentinel for unreachable targets.\n\n**BFS vs DFS in general:** BFS for shortest path in unweighted graphs and \"level by level\" processing; DFS (recursive\nor with an explicit stack) for exhaustive exploration, connected components, cycle detection and topological sort.\nWith **weighted** edges (different travel times), BFS is no longer correct - use Dijkstra's algorithm (BFS with a\npriority queue/heap).",
+    "tags": [
+      "bfs",
+      "graphs",
+      "queue",
+      "grid"
+    ]
+  },
+  {
+    "slug": "dsa-binary-search-first-occurrence",
+    "category": "dsa",
+    "difficulty": "medium",
+    "skill": "dsa",
+    "question": "Given a sorted list of order timestamps (with duplicates), find the index of the **first** order at or after a given time. Explain binary search, its invariants, and common bugs.",
+    "answer_md": "**Binary search** halves the search space each step by comparing with the middle element, so it needs only\nO(log n) comparisons - about 20 for a million items. It requires the data to be **sorted** (more generally, a\nmonotonic yes/no condition).\n\n\"First index with `a[i] >= x`\" is the *lower bound*. Keep a half-open range `[lo, hi)` with the invariant: the\nanswer is always inside `[lo, hi]`.\n\n```python\ndef lower_bound(a: list[str], x: str) -> int:\n    lo, hi = 0, len(a)              # hi = len(a) means \"not found / insert at end\"\n    while lo < hi:\n        mid = (lo + hi) // 2\n        if a[mid] < x:\n            lo = mid + 1            # answer is strictly right of mid\n        else:\n            hi = mid                # mid could be the answer; keep it\n    return lo\n\nts = [\"09:00\", \"09:05\", \"09:05\", \"09:05\", \"10:30\"]\nlower_bound(ts, \"09:05\")  # 1 - the FIRST 09:05, not any 09:05\n```\n\n**Common bugs:**\n- Returning as soon as `a[mid] == x` - you get *some* match, not the first.\n- Infinite loops from `hi = mid - 1` / `lo = mid` mismatches. Pick one convention (half-open here) and stick to it.\n- Off-by-one on \"not found\": the result can be `len(a)`; check before indexing.\n- In languages with fixed-size ints, `(lo + hi) / 2` can overflow (use `lo + (hi - lo) // 2`); not an issue in Python.\n\n**In Python** use the standard library: `bisect.bisect_left(a, x)` is exactly this function; `bisect_right` gives\nthe first index *greater* than x, so `bisect_right - bisect_left` counts occurrences in O(log n).\n\n**Connection to databases:** a B-tree index lookup is the same idea generalized to wide nodes - that's why an\nindexed range query (`WHERE created_at >= x ORDER BY created_at LIMIT 50`) is fast.",
+    "tags": [
+      "binary-search",
+      "arrays",
+      "bisect"
+    ]
+  },
+  {
+    "slug": "dsa-binary-search-on-answer",
+    "category": "dsa",
+    "difficulty": "hard",
+    "skill": "dsa",
+    "question": "You must upload N report files (sizes given, in a fixed order) using K sequential batches; each batch's total size can't exceed a capacity C. Find the **minimum** C that allows finishing in at most K batches. How does binary search apply when the array isn't what you search?",
+    "answer_md": "**Binary search on the answer.** We don't search the array; we search the range of possible capacities. The key\nobservation is **monotonicity**: if capacity C works, any larger capacity also works. So `feasible(C)` looks like\n`F F F F T T T T`, and we want the first `T` - a lower-bound binary search.\n\n- Lower bound of C: `max(sizes)` (every file must fit in some batch).\n- Upper bound: `sum(sizes)` (everything in one batch).\n\n`feasible(C)` is a greedy O(n) scan: keep adding files to the current batch; start a new batch when the next file\nwould overflow; check the batch count.\n\n```python\ndef min_capacity(sizes: list[int], k: int) -> int:\n    def batches_needed(cap: int) -> int:\n        batches, current = 1, 0\n        for s in sizes:\n            if current + s > cap:\n                batches += 1\n                current = 0\n            current += s\n        return batches\n\n    lo, hi = max(sizes), sum(sizes)\n    while lo < hi:\n        mid = (lo + hi) // 2\n        if batches_needed(mid) <= k:\n            hi = mid            # feasible - try smaller\n        else:\n            lo = mid + 1        # infeasible - need more capacity\n    return lo\n\nmin_capacity([7, 2, 5, 10, 8], 2)   # 18 -> [7,2,5] [10,8]\n```\n\n**Complexity.** O(n log S) where S = sum(sizes): log S binary-search steps, each an O(n) feasibility check.\nCompare brute force trying every capacity: O(n x S).\n\n**Recognizing the pattern:** the question asks for a *minimum (or maximum) value* such that a condition holds, and\nchecking a candidate value is easy while computing the optimum directly is hard. Other examples: minimum Lambda\nmemory that processes a file within the time limit (given a benchmark function), smallest page size meeting a\nlatency target, the \"Koko eating bananas\" and \"split array largest sum\" problems.",
+    "tags": [
+      "binary-search",
+      "greedy",
+      "optimization"
+    ]
+  },
+  {
+    "slug": "dsa-heap-top-k-frequent",
+    "category": "dsa",
+    "difficulty": "medium",
+    "skill": "dsa",
+    "question": "Given millions of order lines, return the K most frequently sold SKUs. Compare sorting, a heap, and `Counter.most_common`.",
+    "answer_md": "**Step 1: count** with a hash map - O(n):\n\n```python\nfrom collections import Counter\ncounts = Counter(line[\"sku\"] for line in order_lines)   # m distinct SKUs\n```\n\n**Step 2: pick the top K.** Options:\n\n1. **Sort all SKUs** by count: O(m log m). Simple; fine when m is small.\n2. **Min-heap of size K**: keep the K best seen so far; the heap's root is the *smallest* of them, so a new SKU\n   only enters if it beats the root. O(m log K) time, O(K) extra space - better when K << m.\n\n```python\nimport heapq\n\ndef top_k(counts: dict[str, int], k: int) -> list[tuple[str, int]]:\n    heap: list[tuple[int, str]] = []          # (count, sku)\n    for sku, c in counts.items():\n        if len(heap) < k:\n            heapq.heappush(heap, (c, sku))\n        elif c > heap[0][0]:\n            heapq.heapreplace(heap, (c, sku))  # pop smallest + push, one O(log k) op\n    return sorted(((s, c) for c, s in heap), key=lambda t: -t[1])\n```\n\n3. **`heapq.nlargest(k, counts.items(), key=lambda t: t[1])`** or **`Counter.most_common(k)`** - both use a heap\n   internally when k is small. In real code, use these.\n\n**Why a *min*-heap for the *largest* K?** You need fast access to the weakest member of the current top K to decide\nwhether to evict it. Python's `heapq` is a min-heap; for a max-heap push negated keys.\n\n**Ties:** tuples compare element-wise, so equal counts fall back to comparing SKU strings - deterministic. Make the\ntie rule explicit if the business cares.\n\n**Scale:** if the data doesn't fit in memory, let the database do it\n(`GROUP BY sku ORDER BY COUNT(*) DESC LIMIT k`) or count per chunk and merge the counters. Bucket sort by\nfrequency gives O(n) when counts are bounded by n.",
+    "tags": [
+      "heap",
+      "hashing",
+      "top-k",
+      "priority-queue"
+    ]
+  },
+  {
+    "slug": "dsa-heap-merge-k-sorted",
+    "category": "dsa",
+    "difficulty": "hard",
+    "skill": "dsa",
+    "question": "You have K files of orders, each already sorted by `order_id`, too large to load together. Merge them into one sorted stream. What's the algorithm and complexity?",
+    "answer_md": "**K-way merge with a min-heap.** Keep one \"current\" element from each file in a heap keyed by `order_id`. Repeatedly\npop the smallest, emit it, and push the next element from the same file. The heap never holds more than K items,\nso memory is O(K) regardless of file sizes.\n\n```python\nimport heapq\n\ndef merge_sorted(iterators):\n    heap = []\n    for idx, it in enumerate(iterators):\n        first = next(it, None)\n        if first is not None:\n            heapq.heappush(heap, (first[\"order_id\"], idx, first))\n    while heap:\n        _, idx, row = heapq.heappop(heap)\n        yield row\n        nxt = next(iterators[idx], None)\n        if nxt is not None:\n            heapq.heappush(heap, (nxt[\"order_id\"], idx, nxt))\n```\n\nThe `idx` in the tuple is a tie-breaker: without it, two equal `order_id`s would make Python compare the dicts,\nwhich raises `TypeError`.\n\n**Complexity.** N total rows, each pushed and popped once at O(log K): **O(N log K)** time, **O(K)** memory.\nConcatenating and sorting would be O(N log N) time and O(N) memory - impossible if N doesn't fit in RAM.\n\n**Standard library:** `heapq.merge(*iterators, key=lambda r: r[\"order_id\"])` does exactly this lazily.\n\n**Where this matters:**\n- It's the second phase of **external merge sort**: sort chunks that fit in memory, write them out, then K-way merge.\n  Databases do this when a sort exceeds `work_mem` (EXPLAIN shows \"Sort Method: external merge\").\n- Merging per-channel extracts into one timeline, or deduplicating across files: while merging, consecutive equal\n  keys are adjacent, so dedupe is O(1) extra work per row.\n\n**Edge cases:** empty files, duplicate keys across files, and inputs that aren't actually sorted - validate or\nyou'll silently produce wrong output.",
+    "tags": [
+      "heap",
+      "merge",
+      "external-sort",
+      "streaming"
+    ]
+  },
+  {
+    "slug": "dsa-topological-sort-job-dependencies",
+    "category": "dsa",
+    "difficulty": "medium",
+    "skill": "dsa",
+    "question": "Your nightly pipeline has jobs with dependencies (e.g. `load_orders` before `compute_recon`, `load_settlements` before `compute_recon`). Produce a valid run order and detect circular dependencies.",
+    "answer_md": "Model jobs as a **directed graph**: edge `A -> B` means \"A must run before B\". A valid run order is a\n**topological sort**, which exists iff the graph has **no cycle** (it's a DAG).\n\n**Kahn's algorithm (BFS-based).** Count incoming edges (in-degree) per node. Start with nodes of in-degree 0 (no\nprerequisites). Repeatedly take one, append it to the order, and decrement the in-degree of its dependents; any that\nreach 0 become ready. If the output has fewer nodes than the graph, the leftovers are in a cycle.\n\n```python\nfrom collections import defaultdict, deque\n\ndef run_order(deps: dict[str, list[str]]) -> list[str]:\n    # deps: job -> jobs that must run before it\n    graph, indegree = defaultdict(list), {}\n    for job, prereqs in deps.items():\n        indegree.setdefault(job, 0)\n        for p in prereqs:\n            indegree.setdefault(p, 0)\n            graph[p].append(job)\n            indegree[job] += 1\n    ready = deque(sorted(j for j, d in indegree.items() if d == 0))\n    order = []\n    while ready:\n        job = ready.popleft()\n        order.append(job)\n        for nxt in graph[job]:\n            indegree[nxt] -= 1\n            if indegree[nxt] == 0:\n                ready.append(nxt)\n    if len(order) != len(indegree):\n        stuck = [j for j, d in indegree.items() if d > 0]\n        raise ValueError(f\"cycle among: {stuck}\")\n    return order\n\nrun_order({\"compute_recon\": [\"load_orders\", \"load_settlements\"], \"send_report\": [\"compute_recon\"]})\n# ['load_orders', 'load_settlements', 'compute_recon', 'send_report']\n```\n\n**Complexity.** O(V + E) time and space.\n\n**Bonus:** all jobs in `ready` at the same moment are independent and can run **in parallel** - this is how\nschedulers like Airflow plan DAG runs. The DFS alternative (post-order, then reverse) works too and detects cycles\nwith a \"visiting\" state (gray/black colouring). The same algorithm resolves import order of category trees, migration\ndependencies, or build steps.",
+    "tags": [
+      "graphs",
+      "topological-sort",
+      "bfs",
+      "dag"
+    ]
+  },
+  {
+    "slug": "dsa-dp-climbing-stairs-memo-vs-tab",
+    "category": "dsa",
+    "difficulty": "easy",
+    "skill": "dsa",
+    "question": "You can climb 1 or 2 steps at a time. How many distinct ways are there to reach step n? Use this to explain dynamic programming, memoization vs tabulation.",
+    "answer_md": "**Recurrence.** To stand on step n, your last move came from n-1 (a 1-step) or n-2 (a 2-step). So\n`ways(n) = ways(n-1) + ways(n-2)`, with `ways(0) = 1`, `ways(1) = 1`. (It's Fibonacci.)\n\n**Naive recursion** recomputes the same subproblems exponentially many times: O(2^n).\n\n**Dynamic programming** applies when a problem has (1) **overlapping subproblems** and (2) **optimal\nsubstructure** - the answer is built from answers to smaller instances. Solve each subproblem once and reuse it.\n\n**Memoization (top-down):** keep the recursion, cache results.\n\n```python\nfrom functools import lru_cache\n\n@lru_cache(maxsize=None)\ndef ways(n: int) -> int:\n    if n <= 1:\n        return 1\n    return ways(n - 1) + ways(n - 2)\n```\n\n**Tabulation (bottom-up):** fill a table from the base cases upward - no recursion depth limit (Python's default\nis ~1000 frames).\n\n```python\ndef ways_tab(n: int) -> int:\n    prev, cur = 1, 1            # ways(0), ways(1)\n    for _ in range(2, n + 1):\n        prev, cur = cur, prev + cur\n    return cur\n```\n\nBoth are **O(n) time**. Memoized: O(n) space (cache + call stack). The tabulated version only keeps the last two\nvalues: **O(1) space**.\n\n**Choosing:** memoization is easier to write from the recurrence and only computes reachable states; tabulation is\nfaster in Python (no call overhead), avoids recursion limits, and allows space optimizations.\n\n**How to approach any DP question:** define the state in words (\"ways(i) = number of ways to reach step i\"), write\nthe transition, identify base cases, decide the evaluation order, then optimize space. Variations: steps of\n{1, 2, 3}, forbidden steps, or minimum cost to reach the top.",
+    "tags": [
+      "dynamic-programming",
+      "recursion",
+      "memoization"
+    ]
+  },
+  {
+    "slug": "dsa-dp-coin-change-min-coins",
+    "category": "dsa",
+    "difficulty": "medium",
+    "skill": "dsa",
+    "question": "Given coupon denominations (e.g. 1, 5, 20, 50) and a target discount, find the minimum number of coupons that add up exactly to the target, or -1 if impossible. Why does greedy fail in general?",
+    "answer_md": "**Greedy fails.** \"Always take the largest coupon that fits\" works for some denominations (like Indian currency) but\nnot all. With `[1, 3, 4]` and target 6, greedy picks 4 + 1 + 1 = **3** coupons; the optimum is 3 + 3 = **2**.\nGreedy commits early and never reconsiders.\n\n**DP formulation.**\n- State: `dp[a]` = minimum coupons to make amount `a`.\n- Transition: `dp[a] = 1 + min(dp[a - c])` over coupons `c <= a`.\n- Base: `dp[0] = 0`; unreachable amounts stay at infinity.\n\n```python\ndef min_coupons(coins: list[int], target: int) -> int:\n    INF = float(\"inf\")\n    dp = [0] + [INF] * target\n    for a in range(1, target + 1):\n        for c in coins:\n            if c <= a and dp[a - c] + 1 < dp[a]:\n                dp[a] = dp[a - c] + 1\n    return dp[target] if dp[target] != INF else -1\n\nmin_coupons([1, 3, 4], 6)    # 2\nmin_coupons([5, 20], 12)     # -1\n```\n\n**Complexity.** O(target x len(coins)) time, O(target) space. This is *pseudo-polynomial*: it depends on the\nnumeric value of the target, so amounts in paise (x100) make the table 100x bigger.\n\n**Reconstructing the answer:** store `choice[a] = c` whenever you improve `dp[a]`, then walk back from the target.\n\n**Related variants** (good follow-ups):\n- *Number of ways* to make the amount: `ways[a] += ways[a - c]`, looping coins in the **outer** loop so that\n  {1,3} and {3,1} aren't counted twice.\n- 0/1 knapsack (each item at most once): iterate amounts **downwards** in the inner loop.\n\n**Interview tip:** say out loud why greedy is tempting, give the counterexample, then build the table - it shows you\nunderstand *when* DP is needed rather than reciting it.",
+    "tags": [
+      "dynamic-programming",
+      "greedy",
+      "knapsack"
+    ]
+  },
+  {
+    "slug": "dsa-sorting-tradeoffs",
+    "category": "dsa",
+    "difficulty": "medium",
+    "skill": "dsa",
+    "question": "Compare quicksort, merge sort, heap sort and Python's built-in Timsort. What does 'stable' mean, and how would you sort a 20 GB orders file?",
+    "answer_md": "| algorithm | average | worst | extra space | stable |\n|---|---|---|---|---|\n| quicksort | O(n log n) | O(n^2) (bad pivots) | O(log n) stack | no |\n| merge sort | O(n log n) | O(n log n) | O(n) | yes |\n| heap sort | O(n log n) | O(n log n) | O(1) | no |\n| Timsort (Python `sorted`/`list.sort`) | O(n log n) | O(n log n) | O(n) | yes |\n\n- **Quicksort** is very fast in practice (cache-friendly, in-place) but has a quadratic worst case; randomized\n  pivots or introsort (switch to heap sort when recursion gets deep) fix that.\n- **Merge sort** guarantees O(n log n) and stability; it's the basis of external sorting.\n- **Heap sort** has O(1) extra memory and guaranteed bounds but poor cache behaviour.\n- **Timsort** is a merge-sort/insertion-sort hybrid that detects already-sorted \"runs\", so nearly-sorted data (very\n  common: logs, appended reports) sorts in close to O(n).\n\n**Stability** means equal keys keep their original relative order. It lets you sort by multiple keys in passes:\n\n```python\norders.sort(key=lambda o: o[\"order_id\"])     # secondary key first\norders.sort(key=lambda o: o[\"channel\"])      # primary key; order_id order preserved within a channel\n# or in one pass: orders.sort(key=lambda o: (o[\"channel\"], o[\"order_id\"]))\n```\n\n**Lower bound:** comparison sorts can't beat O(n log n). Non-comparison sorts (counting/radix/bucket) reach O(n)\nwhen keys are small integers or fixed-width - e.g. bucketing orders by day of month.\n\n**Sorting 20 GB with 2 GB of RAM: external merge sort.** Read ~1.5 GB chunks, sort each in memory, write sorted\nruns to disk; then K-way merge the runs with a heap (`heapq.merge`), streaming the output. O(n log n) CPU and\nroughly two passes of I/O. In practice, the simplest answer is often \"load it into PostgreSQL and `ORDER BY`\" or use\n`sort` on the command line - both already implement external sorting.",
+    "tags": [
+      "sorting",
+      "complexity",
+      "stability",
+      "external-sort"
+    ]
+  }
+]

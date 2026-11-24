@@ -1,0 +1,179 @@
+{
+  "slug": "py-variables-types-operators",
+  "title": "Variables, types and operators",
+  "skill": "python",
+  "extra_skills": [],
+  "category": "Python",
+  "difficulty": "beginner",
+  "tags": [
+    "variables",
+    "types",
+    "operators",
+    "basics"
+  ],
+  "summary": "A variable in Python is a name that points at a value. Every value has a type such as int, float, str, bool or None, and operators combine values. This topic starts from zero and builds the mental model you need for everything else.",
+  "why_md": "- Every program is values with names, so this is the base layer of all later topics.\n- Python's 'names point at objects' model explains many surprises (mutable defaults, aliasing) you will meet later.\n- Interviews routinely ask about `is` vs `==`, integer division, truthiness and mutable vs immutable.",
+  "details_md": "### A variable is a label\nWhen you write `price = 250`, Python creates an integer object holding 250 and sticks the label `price` on it. You do not declare a type; the *value* carries the type. The same name can later point at something else:\n\n```python\nprice = 250        # int\nprice = \"free\"     # now a str: legal, but confusing\n```\n\n### The core types\n- `int`: whole numbers of any size (`10**100` works).\n- `float`: decimal numbers stored in binary, so `0.1 + 0.2` is `0.30000000000000004`. For money use `decimal.Decimal` or integer paise/cents.\n- `str`: text.\n- `bool`: `True` or `False`. A `bool` is actually a subtype of `int`, so `True + True == 2`.\n- `None`: the single 'nothing here' value, often used for 'not set yet'.\n\nUse `type(x)` to see a type and `isinstance(x, int)` to check one.\n\n### Operators\nArithmetic: `+ - * / // % **`. Note `/` always gives a float (`7 / 2 == 3.5`), `//` is floor division (`7 // 2 == 3`, and `-7 // 2 == -4` because it rounds toward minus infinity), `%` is the remainder, `**` is power.\n\nComparison: `== != < > <= >=`, and they can chain: `1 < x < 10`.\n\nLogic: `and`, `or`, `not`. They short-circuit and return one of their operands, not necessarily a bool: `\"\" or \"default\"` gives `\"default\"`.\n\nIdentity: `is` asks 'are these the very same object?', while `==` asks 'are the values equal?'. Use `is` only for `None` (`if x is None`).\n\n### Truthiness\nIn an `if`, these count as false: `0`, `0.0`, `\"\"`, `[]`, `{}`, `set()`, `None`, `False`. Everything else is true. Beware: `0` being falsy is a classic bug when `0` is a valid value (a stock of 0, a price of 0).\n\n### Mutable vs immutable\nNumbers, strings, tuples and `None` cannot be changed in place (immutable). Lists, dicts and sets can (mutable). Assignment never copies:\n\n```python\na = [1, 2]\nb = a          # two labels, one list\nb.append(3)\nprint(a)       # [1, 2, 3]\n```\n\n### Augmented assignment and multiple assignment\n`n += 1` is shorthand for `n = n + 1`. You can unpack: `x, y = 1, 2` and swap with `x, y = y, x`.\n\n### Naming rules\nUse `snake_case` for variables, `UPPER_CASE` for constants by convention, never start with a digit, and do not shadow built-ins like `list`, `id` or `type`.",
+  "code_md": "```python\n# 1. types and checks\nqty = 3\nunit_price = 199.5\nin_stock = True\nprint(type(qty), type(unit_price), type(in_stock))\nprint(isinstance(True, int))        # True: bool is an int subtype\n```\n\n```python\n# 2. the division family\nprint(7 / 2, 7 // 2, 7 % 2, 2 ** 10)   # 3.5 3 1 1024\nprint(-7 // 2)                          # -4 (floors)\n```\n\n```python\n# 3. truthiness and `or` defaults\ncoupon = \"\"\nlabel = coupon or \"no coupon\"\nprint(label)                            # no coupon\nstock = 0\nif stock is not None:                   # correct: 0 is a real value\n    print(\"stock known:\", stock)\n```\n\n```python\n# 4. aliasing\na = [1, 2]\nb = a\nb.append(3)\nprint(a is b, a)                        # True [1, 2, 3]\n```",
+  "use_cases_md": "- Parsing a CSV row: quantity arrives as `\"3\"` (str) and must be converted with `int()` before arithmetic.\n- Default values: `region = user_region or \"IN\"`.\n- Pagination: `page_count = (total + size - 1) // size` uses floor division.\n- Distinguishing 'no price yet' (`None`) from 'price is 0'.",
+  "mistakes_md": "- **`==` vs `is`**: `x is 5` is unreliable; use `==` for values and `is` only for `None`.\n- **Float money**: `0.1 + 0.2 != 0.3`. Use `Decimal` or integer minor units.\n- **Truthiness trap**: `if not qty:` treats `0` as missing. Use `if qty is None:`.\n- **Aliasing**: `b = a` does not copy a list. Use `a.copy()` or `list(a)`.\n- **Shadowing built-ins**: `list = [1,2]` breaks `list(...)` later.",
+  "best_practices_md": "- Pick descriptive names (`order_total`, not `x`).\n- Compare to `None` with `is None` / `is not None`.\n- Keep money in `Decimal` or integers.\n- Convert input types explicitly at the edge (`int(raw)`).\n- Treat constants as `UPPER_CASE` and never reassign them.",
+  "my_context_md": "",
+  "revision_notes_md": "- Variable = label pointing at an object; the value has the type.\n- Core types: int, float, str, bool, None.\n- `/` float division, `//` floor (rounds down), `%` remainder, `**` power.\n- `==` equal value, `is` same object (use for None only).\n- Falsy: 0, 0.0, \"\", [], {}, set(), None, False.\n- `and`/`or` return an operand, not necessarily a bool.\n- Immutable: int, float, str, tuple, None. Mutable: list, dict, set.\n- `b = a` aliases; it never copies.\n- Floats are binary approximations; use Decimal for money.",
+  "exercises_md": "1. Compute the number of pages for 1,037 items at 25 per page using only `//` and `%`, then using `(n + size - 1) // size`.\n2. Write a snippet that prints the type of `1`, `1.0`, `\"1\"`, `True`, `None`, `[1]`.\n3. Show with `id()` that `b = a` shares a list but `b = a.copy()` does not.\n4. Find three values where `if not x:` is true but the value is legitimate data.",
+  "related": [
+    "py-strings-formatting",
+    "py-control-flow-loops",
+    "py-fundamentals-refresher",
+    "py-internals-memory"
+  ],
+  "flashcards": [
+    {
+      "front": "What is a Python variable?",
+      "back": "A name (label) that refers to an object. The object has the type, not the name."
+    },
+    {
+      "front": "Difference between `/` and `//`?",
+      "back": "`/` always returns a float; `//` is floor division (rounds toward minus infinity)."
+    },
+    {
+      "front": "`==` vs `is`?",
+      "back": "`==` compares values; `is` compares object identity. Use `is` for None."
+    },
+    {
+      "front": "Name the falsy values.",
+      "back": "0, 0.0, \"\", [], {}, set(), None, False."
+    },
+    {
+      "front": "Why is 0.1 + 0.2 != 0.3?",
+      "back": "Floats are binary approximations. Use Decimal or integer minor units for money."
+    },
+    {
+      "front": "Which types are immutable?",
+      "back": "int, float, str, bool, tuple, None (and frozenset, bytes)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is `7 // 2` in Python?",
+      "options": [
+        "3.5",
+        "3",
+        "4",
+        "2"
+      ],
+      "answer_index": 1,
+      "explanation": "`//` is floor division: 7 / 2 = 3.5, floored to 3."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which check is the correct way to test for 'no value'?",
+      "options": [
+        "if x == None:",
+        "if not x:",
+        "if x is None:",
+        "if x = None:"
+      ],
+      "answer_index": 2,
+      "explanation": "`is None` tests identity with the single None object and does not confuse 0 or '' with missing."
+    },
+    {
+      "type": "mcq",
+      "prompt": "After `a = [1]; b = a; b.append(2)`, what is `a`?",
+      "options": [
+        "[1]",
+        "[2]",
+        "[1, 2]",
+        "Error"
+      ],
+      "answer_index": 2,
+      "explanation": "`b = a` makes two names for the same list, so appending through b changes what a sees."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`isinstance(True, ____)` returns True because bool is a subtype of this class.",
+      "answers": [
+        "int",
+        "int class"
+      ],
+      "explanation": "bool inherits from int."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The operator that returns the remainder of a division is ____.",
+      "answers": [
+        "%",
+        "modulo",
+        "the % operator"
+      ],
+      "explanation": "`7 % 2` is 1."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "a = 7\nprint(a / 2, a // 2, a % 2)\nprint(-7 // 2)\nprint(2 ** 5)\nprint(True + True)\n",
+      "answers": [
+        "3.5 3 1\n-4\n32\n2"
+      ],
+      "explanation": "`/` gives 3.5, `//` gives 3, `%` gives 1; `-7 // 2` floors to -4; 2**5 is 32; True counts as 1."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "name = \"\"\nshown = name or \"guest\"\nprint(shown)\nprint(0 or [] or None)\nprint(1 and \"ok\")\nprint(type(None).__name__)\n",
+      "answers": [
+        "guest\nNone\nok\nNoneType"
+      ],
+      "explanation": "`or` returns the first truthy operand, or the last operand if none are truthy (None). `and` returns the last operand if all are truthy."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "stock = 0\nif not stock:\n    print(\"stock unknown\")\nlabel = \"Total: \" + 3\n",
+      "answer": "Two bugs. (1) `not stock` is True for 0, so a real stock of 0 is reported as unknown; use `if stock is None:`. (2) You cannot add a str and an int: `\"Total: \" + 3` raises TypeError. Fix with `\"Total: \" + str(3)` or an f-string `f\"Total: {3}\"`.",
+      "rubric": [
+        "Explains 0 is falsy so `not stock` misfires",
+        "Uses `is None` for missing",
+        "Notes str + int TypeError and converts with str()/f-string"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior what `b = a` does when `a` is a list, and why it matters.",
+      "answer": "`b = a` does not copy. Python binds the name `b` to the same list object that `a` points to. Mutating through either name is visible through both, because there is only one list. Immutable values (ints, strs) cannot be mutated so this rarely bites, but with lists and dicts it causes accidental shared state. Use `a.copy()`, `list(a)` or `copy.deepcopy(a)` for nested data. `a is b` confirms identity.",
+      "rubric": [
+        "Names are labels for objects",
+        "Assignment never copies",
+        "Mutating a mutable object is visible via every name",
+        "Use copy / list() / deepcopy to duplicate"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why should you avoid floats for prices, and what do you use instead?",
+      "answer": "Floats are stored in binary, so many decimal fractions (0.1, 0.2) cannot be represented exactly and sums drift (`0.1 + 0.2 == 0.30000000000000004`). For money use `decimal.Decimal` built from strings (`Decimal('19.99')`) or store integer minor units (paise/cents) and format at the edge.",
+      "rubric": [
+        "Binary representation cannot store most decimals exactly",
+        "Use Decimal or integer minor units"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between `is` and `==`?",
+      "difficulty": "easy",
+      "answer_md": "`==` calls `__eq__` and compares *values*. `is` compares *identity*: whether two names refer to the exact same object (`id(a) == id(b)`). Two equal lists are `==` but not `is`. Use `is` for singletons, mainly `None` (`if x is None`). Do not use `is` with numbers or strings: small ints and some strings are cached by CPython, so `a is b` may be True by accident and False in other cases, which is an implementation detail.\n\n```python\na = [1]; b = [1]\nprint(a == b, a is b)  # True False\n```"
+    },
+    {
+      "question": "Explain mutable vs immutable types with examples.",
+      "difficulty": "easy",
+      "answer_md": "Immutable objects cannot change after creation: int, float, str, tuple, frozenset, bytes. 'Changing' them creates a new object (`s += 'x'` rebinds `s`). Mutable objects can be modified in place: list, dict, set. This matters for aliasing (two names, one list), for dict keys and set members (must be hashable, so immutable), and for function default arguments (a mutable default is shared across calls).\n\n```python\nt = (1, 2)\n# t[0] = 9 -> TypeError\nl = [1, 2]; l[0] = 9   # fine\n```"
+    },
+    {
+      "question": "What does `x = x or 'default'` do and when is it risky?",
+      "difficulty": "medium",
+      "answer_md": "`or` returns the first truthy operand, so if `x` is falsy it falls back to `'default'`. It is concise but treats `0`, `''`, `[]` and `False` the same as 'missing'. If `0` is a valid input (quantity, discount, port), use an explicit check: `x = default if x is None else x`. This is a common source of subtle bugs in config parsing.\n\n```python\nqty = 0\nprint(qty or 10)                       # 10 (wrong)\nprint(10 if qty is None else qty)      # 0\n```"
+    }
+  ]
+}

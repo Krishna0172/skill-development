@@ -1,0 +1,123 @@
+{
+  "slug": "sql-joins",
+  "title": "SQL Joins: INNER, LEFT, FULL, CROSS, SELF and LATERAL",
+  "skill": "sql-joins",
+  "extra_skills": [
+    "sql",
+    "postgresql"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "sql",
+    "joins",
+    "postgresql",
+    "left-join",
+    "lateral",
+    "anti-join"
+  ],
+  "summary": "A join combines rows from two tables by matching a condition, usually a key. INNER JOIN keeps only matches, LEFT JOIN keeps every row from the left side and fills NULLs where nothing matched, and FULL JOIN keeps both sides. Most join bugs come from duplicate matches (row multiplication) or from putting a filter in WHERE that silently turns a LEFT JOIN into an INNER JOIN.",
+  "details_md": "### The mental model\nLogically, a join builds every combination of rows (a Cartesian product) and keeps the ones where the `ON` condition is true. The planner never actually does that; it picks a physical strategy instead.\n\n| Join type | Keeps |\n|---|---|\n| `INNER JOIN` | Only rows where `ON` is true |\n| `LEFT [OUTER] JOIN` | All left rows; right columns are `NULL` when unmatched |\n| `RIGHT JOIN` | Mirror of LEFT (rarely used; rewrite as LEFT) |\n| `FULL [OUTER] JOIN` | All rows from both sides, NULL-padded |\n| `CROSS JOIN` | Every combination, no condition |\n\n### Cardinality: the #1 source of wrong numbers\nA join returns one output row **per matching pair**. If one order has three shipments, joining `orders` to `shipments` gives three rows for that order, and `SUM(orders.total)` is now tripled. Before joining, ask: \"is the right side unique on the join key?\" If not, aggregate it first (in a subquery or CTE) and then join.\n\n### ON vs WHERE in outer joins\nFor an `INNER JOIN`, a condition in `ON` or `WHERE` gives the same result. For a `LEFT JOIN` they differ:\n- A condition in `ON` restricts **which right rows can match**; unmatched left rows still appear.\n- A condition in `WHERE` on a right-table column runs **after** the join, so NULL-padded rows fail it and disappear. This silently turns your LEFT JOIN into an INNER JOIN.\n\n### Semi-joins and anti-joins\n\"Customers who have at least one order\" is a **semi-join**: use `EXISTS`, which stops at the first match and never duplicates rows. \"Customers with no orders\" is an **anti-join**: use `NOT EXISTS` or `LEFT JOIN ... WHERE o.id IS NULL`. Avoid `NOT IN (subquery)` because a single NULL in the subquery makes it return no rows.\n\n### LATERAL\n`JOIN LATERAL (subquery) ON true` lets the subquery reference columns of the preceding table, like a per-row function call. It is the cleanest way to do \"top N per group\" (latest 3 orders per customer) when an index supports it.\n\n### Physical join algorithms (PostgreSQL)\n- **Nested Loop**: for each outer row, probe the inner side (fast when the outer side is small and the inner side has an index).\n- **Hash Join**: builds a hash table of the smaller side in `work_mem`, then streams the larger side. Great for large, unsorted equi-joins.\n- **Merge Join**: both inputs sorted on the key, then walked together. Good when inputs are already ordered (e.g. via an index).\n\n`EXPLAIN ANALYZE` shows which one was chosen. Bad row estimates cause bad choices, e.g. a nested loop over 2 million rows because the planner expected 10.\n\n### USING and NATURAL\n`JOIN ... USING (customer_id)` joins on equally named columns and emits that column once. `NATURAL JOIN` joins on *all* same-named columns automatically; avoid it, because adding an `updated_at` column to both tables silently changes the join.",
+  "code_md": "```sql\n-- Tables used below\n-- customers(id, name, city)\n-- orders(id, customer_id, order_date, total)\n-- shipments(id, order_id, carrier, shipped_at)\n\n-- 1) INNER vs LEFT: every customer with their order count (including zero)\nSELECT c.id, c.name, COUNT(o.id) AS order_count   -- COUNT(o.id) ignores NULLs -> 0 for no orders\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id\nGROUP BY c.id, c.name;\n```\n\n```sql\n-- 2) ON vs WHERE in a LEFT JOIN\n-- WRONG: customers without 2024 orders vanish (WHERE filters the NULL rows)\nSELECT c.name, o.id\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id\nWHERE o.order_date >= '2024-01-01';\n\n-- RIGHT: filter inside ON, so unmatched customers survive with NULL order\nSELECT c.name, o.id\nFROM customers c\nLEFT JOIN orders o\n  ON o.customer_id = c.id\n AND o.order_date >= '2024-01-01';\n```\n\n```sql\n-- 3) Avoid row multiplication: pre-aggregate the many side\nWITH ship AS (\n    SELECT order_id, COUNT(*) AS parcels\n    FROM shipments\n    GROUP BY order_id                      -- now unique per order_id\n)\nSELECT o.id, o.total, COALESCE(s.parcels, 0) AS parcels\nFROM orders o\nLEFT JOIN ship s ON s.order_id = o.id;      -- one row per order, totals stay correct\n\n-- Anti-join: orders that were never shipped\nSELECT o.id\nFROM orders o\nWHERE NOT EXISTS (SELECT 1 FROM shipments s WHERE s.order_id = o.id);\n```\n\n```sql\n-- 4) LATERAL: latest 2 orders per customer\nSELECT c.name, recent.id, recent.order_date\nFROM customers c\nCROSS JOIN LATERAL (\n    SELECT o.id, o.order_date\n    FROM orders o\n    WHERE o.customer_id = c.id            -- references the outer row\n    ORDER BY o.order_date DESC\n    LIMIT 2\n) AS recent;\n-- Supported well by: CREATE INDEX ON orders (customer_id, order_date DESC);\n```",
+  "use_cases_md": "- Enriching fact rows (orders, settlements) with dimension data (customer, channel, product).\n- Reconciliation: `FULL JOIN` a payment-gateway report against internal orders to find rows missing on either side.\n- Finding orphans or gaps with anti-joins (`NOT EXISTS`): orders without shipments, SKUs without inventory rows.\n- \"Top N per group\" with `LATERAL` (latest status per order, last 3 transactions per account).\n- Self-joins for hierarchies or comparisons (employee to manager, an order compared with the previous order of the same customer).",
+  "mistakes_md": "- **Filtering the right table in WHERE after a LEFT JOIN**: NULL rows are removed, so it becomes an INNER JOIN. Move the condition into `ON`, or explicitly allow `IS NULL`.\n- **Summing after a one-to-many join**: totals get multiplied. Aggregate the many side first, then join.\n- **Using `NOT IN (SELECT ...)` with a nullable column**: one NULL makes the whole predicate unknown and you get zero rows. Use `NOT EXISTS`.\n- **Joining on non-unique or mismatched keys** (e.g. forgetting `orgid` in a multi-tenant table): rows leak across tenants and multiply. Join on the full key, e.g. `ON a.id = b.id AND a.orgid = b.orgid`.\n- **Joining columns with different types** (`text` vs `bigint`): forces casts and blocks index use. Fix the schema or cast the smaller side once.\n- **Using `COUNT(*)` after a LEFT JOIN**: counts the NULL-padded row as 1. Use `COUNT(right.id)`.",
+  "best_practices_md": "- Always alias tables and qualify columns (`o.customer_id`), so queries survive new columns being added.\n- Know the cardinality of each join (1:1, 1:N, N:M) before writing aggregates.\n- Prefer `EXISTS` / `NOT EXISTS` for \"has any\" / \"has none\" checks.\n- Index foreign-key columns used in joins (`orders.customer_id`); PostgreSQL does not create them automatically.\n- Write explicit `JOIN ... ON` rather than comma joins in `FROM`; it keeps join logic separate from filters.\n- Check plans with `EXPLAIN (ANALYZE, BUFFERS)` when a join is slow; look for row-estimate mismatches.",
+  "my_context_md": "Your settlement reconciliation work (PayU, Easebuzz, Shiprocket, Shippigo) is fundamentally a join problem: matching rows from a gateway or logistics report against your orders data. A `FULL JOIN` (or a LEFT JOIN plus an anti-join in each direction) is how you surface \"paid but no order\" and \"order but no settlement\" rows. Because your tables are multi-tenant (inventory is keyed on `(id, orgid)`), every join should include the `orgid` column too; otherwise rows from different organisations can match each other. On Citus, joins between tables distributed on the same column (co-located) run on the workers, which is another reason to always join on the distribution key.",
+  "related": [
+    "sql-subqueries",
+    "sql-ctes",
+    "sql-group-by",
+    "postgres-indexes",
+    "explain-analyze",
+    "sql-null-handling"
+  ],
+  "flashcards": [
+    {
+      "front": "What does a LEFT JOIN return for a left row with no match?",
+      "back": "The left row once, with all right-table columns set to NULL."
+    },
+    {
+      "front": "Why can `WHERE right_col = x` break a LEFT JOIN?",
+      "back": "WHERE runs after the join; NULL-padded rows fail the test and are removed, so it behaves like an INNER JOIN. Put the condition in ON."
+    },
+    {
+      "front": "Best way to find customers with no orders?",
+      "back": "`WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)`; safe with NULLs, unlike NOT IN."
+    },
+    {
+      "front": "What does LATERAL allow?",
+      "back": "A subquery in FROM that references columns from earlier tables, evaluated per outer row. Ideal for top-N-per-group."
+    },
+    {
+      "front": "Name PostgreSQL's three join algorithms.",
+      "back": "Nested Loop, Hash Join, Merge Join."
+    },
+    {
+      "front": "Why did my SUM double after adding a join?",
+      "back": "The joined table had multiple matching rows per key (1:N), duplicating the left rows. Pre-aggregate the many side."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which query correctly lists ALL customers, plus their 2024 orders if any?",
+      "options": [
+        "LEFT JOIN orders o ON o.customer_id = c.id WHERE o.order_date >= '2024-01-01'",
+        "LEFT JOIN orders o ON o.customer_id = c.id AND o.order_date >= '2024-01-01'",
+        "INNER JOIN orders o ON o.customer_id = c.id AND o.order_date >= '2024-01-01'",
+        "CROSS JOIN orders o WHERE o.order_date >= '2024-01-01'"
+      ],
+      "answer_index": 1,
+      "explanation": "The date filter belongs in ON so unmatched customers are kept with NULL order columns."
+    },
+    {
+      "question": "`SELECT * FROM a WHERE a.id NOT IN (SELECT b.a_id FROM b)` returns zero rows. Most likely cause?",
+      "options": [
+        "b is empty",
+        "a.id is not indexed",
+        "NOT IN is not supported in PostgreSQL",
+        "b.a_id contains a NULL"
+      ],
+      "answer_index": 3,
+      "explanation": "x NOT IN (..., NULL) evaluates to NULL (unknown), never true. Use NOT EXISTS."
+    },
+    {
+      "question": "Which join algorithm builds an in-memory table of one input using work_mem?",
+      "options": [
+        "Hash Join",
+        "Nested Loop",
+        "Merge Join",
+        "Index Only Scan"
+      ],
+      "answer_index": 0,
+      "explanation": "Hash Join hashes the smaller input, then probes it with the larger one."
+    },
+    {
+      "question": "After `orders LEFT JOIN shipments`, which expression counts shipments correctly (0 when none)?",
+      "options": [
+        "COUNT(*)",
+        "COUNT(1)",
+        "COUNT(s.id)",
+        "SUM(1)"
+      ],
+      "answer_index": 2,
+      "explanation": "COUNT(column) skips NULLs; COUNT(*) counts the NULL-padded row as 1."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain the difference between INNER JOIN, LEFT JOIN and FULL OUTER JOIN with a practical example.",
+      "difficulty": "easy",
+      "answer_md": "An **INNER JOIN** returns only rows where the join condition matches on both sides. A **LEFT JOIN** returns every row from the left table; when there is no match, the right-side columns are NULL. A **FULL OUTER JOIN** returns all rows from both sides, NULL-padded wherever a match is missing.\n\nExample: reconciling a payment gateway report against orders.\n\n```sql\nSELECT o.id AS order_id, p.txn_id, o.total, p.amount\nFROM orders o\nFULL JOIN payments p ON p.order_id = o.id;\n```\n\n- Rows with both IDs are matched and can be compared for amount differences.\n- `p.txn_id IS NULL` means an order with no payment.\n- `o.id IS NULL` means a payment that maps to no known order.\n\nWith an INNER JOIN you would only see the matched rows and miss both kinds of discrepancy, and with a LEFT JOIN from orders you would miss unexpected payments. Choosing the join type is really choosing which unmatched rows you care about."
+    },
+    {
+      "question": "A report's revenue doubled after someone added a join to a shipments table. What happened and how do you fix it?",
+      "difficulty": "medium",
+      "answer_md": "This is **row multiplication** (fan-out). A join produces one row per matching pair. If an order has two shipments, joining `orders` to `shipments` produces two rows for that order, and `SUM(o.total)` counts its total twice.\n\nDiagnose it by checking the join key's uniqueness on the right side:\n\n```sql\nSELECT order_id, COUNT(*) FROM shipments GROUP BY order_id HAVING COUNT(*) > 1;\n```\n\nFixes, in order of preference:\n1. **Pre-aggregate** the many side to one row per key, then join:\n```sql\nWITH s AS (SELECT order_id, COUNT(*) AS parcels FROM shipments GROUP BY order_id)\nSELECT SUM(o.total), SUM(s.parcels)\nFROM orders o LEFT JOIN s ON s.order_id = o.id;\n```\n2. If you only need \"has a shipment\", use `EXISTS` (a semi-join) which never duplicates rows.\n3. Avoid patching it with `SUM(DISTINCT o.total)`: two different orders with the same total would be collapsed, which is a new bug."
+    },
+    {
+      "question": "When would you use a LATERAL join, and how does it compare to a window-function approach for top-N per group?",
+      "difficulty": "hard",
+      "answer_md": "`LATERAL` lets a subquery in `FROM` reference columns of tables listed before it, so it runs once per outer row. Classic use: \"latest 3 orders per customer\".\n\n```sql\nSELECT c.id, r.*\nFROM customers c\nCROSS JOIN LATERAL (\n  SELECT id, order_date FROM orders o\n  WHERE o.customer_id = c.id\n  ORDER BY order_date DESC LIMIT 3\n) r;\n```\n\nWith an index on `orders (customer_id, order_date DESC)`, each iteration is a tiny index scan that stops after 3 rows. This is very fast when there are relatively few customers and many orders each.\n\nThe window-function alternative:\n```sql\nSELECT * FROM (\n  SELECT o.*, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) rn\n  FROM orders o) t\nWHERE rn <= 3;\n```\nThis reads and ranks **every** order, then filters. It is better when you need most of the rows anyway or when there are many groups with few rows each. Rule of thumb: LATERAL + index for \"few rows from many large groups\"; window functions for whole-table processing. Use `LEFT JOIN LATERAL ... ON true` if outer rows without matches should still appear."
+    }
+  ]
+}

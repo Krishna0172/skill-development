@@ -1,0 +1,73 @@
+{
+  "slug": "pg-sync-failure-streaks",
+  "title": "Gaps and islands: consecutive sync failures per job",
+  "category": "postgresql",
+  "language": "sql",
+  "difficulty": "hard",
+  "skill": "sql-window-functions",
+  "concepts": [
+    "gaps and islands",
+    "ROW_NUMBER difference",
+    "PARTITION BY",
+    "GROUP BY on derived key"
+  ],
+  "related_topics": [
+    "sql-window-functions",
+    "sql-ctes",
+    "sql-group-by"
+  ],
+  "problem_md": "Alerting should fire when a scheduled sync fails **twice or more in a row**, not on a single blip. Find those streaks from the run history.\n\n```sql\nCREATE TABLE sync_runs (\n  run_id  INTEGER PRIMARY KEY,\n  job     TEXT NOT NULL,\n  run_at  TEXT NOT NULL,       -- 'YYYY-MM-DD HH:MM'\n  status  TEXT NOT NULL        -- 'SUCCESS' | 'FAILED'\n);\n```\n\n**Task.** For each `job`, find every maximal run of **consecutive** `FAILED` runs (ordered by `run_at`) of length >= 2. Return `job`, `streak_start` (first `run_at`), `streak_end` (last `run_at`), `failures` (count), ordered by `job`, `streak_start`.\n\nNote `run_id` is **not** in time order (rows 14-16 were inserted late) - order by `run_at`.",
+  "examples": [
+    {
+      "input": "amazon_orders: SUCCESS, FAILED x3, SUCCESS, FAILED, SUCCESS, FAILED x2",
+      "output": "amazon_orders | 2024-06-01 01:00 | 2024-06-01 03:00 | 3\namazon_orders | 2024-06-01 07:00 | 2024-06-01 08:00 | 2",
+      "explanation": "The single failure at 05:00 is not a streak."
+    }
+  ],
+  "hints": [
+    "Classic trick: `ROW_NUMBER() OVER (PARTITION BY job ORDER BY run_at) - ROW_NUMBER() OVER (PARTITION BY job, status ORDER BY run_at)` is constant within each consecutive same-status run.",
+    "Compute that `grp` in a CTE, then `WHERE status = 'FAILED' GROUP BY job, grp HAVING COUNT(*) >= 2` and select `MIN(run_at)`, `MAX(run_at)`, `COUNT(*)`."
+  ],
+  "starter_code": "-- Write your query here\nSELECT job, MIN(run_at) AS streak_start, MAX(run_at) AS streak_end, COUNT(*) AS failures\nFROM sync_runs\nWHERE status = 'FAILED'\nGROUP BY job\nHAVING COUNT(*) >= 2\nORDER BY job, streak_start;\n",
+  "solution_code": "WITH numbered AS (\n  SELECT job,\n         run_at,\n         status,\n         ROW_NUMBER() OVER (PARTITION BY job ORDER BY run_at)\n       - ROW_NUMBER() OVER (PARTITION BY job, status ORDER BY run_at) AS grp\n  FROM sync_runs\n)\nSELECT job,\n       MIN(run_at) AS streak_start,\n       MAX(run_at) AS streak_end,\n       COUNT(*)    AS failures\nFROM numbered\nWHERE status = 'FAILED'\nGROUP BY job, grp\nHAVING COUNT(*) >= 2\nORDER BY job, streak_start;",
+  "solution_md": "**Gaps and islands.** The first `ROW_NUMBER` counts all runs of the job; the second counts only runs with the same status. Inside a consecutive block of FAILED runs both increase by 1 per row, so their difference is constant; any SUCCESS in between bumps the first counter only, giving the next block a new `grp`. Group by `(job, grp)` and each group is one island. The starter merges all failures of a job into one bogus streak.\n\nAlternative: flag a new island with `LAG(status) OVER (...) IS DISTINCT FROM status`, then a running `SUM(flag)` as the island id - easier to extend (e.g. 'gap > 2 hours also breaks a streak').\n\nCost: one sort per window; an index on `(job, run_at)` helps. For live alerting, compare only the last N runs per job instead of scanning history.",
+  "tests": {
+    "schema_sql": "CREATE TABLE sync_runs (\n  run_id  INTEGER PRIMARY KEY,\n  job     TEXT NOT NULL,\n  run_at  TEXT NOT NULL,       -- 'YYYY-MM-DD HH:MM'\n  status  TEXT NOT NULL        -- 'SUCCESS' | 'FAILED'\n);\n\nINSERT INTO sync_runs VALUES\n (1,  'amazon_orders',  '2024-06-01 00:00', 'SUCCESS'),\n (2,  'amazon_orders',  '2024-06-01 01:00', 'FAILED'),\n (3,  'amazon_orders',  '2024-06-01 02:00', 'FAILED'),\n (4,  'amazon_orders',  '2024-06-01 03:00', 'FAILED'),\n (5,  'amazon_orders',  '2024-06-01 04:00', 'SUCCESS'),\n (6,  'amazon_orders',  '2024-06-01 05:00', 'FAILED'),\n (7,  'amazon_orders',  '2024-06-01 06:00', 'SUCCESS'),\n (8,  'flipkart_stock', '2024-06-01 00:30', 'FAILED'),\n (9,  'flipkart_stock', '2024-06-01 01:30', 'FAILED'),\n (10, 'flipkart_stock', '2024-06-01 02:30', 'SUCCESS'),\n (11, 'flipkart_stock', '2024-06-01 03:30', 'FAILED'),\n (12, 'flipkart_stock', '2024-06-01 04:30', 'FAILED'),\n (13, 'myntra_returns', '2024-06-01 00:15', 'SUCCESS'),\n (16, 'amazon_orders',  '2024-06-01 07:00', 'FAILED'),\n (14, 'myntra_returns', '2024-06-01 01:15', 'FAILED'),\n (15, 'amazon_orders',  '2024-06-01 08:00', 'FAILED');",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "job",
+        "streak_start",
+        "streak_end",
+        "failures"
+      ],
+      "rows": [
+        [
+          "amazon_orders",
+          "2024-06-01 01:00",
+          "2024-06-01 03:00",
+          3
+        ],
+        [
+          "amazon_orders",
+          "2024-06-01 07:00",
+          "2024-06-01 08:00",
+          2
+        ],
+        [
+          "flipkart_stock",
+          "2024-06-01 00:30",
+          "2024-06-01 01:30",
+          2
+        ],
+        [
+          "flipkart_stock",
+          "2024-06-01 03:30",
+          "2024-06-01 04:30",
+          2
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

@@ -1,0 +1,246 @@
+[
+  {
+    "slug": "rm-testing-pytest", "title": "Automated testing with pytest", "skill": "testing", "track": "to_learn", "level": "beginner", "sort_order": 1,
+    "why_md": "**Highest-priority gap.** None of your 9 personal projects has a test, and the work harness (`lambda_test.py`) is manual. Every backend interview at your level will ask how you test, and tests are what let you refactor 150+ processors safely.",
+    "prerequisites_md": "Python functions, modules, exceptions (you have these).",
+    "steps": [
+      {"title": "Study: pytest essentials (fixtures, parametrize, monkeypatch)", "topic": "pytest-essentials"},
+      {"title": "Write 10 parametrized tests for a pure function (e.g. parse_target from your downloader)"},
+      {"title": "Test a FastAPI app with TestClient (status codes + validation errors)", "topic": "fastapi-essentials"},
+      {"title": "Mock an external call (requests / boto3) with monkeypatch or unittest.mock"},
+      {"title": "Measure coverage with pytest-cov and read the report"}
+    ],
+    "exercises_md": "- Python practice exercises: run them, then write your own tests for the same functions.\n- Read `backend/tests/` in this platform — every revision-engine rule is unit-tested.",
+    "mini_projects_md": "Add a `tests/` folder to **InstaPostDownloader**: test `parse_target`, `normalize_username`, `_safe_under` (path traversal!) and the `/api/download` 400 path.",
+    "outcome_md": "You can explain unit vs integration tests, write fixtures and mocks, and show a tested personal project on GitHub."
+  },
+  {
+    "slug": "rm-sql-depth", "title": "SQL depth: verify and deepen", "skill": "sql", "track": "strengthen", "level": "intermediate", "sort_order": 2,
+    "why_md": "You write SQL daily, but the evidence only shows upserts. Interviews for Python/PostgreSQL roles almost always include joins, GROUP BY/HAVING, CTEs and window functions. Prove these to yourself with the challenges — skip what you already ace.",
+    "prerequisites_md": "Basic SELECT/INSERT/UPDATE (you have these).",
+    "steps": [
+      {"title": "Joins incl. anti-joins (orders without settlements)", "topic": "sql-joins"},
+      {"title": "GROUP BY, HAVING, conditional aggregation", "topic": "sql-group-by"},
+      {"title": "Subqueries: IN, EXISTS, correlated", "topic": "sql-subqueries"},
+      {"title": "CTEs and recursive CTEs", "topic": "sql-ctes"},
+      {"title": "Window functions: ROW_NUMBER, RANK, LAG, running totals", "topic": "sql-window-functions"},
+      {"title": "NULL semantics, COALESCE, NULLIF", "topic": "sql-null-handling"},
+      {"title": "Solve every easy + medium SQL challenge in Practice"}
+    ],
+    "exercises_md": "All `sql-*` challenges in Coding Practice (auto-checked).",
+    "mini_projects_md": "Write the reconciliation query you'd use at work — orders vs settlements with mismatch reasons — using CTEs and window functions.",
+    "outcome_md": "Comfortably solve medium SQL interview questions without looking anything up."
+  },
+  {
+    "slug": "rm-postgres-performance", "title": "PostgreSQL performance: indexes, EXPLAIN, locking", "skill": "query-optimization", "track": "strengthen", "level": "advanced", "sort_order": 3,
+    "why_md": "Your resume claims a **40% reconciliation speed-up**. Interviewers will dig: which plan changed, which index, why batching helped. This track turns the claim into a story you can defend.",
+    "prerequisites_md": "SQL depth track (joins/aggregations).",
+    "steps": [
+      {"title": "Index types: B-tree, composite order, partial, covering", "topic": "postgres-indexes"},
+      {"title": "Read EXPLAIN (ANALYZE, BUFFERS) output", "topic": "explain-analyze"},
+      {"title": "Isolation levels, deadlocks, retry strategies", "topic": "transactions-isolation"},
+      {"title": "Upserts in depth (DO NOTHING vs DO UPDATE, EXCLUDED)", "topic": "postgres-upsert"},
+      {"title": "psycopg2 batching: execute_batch vs execute_values vs COPY", "topic": "psycopg2-essentials"},
+      {"title": "Write a 1-page note: exactly how the 40% speed-up was achieved"}
+    ],
+    "exercises_md": "SQL challenges tagged indexing / query-optimization; interview scenario questions on slow queries.",
+    "mini_projects_md": "Load 1M fake orders into a local Postgres (Docker), time a reconciliation query, add indexes, compare EXPLAIN plans before/after.",
+    "outcome_md": "You can read a query plan, pick the right index, and explain your optimization work with numbers."
+  },
+  {
+    "slug": "rm-python-depth", "title": "Python depth for interviews", "skill": "python", "track": "strengthen", "level": "intermediate", "sort_order": 4,
+    "why_md": "You use Python every day, but interviews probe language internals: decorators, generators, context managers, mutability, typing. These also make your production code cleaner (e.g. a `@retry` decorator for deadlocks, a context manager for DB transactions).",
+    "prerequisites_md": "None — skip any topic you can already explain.",
+    "steps": [
+      {"title": "Data structures & comprehensions (complexities)", "topic": "python-data-structures"},
+      {"title": "Functions: *args/**kwargs, closures, mutable defaults", "topic": "python-functions-args"},
+      {"title": "Decorators (write a retry decorator)", "topic": "python-decorators"},
+      {"title": "Generators & iterators (stream a large CSV)", "topic": "python-generators-iterators"},
+      {"title": "Context managers (transaction scope)", "topic": "python-context-managers"},
+      {"title": "Exceptions & custom hierarchies", "topic": "python-exceptions"},
+      {"title": "Classes, dataclasses", "topic": "python-oop-dataclasses"},
+      {"title": "Type hints & typing", "topic": "python-typing"}
+    ],
+    "exercises_md": "Python + debugging exercises in Coding Practice.",
+    "mini_projects_md": "Refactor one of your CLI tools: generator-based file walking, a `@timed` decorator, a context manager for temp output.",
+    "outcome_md": "Confidently answer 'how does X work under the hood' questions with code."
+  },
+  {
+    "slug": "rm-pandas-performance", "title": "pandas: cleaning and performance", "skill": "pandas", "track": "strengthen", "level": "intermediate", "sort_order": 5,
+    "why_md": "pandas is the core of your ingestion work. Going from 'it works' to 'it's fast and correct with messy data' (dtypes, vectorisation, chunking, memory) directly improves your day job.",
+    "prerequisites_md": "Daily pandas usage (you have this).",
+    "steps": [
+      {"title": "pandas essentials refresher", "topic": "pandas-essentials"},
+      {"title": "Cleaning, dtypes, vectorisation vs apply, chunked reads", "topic": "pandas-cleaning-performance"}
+    ],
+    "exercises_md": "Write timing comparisons: `apply` vs vectorised `np.where` on 1M rows.",
+    "mini_projects_md": "Build a reusable `normalize_columns()` + schema check for marketplace reports, with tests.",
+    "outcome_md": "Your processors are faster and you can explain why."
+  },
+  {
+    "slug": "rm-api-design", "title": "REST API design", "skill": "api-development", "track": "strengthen", "level": "intermediate", "sort_order": 6,
+    "why_md": "Most of your API experience is **consuming** APIs. Designing them well (resources, status codes, pagination, idempotency, versioning, error format) is expected of a backend developer and is the bridge to building your own services.",
+    "prerequisites_md": "HTTP basics, FastAPI basics (from your downloaders).",
+    "steps": [
+      {"title": "REST design principles", "topic": "rest-api-design"},
+      {"title": "FastAPI properly: routers, Depends, response models", "topic": "fastapi-essentials"},
+      {"title": "Retries, backoff, idempotency keys", "topic": "retries-backoff-idempotency"},
+      {"title": "Streaming progress: SSE vs WebSockets vs polling", "topic": "server-sent-events"}
+    ],
+    "exercises_md": "Backend/scenario exercises: pagination design, webhook receiver, rate-limit handling.",
+    "mini_projects_md": "Part of the capstone API project.",
+    "outcome_md": "You can design a clean, consistent API and justify every choice."
+  },
+  {
+    "slug": "rm-aws-depth", "title": "AWS beyond the basics", "skill": "aws-lambda", "track": "strengthen", "level": "intermediate", "sort_order": 7,
+    "why_md": "You use Lambda, ECS, S3 and DynamoDB at work. Strengthen the *why*: when Lambda vs ECS, concurrency limits, timeouts, presigned URL security, DynamoDB key design.",
+    "prerequisites_md": "Work experience with these services.",
+    "steps": [
+      {"title": "Lambda: cold starts, layers, timeouts, concurrency", "topic": "aws-lambda-essentials"},
+      {"title": "S3 presigned URLs & security", "topic": "s3-presigned-urls"},
+      {"title": "ECS / Fargate: tasks, services, run_task", "topic": "ecs-fargate"},
+      {"title": "DynamoDB key design, Query vs Scan", "topic": "dynamodb-essentials"}
+    ],
+    "exercises_md": "Scenario: 'Lambda times out on a 200MB XLSX'.",
+    "mini_projects_md": "Diagram your work's ingestion architecture and annotate each AWS choice with its trade-off.",
+    "outcome_md": "You can justify every AWS service choice in your work project."
+  },
+  {
+    "slug": "rm-async-python", "title": "Async & concurrency in Python", "skill": "async-concurrency", "track": "rarely_used", "level": "intermediate", "sort_order": 8,
+    "why_md": "You've used `asyncio.to_thread`, executors and `threading.Event` in personal apps. Solidify the model (event loop, GIL, when threads vs processes vs async) — it's a frequent interview topic and FastAPI relies on it.",
+    "prerequisites_md": "Python functions & exceptions.",
+    "steps": [
+      {"title": "asyncio: event loop, tasks, to_thread", "topic": "python-asyncio"},
+      {"title": "Threads, the GIL, threading.Event", "topic": "python-threading-gil"}
+    ],
+    "exercises_md": "Explain why your downloader routes don't block while downloads run.",
+    "mini_projects_md": "Fetch 50 URLs with `httpx.AsyncClient` + a semaphore limit; compare with a ThreadPoolExecutor version.",
+    "outcome_md": "You can pick the right concurrency model and explain why."
+  },
+  {
+    "slug": "rm-js-ts", "title": "JavaScript & TypeScript without AI help", "skill": "javascript", "track": "rarely_used", "level": "beginner", "sort_order": 9,
+    "why_md": "Your React/Next/TS apps were AI-assisted. If you want frontend in your toolkit, build fluency by writing small pieces yourself. Optional for a backend role — prioritise after testing, SQL and auth.",
+    "prerequisites_md": "Basic JS (you have it from Bol Hindi).",
+    "steps": [
+      {"title": "Promises, async/await, the event loop", "topic": "javascript-async"},
+      {"title": "React hooks: useState, useEffect, custom hooks", "topic": "react-hooks"},
+      {"title": "Solve the JavaScript exercises without AI"}
+    ],
+    "exercises_md": "JavaScript exercises in Coding Practice.",
+    "mini_projects_md": "Add one small page to this platform's frontend yourself.",
+    "outcome_md": "You can read and modify React/TS code confidently."
+  },
+  {
+    "slug": "rm-authentication", "title": "Authentication & web security", "skill": "authentication", "track": "to_learn", "level": "intermediate", "sort_order": 10,
+    "why_md": "No auth implementation exists in any of your projects. Login, password hashing, JWT/OAuth2 and basic OWASP knowledge are standard backend expectations.",
+    "prerequisites_md": "REST API design track.",
+    "steps": [
+      {"title": "JWT & OAuth2 password flow, hashing", "topic": "jwt-authentication"},
+      {"title": "OWASP basics: injection, broken auth, secrets", "topic": "web-security-owasp"},
+      {"title": "Implement signup/login with hashed passwords and JWT in FastAPI"},
+      {"title": "Add role-based authorization to one endpoint"}
+    ],
+    "exercises_md": "Interview questions on auth; scenario: idempotent payment webhook with signature verification.",
+    "mini_projects_md": "Part of the capstone API project.",
+    "outcome_md": "You can implement and explain token-based auth securely."
+  },
+  {
+    "slug": "rm-sqlalchemy", "title": "SQLAlchemy 2.0 & Alembic migrations", "skill": "sqlalchemy", "track": "to_learn", "level": "intermediate", "sort_order": 11,
+    "why_md": "You've only used raw SQL. Most Python teams use SQLAlchemy and Alembic. With your SQL strength you'll pick it up quickly — and you can read this platform's `models.py` as a real example.",
+    "prerequisites_md": "SQL, Python classes.",
+    "steps": [
+      {"title": "SQLAlchemy 2.0: engine, Session, Mapped models, select()", "topic": "sqlalchemy-essentials"},
+      {"title": "Read backend/app/models.py and one router of this platform"},
+      {"title": "Add Alembic to a toy project; create and roll back a migration"},
+      {"title": "Spot and fix an N+1 query with selectinload"}
+    ],
+    "exercises_md": "Rewrite two of your SQL challenge answers using SQLAlchemy Core.",
+    "mini_projects_md": "Part of the capstone API project.",
+    "outcome_md": "You can work in an ORM codebase and manage schema changes safely."
+  },
+  {
+    "slug": "rm-docker-ci", "title": "Docker for your own projects + CI", "skill": "ci-cd", "track": "to_learn", "level": "intermediate", "sort_order": 12,
+    "why_md": "Docker is on your resume but in none of your personal projects; CI/CD isn't anywhere. A public repo with a Dockerfile and a green GitHub Actions badge is strong evidence.",
+    "prerequisites_md": "Testing track.",
+    "steps": [
+      {"title": "Dockerfiles, layers, multi-stage builds", "topic": "docker-essentials"},
+      {"title": "GitHub Actions: lint + test on every push", "topic": "github-actions-ci"},
+      {"title": "Git workflow refresher: branches, rebase, PRs", "topic": "git-workflow"},
+      {"title": "Put one personal project on GitHub with CI"}
+    ],
+    "exercises_md": "",
+    "mini_projects_md": "Dockerize YoutubePlaylistDownloader (ffmpeg included) and add CI running pytest.",
+    "outcome_md": "Every new project ships with a Dockerfile, tests and CI."
+  },
+  {
+    "slug": "rm-system-design", "title": "System design fundamentals", "skill": "system-design", "track": "advanced", "level": "advanced", "sort_order": 13,
+    "why_md": "You've built a real multi-tenant ingestion system — great material. Learn the vocabulary and structure (requirements → estimates → components → trade-offs) to present it, and to answer unseen design questions.",
+    "prerequisites_md": "API design, PostgreSQL performance.",
+    "steps": [
+      {"title": "Normalisation and data modelling trade-offs", "topic": "database-normalization"},
+      {"title": "Caching strategies", "topic": "caching-strategies"},
+      {"title": "Message queues & idempotent consumers", "topic": "message-queues"},
+      {"title": "Practise 5 system-design interview questions out loud"},
+      {"title": "Write a design doc of your ingestion service as if proposing it today"}
+    ],
+    "exercises_md": "Interview Prep → System design category.",
+    "mini_projects_md": "Design doc for 'ingestion v2' with a queue, DLQ and per-report schema registry.",
+    "outcome_md": "You can lead a 45-minute design discussion with clear trade-offs."
+  },
+  {
+    "slug": "rm-caching-queues", "title": "Redis caching & background job queues", "skill": "caching-redis", "track": "industry", "level": "intermediate", "sort_order": 14,
+    "why_md": "Industry-standard next step after cron/Lambda-triggered pipelines: Redis for caching/rate limiting and a queue (SQS, Celery, RQ) for retries and back-pressure.",
+    "prerequisites_md": "Async track, Docker.",
+    "steps": [
+      {"title": "Caching patterns: cache-aside, TTL, invalidation", "topic": "caching-strategies"},
+      {"title": "Queues: at-least-once delivery, DLQ, idempotency", "topic": "message-queues"},
+      {"title": "Run Redis in Docker and cache an expensive endpoint"},
+      {"title": "Move a long-running job to a worker queue"}
+    ],
+    "exercises_md": "",
+    "mini_projects_md": "Replace the in-memory job dict in your downloader with Redis + RQ/Celery so jobs survive restarts.",
+    "outcome_md": "You can add caching and background processing to any API."
+  },
+  {
+    "slug": "rm-observability", "title": "Logging & observability", "skill": "logging-observability", "track": "industry", "level": "intermediate", "sort_order": 15,
+    "why_md": "Your personal code uses print/console.warn. Structured logs, correlation IDs (e.g. upload UUID), metrics and alarms are how production issues get found fast.",
+    "prerequisites_md": "",
+    "steps": [
+      {"title": "Python logging module + JSON structured logs"},
+      {"title": "Correlation IDs across a request/job"},
+      {"title": "CloudWatch Logs Insights queries, metrics and alarms"}
+    ],
+    "exercises_md": "", "mini_projects_md": "Add structured logging with job IDs to one downloader.",
+    "outcome_md": "You can debug production from logs alone."
+  },
+  {
+    "slug": "rm-capstone-api", "title": "Capstone: production-style REST API on GitHub", "skill": "api-development", "track": "projects", "level": "advanced", "sort_order": 16,
+    "why_md": "Your resume has a commented-out placeholder: *'add your FastAPI project here once it is on GitHub'*. Your work code is private — this public project is proof of the skills from the tracks above, all in one place.",
+    "prerequisites_md": "Testing, SQLAlchemy, authentication, Docker/CI tracks (can be done in parallel).",
+    "steps": [
+      {"title": "Pick a domain you know (e.g. order + settlement reconciliation API)"},
+      {"title": "FastAPI + PostgreSQL + SQLAlchemy 2.0 + Alembic"},
+      {"title": "JWT auth with roles"},
+      {"title": "Pagination, filtering, idempotency keys, consistent error format"},
+      {"title": "pytest suite ≥ 80% coverage"},
+      {"title": "Dockerfile + docker-compose (api + postgres)"},
+      {"title": "GitHub Actions CI + README with architecture diagram"},
+      {"title": "Add it to the resume Projects section"}
+    ],
+    "exercises_md": "", "mini_projects_md": "This is the project.",
+    "outcome_md": "A public, tested, documented API project that backs up every line of your resume."
+  },
+  {
+    "slug": "rm-ingestion-mini", "title": "Mini ingestion pipeline (public re-creation of your work patterns)", "skill": "etl-data-processing", "track": "projects", "level": "intermediate", "sort_order": 17,
+    "why_md": "Re-create the *patterns* (not the code) of your work service publicly: registry dispatcher, column validation, upserts, status tracking — this time with tests. Great for interviews and for revising your own design decisions.",
+    "prerequisites_md": "Testing track.",
+    "steps": [
+      {"title": "Registry/dispatcher with lazy imports", "topic": "registry-dispatcher-pattern"},
+      {"title": "read_and_validate for CSV/XLSX with clear missing-column errors"},
+      {"title": "Upserts with ON CONFLICT into Postgres", "topic": "postgres-upsert"},
+      {"title": "Upload status table + tests with fixture files"}
+    ],
+    "exercises_md": "", "mini_projects_md": "This is the project. Use fake marketplace data only.",
+    "outcome_md": "You can demo and discuss your core work architecture with real, public code."
+  }
+]

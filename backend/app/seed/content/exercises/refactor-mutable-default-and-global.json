@@ -1,0 +1,227 @@
+{
+  "slug": "refactor-mutable-default-and-global",
+  "title": "Refactor: mutable default argument + global counter to a pure function",
+  "category": "refactoring",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "python-internals",
+  "concepts": [
+    "mutable default arguments",
+    "global state",
+    "pure functions",
+    "None sentinel"
+  ],
+  "related_topics": [
+    "python-functions-args",
+    "py-internals-memory",
+    "py-clean-architecture"
+  ],
+  "problem_md": "**Refactor-your-own-habits kata.** The starter finds SKUs not seen before. The first call is correct; every later call in the same process is wrong, because the default list `seen=[]` is created **once** and a `global` counter keeps growing across unrelated calls (and across Lambda invocations in a warm container).\n\n```python\ndef collect_new_skus(batch: list[str], seen: list[str] | None = None) -> dict\n```\n\nMake it **pure**:\n- `new`: SKUs from `batch` not in `seen` and not earlier in the batch, in first-seen order.\n- `seen`: a **new** list = the given `seen` (or `[]`) followed by `new`.\n- `processed`: `len(batch)` for *this* call.\n- Never mutate the caller's `seen`; no module-level state.\n\nTests use the starter's `run_batches(...)` harness.",
+  "examples": [
+    {
+      "input": "run_batches([['A','B'], ['B','C']])",
+      "output": "{'results': [{'new': ['A','B'], 'seen': ['A','B'], 'processed': 2}, {'new': ['B','C'], 'seen': ['B','C'], 'processed': 2}], 'initial_seen_unchanged': True}",
+      "explanation": "Independent calls must not influence each other."
+    }
+  ],
+  "hints": [
+    "Use `seen=None` and inside: `known = set(seen or [])` for O(1) lookups; build `new` in a local list.",
+    "Return `list(seen or []) + new` - a fresh list - and `len(batch)` instead of a global counter. State that must persist belongs to the caller (pass it in, get it back)."
+  ],
+  "starter_code": "TOTAL_PROCESSED = 0\n\n\ndef collect_new_skus(batch, seen=[]):\n    global TOTAL_PROCESSED\n    new = []\n    for sku in batch:\n        TOTAL_PROCESSED += 1\n        if sku not in seen:\n            seen.append(sku)\n            new.append(sku)\n    return {'new': new, 'seen': seen, 'processed': TOTAL_PROCESSED}\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). Calls collect_new_skus once per batch.\n#   chain=False: every call is independent (no `seen` passed, or the same initial_seen)\n#   chain=True : each call receives the previous result's \"seen\"\n# ---------------------------------------------------------------------------\ndef run_batches(batches, initial_seen=None, chain=False):\n    original = list(initial_seen) if initial_seen is not None else None\n    seen = initial_seen\n    results = []\n    for batch in batches:\n        res = collect_new_skus(batch) if seen is None else collect_new_skus(batch, seen)\n        results.append({\"new\": list(res[\"new\"]), \"seen\": list(res[\"seen\"]), \"processed\": res[\"processed\"]})\n        if chain:\n            seen = res[\"seen\"]\n    return {\"results\": results,\n            \"initial_seen_unchanged\": initial_seen is None or initial_seen == original}\n",
+  "solution_code": "def collect_new_skus(batch, seen=None):\n    previous = list(seen) if seen is not None else []\n    known = set(previous)\n    new = []\n    for sku in batch:\n        if sku not in known:\n            known.add(sku)\n            new.append(sku)\n    return {'new': new, 'seen': previous + new, 'processed': len(batch)}\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). Calls collect_new_skus once per batch.\n#   chain=False: every call is independent (no `seen` passed, or the same initial_seen)\n#   chain=True : each call receives the previous result's \"seen\"\n# ---------------------------------------------------------------------------\ndef run_batches(batches, initial_seen=None, chain=False):\n    original = list(initial_seen) if initial_seen is not None else None\n    seen = initial_seen\n    results = []\n    for batch in batches:\n        res = collect_new_skus(batch) if seen is None else collect_new_skus(batch, seen)\n        results.append({\"new\": list(res[\"new\"]), \"seen\": list(res[\"seen\"]), \"processed\": res[\"processed\"]})\n        if chain:\n            seen = res[\"seen\"]\n    return {\"results\": results,\n            \"initial_seen_unchanged\": initial_seen is None or initial_seen == original}\n",
+  "solution_md": "Default values are evaluated **once**, when `def` runs, and stored on the function (`collect_new_skus.__defaults__`). Mutating that list leaks state into every later call that relies on the default - and the starter also mutates a list the caller passed in. The `global` counter has the same disease: results depend on call history, so tests pass alone and fail together, and warm Lambda/ECS processes drift.\n\nThe fix is the `None` sentinel plus building new objects: same input, same output, no side effects. State the caller wants to keep is returned explicitly (`seen`) and passed back in. A `set` makes membership O(1), so the function is O(n) instead of the starter's O(n^2) list scans.\n\nLinters catch this: Ruff `B006` (mutable default) and `PLW0603` (global statement).",
+  "tests": {
+    "function": "run_batches",
+    "cases": [
+      {
+        "args": [
+          [
+            [
+              "A",
+              "B"
+            ],
+            [
+              "B",
+              "C"
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "results": [
+            {
+              "new": [
+                "A",
+                "B"
+              ],
+              "seen": [
+                "A",
+                "B"
+              ],
+              "processed": 2
+            },
+            {
+              "new": [
+                "B",
+                "C"
+              ],
+              "seen": [
+                "B",
+                "C"
+              ],
+              "processed": 2
+            }
+          ],
+          "initial_seen_unchanged": true
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "A",
+              "A",
+              "B"
+            ],
+            [
+              "B",
+              "C"
+            ],
+            [
+              "C",
+              "D"
+            ]
+          ]
+        ],
+        "kwargs": {
+          "chain": true
+        },
+        "expected": {
+          "results": [
+            {
+              "new": [
+                "A",
+                "B"
+              ],
+              "seen": [
+                "A",
+                "B"
+              ],
+              "processed": 3
+            },
+            {
+              "new": [
+                "C"
+              ],
+              "seen": [
+                "A",
+                "B",
+                "C"
+              ],
+              "processed": 2
+            },
+            {
+              "new": [
+                "D"
+              ],
+              "seen": [
+                "A",
+                "B",
+                "C",
+                "D"
+              ],
+              "processed": 2
+            }
+          ],
+          "initial_seen_unchanged": true
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "X",
+              "Y"
+            ],
+            [
+              "Y",
+              "Z"
+            ]
+          ]
+        ],
+        "kwargs": {
+          "initial_seen": [
+            "Y"
+          ]
+        },
+        "expected": {
+          "results": [
+            {
+              "new": [
+                "X"
+              ],
+              "seen": [
+                "Y",
+                "X"
+              ],
+              "processed": 2
+            },
+            {
+              "new": [
+                "Z"
+              ],
+              "seen": [
+                "Y",
+                "Z"
+              ],
+              "processed": 2
+            }
+          ],
+          "initial_seen_unchanged": true
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "P"
+            ],
+            [
+              "P",
+              "Q"
+            ]
+          ]
+        ],
+        "kwargs": {
+          "initial_seen": [
+            "P"
+          ],
+          "chain": true
+        },
+        "expected": {
+          "results": [
+            {
+              "new": [],
+              "seen": [
+                "P"
+              ],
+              "processed": 1
+            },
+            {
+              "new": [
+                "Q"
+              ],
+              "seen": [
+                "P",
+                "Q"
+              ],
+              "processed": 2
+            }
+          ],
+          "initial_seen_unchanged": true
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "slug": "refactor-fstring-sql-to-params",
+  "title": "Refactor: f-string SQL to parameterised (sql, params)",
+  "category": "refactoring",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "psycopg2",
+  "concepts": [
+    "SQL injection",
+    "query parameters",
+    "%s placeholders",
+    "identifier whitelisting",
+    "= ANY(array)"
+  ],
+  "related_topics": [
+    "psycopg2-essentials",
+    "web-security-owasp",
+    "sql-joins"
+  ],
+  "problem_md": "**Refactor-your-own-habits kata.** The starter builds SQL with f-strings - it works until a status contains a quote or someone passes `x' OR '1'='1`. Refactor it to return a query and parameters for `cursor.execute(sql, params)` (psycopg2 style):\n\n```python\ndef build_orders_query(org_id: int, status: str | None = None, skus: list[str] | None = None,\n                       sort_by: str = \"order_id\", limit: int = 100) -> tuple[str, list]\n```\n\n- Base: `SELECT order_id, sku, status, amount FROM orders WHERE org_id = %s`.\n- If `status` is given add `AND status = %s`; if `skus` (non-empty) add `AND sku = ANY(%s)` with the **list** as one parameter (psycopg2 adapts lists to arrays).\n- Then `ORDER BY <sort_by> LIMIT %s`.\n- `params` in placeholder order: `[org_id, status?, skus?, limit]`.\n- Column names can't be parameters: allow only `order_id`, `amount`, `created_at` for `sort_by`, else `ValueError`. `limit` must be an `int` in 1..1000, else `ValueError`.\n- No user-supplied **value** may appear inside the SQL string.\n\nTests call the `inspect_query(...)` harness in the starter.",
+  "examples": [
+    {
+      "input": "inspect_query(42, status=\"x' OR '1'='1\")",
+      "output": "{'params': [42, \"x' OR '1'='1\", 100], 'placeholders': 3, 'values_leaked_into_sql': [], 'uses_any': False, 'order_by': 'order_id'}"
+    }
+  ],
+  "hints": [
+    "Build `clauses = ['org_id = %s']` and `params = [org_id]`, append to both as filters apply, then `' AND '.join(clauses)`.",
+    "Validate `sort_by` against a set before interpolating it - identifiers are the one thing you *may* insert, and only from a whitelist (or via `psycopg2.sql.Identifier`)."
+  ],
+  "starter_code": "def build_orders_query(org_id, status=None, skus=None, sort_by='order_id', limit=100):\n    sql = f\"SELECT order_id, sku, status, amount FROM orders WHERE org_id = {org_id}\"\n    if status:\n        sql += f\" AND status = '{status}'\"\n    if skus:\n        sku_list = \", \".join(f\"'{s}'\" for s in skus)\n        sql += f\" AND sku IN ({sku_list})\"\n    sql += f\" ORDER BY {sort_by} LIMIT {limit}\"\n    return sql, []\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). Inspects the (sql, params) you return.\n# ---------------------------------------------------------------------------\ndef inspect_query(org_id, status=None, skus=None, sort_by=\"order_id\", limit=100):\n    sql, params = build_orders_query(org_id, status=status, skus=skus, sort_by=sort_by, limit=limit)\n    string_values = [v for v in [status, *(skus or [])] if isinstance(v, str)]\n    return {\n        \"params\": list(params),\n        \"placeholders\": sql.count(\"%s\"),\n        \"values_leaked_into_sql\": [v for v in string_values if v in sql],\n        \"uses_any\": \"ANY(%s)\" in sql.replace(\" \", \"\"),\n        \"order_by\": sql.split(\"ORDER BY\", 1)[1].split()[0] if \"ORDER BY\" in sql else None,\n    }\n",
+  "solution_code": "ALLOWED_SORT = {'order_id', 'amount', 'created_at'}\n\n\ndef build_orders_query(org_id, status=None, skus=None, sort_by='order_id', limit=100):\n    if sort_by not in ALLOWED_SORT:\n        raise ValueError(f'cannot sort by {sort_by!r}')\n    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1000:\n        raise ValueError('limit must be an int between 1 and 1000')\n    clauses = ['org_id = %s']\n    params = [org_id]\n    if status is not None:\n        clauses.append('status = %s')\n        params.append(status)\n    if skus:\n        clauses.append('sku = ANY(%s)')\n        params.append(list(skus))\n    params.append(limit)\n    sql = ('SELECT order_id, sku, status, amount FROM orders WHERE '\n           + ' AND '.join(clauses)\n           + f' ORDER BY {sort_by} LIMIT %s')   # sort_by is whitelisted above\n    return sql, params\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). Inspects the (sql, params) you return.\n# ---------------------------------------------------------------------------\ndef inspect_query(org_id, status=None, skus=None, sort_by=\"order_id\", limit=100):\n    sql, params = build_orders_query(org_id, status=status, skus=skus, sort_by=sort_by, limit=limit)\n    string_values = [v for v in [status, *(skus or [])] if isinstance(v, str)]\n    return {\n        \"params\": list(params),\n        \"placeholders\": sql.count(\"%s\"),\n        \"values_leaked_into_sql\": [v for v in string_values if v in sql],\n        \"uses_any\": \"ANY(%s)\" in sql.replace(\" \", \"\"),\n        \"order_by\": sql.split(\"ORDER BY\", 1)[1].split()[0] if \"ORDER BY\" in sql else None,\n    }\n",
+  "solution_md": "With parameters, the driver sends values separately from the SQL text (psycopg2 quotes/escapes them client-side; server-side binding in psycopg 3), so a value can never change the query's structure. Bonus: no quoting bugs for names like `O'Brien`, correct typing for dates/decimals, and `= ANY(%s)` takes one list parameter instead of a variable-length `IN (...)` string.\n\nIdentifiers (columns, tables, sort direction) can't be parameters - whitelist them, or compose with `psycopg2.sql.SQL('ORDER BY {}').format(sql.Identifier(col))`. `LIMIT` *can* be a parameter.\n\nNote `%s` is the placeholder for every type in psycopg2 - never use Python `%` formatting yourself. Returning `(sql, params)` also makes the builder unit-testable without a database.",
+  "tests": {
+    "function": "inspect_query",
+    "cases": [
+      {
+        "args": [
+          42
+        ],
+        "kwargs": {
+          "status": "x' OR '1'='1"
+        },
+        "expected": {
+          "params": [
+            42,
+            "x' OR '1'='1",
+            100
+          ],
+          "placeholders": 3,
+          "values_leaked_into_sql": [],
+          "uses_any": false,
+          "order_by": "order_id"
+        }
+      },
+      {
+        "args": [
+          7
+        ],
+        "kwargs": {
+          "skus": [
+            "SKU-1",
+            "SKU-2"
+          ],
+          "sort_by": "amount",
+          "limit": 50
+        },
+        "expected": {
+          "params": [
+            7,
+            [
+              "SKU-1",
+              "SKU-2"
+            ],
+            50
+          ],
+          "placeholders": 3,
+          "values_leaked_into_sql": [],
+          "uses_any": true,
+          "order_by": "amount"
+        }
+      },
+      {
+        "args": [
+          7
+        ],
+        "kwargs": {
+          "status": "SHIPPED",
+          "skus": [
+            "A'); DROP TABLE orders;--"
+          ]
+        },
+        "expected": {
+          "params": [
+            7,
+            "SHIPPED",
+            [
+              "A'); DROP TABLE orders;--"
+            ],
+            100
+          ],
+          "placeholders": 4,
+          "values_leaked_into_sql": [],
+          "uses_any": true,
+          "order_by": "order_id"
+        }
+      },
+      {
+        "args": [
+          7
+        ],
+        "kwargs": {
+          "sort_by": "amount; DROP TABLE orders"
+        },
+        "raises": "ValueError"
+      },
+      {
+        "args": [
+          7
+        ],
+        "kwargs": {
+          "limit": 5000
+        },
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty, chips %}
+{% block title %}Search{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Search</h1><p>{% if q %}{{ results|length }} results for “{{ q }}”{% else %}Type at least two characters.{% endif %}</p></div></div>
+<form method="get" action="/search" class="row mb"><input name="q" value="{{ q }}" placeholder="Search everything…" autofocus><input type="hidden" name="type" value="{{ type }}"><button class="btn">Search</button></form>
+{{ chips("type", [("", "All"), ("topic", "Topics"), ("skill", "Skills"), ("exercise", "Exercises"), ("interview", "Interview"), ("project", "Projects"), ("roadmap", "Roadmap"), ("flashcard", "Flashcards")], type, "/search?q=" ~ q|urlencode) }}
+{% if q and not results %}{{ empty("Nothing found", "Try fewer or different words.") }}{% endif %}
+{% if results %}
+<div class="card mt"><div class="flush"><ul class="list">
+  {% for r in results %}
+    <li><div class="row"><span class="badge">{{ r.type|label }}</span><a href="{{ r.url }}"><strong>{{ r.title }}</strong></a>{% if r.status %}{{ badge(r.status) }}{% endif %}<span class="tiny faint" style="margin-left:auto">{{ r.skill or r.category or "" }}</span></div>
+      {% if r.snippet %}<div class="small muted mt" style="margin-top:4px">{{ r.snippet }}</div>{% endif %}</li>
+  {% endfor %}
+</ul></div></div>
+{% endif %}
+{% endblock %}

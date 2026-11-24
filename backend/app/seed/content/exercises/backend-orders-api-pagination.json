@@ -1,0 +1,32 @@
+{
+  "slug": "backend-orders-api-pagination",
+  "title": "Design pagination for an orders API",
+  "category": "backend",
+  "language": "text",
+  "difficulty": "medium",
+  "skill": "api-development",
+  "concepts": [
+    "offset pagination",
+    "keyset/cursor pagination",
+    "stable sort with tie-breaker",
+    "opaque cursors",
+    "composite index",
+    "filtering"
+  ],
+  "related_topics": [
+    "rest-api-design",
+    "postgres-indexes",
+    "explain-analyze"
+  ],
+  "problem_md": "The dashboard team needs `GET /orders` for a seller to browse their orders (millions of rows for large sellers).\nRequirements:\n\n- Filters: `channel`, `status`, date range on `order_date`.\n- Default sort: newest first. The UI has \"Next\"/\"Previous\" buttons and infinite scroll on mobile.\n- A separate nightly export job will use the same API to pull **all** orders for a seller.\n\nA teammate implemented `?page=N&page_size=50` with `ORDER BY order_date DESC LIMIT 50 OFFSET (N-1)*50`.\nUsers report that page 2000 takes 8 seconds, and that while new orders are arriving, some orders **appear twice**\nor are **skipped** when paging.\n\n1. Explain both problems.\n2. Design the API contract (request params, response shape) using a better pagination method.\n3. Write the SQL for fetching a page and the index that supports it.\n4. Discuss trade-offs: total counts, jumping to page N, sorting by other columns, and the export use case.",
+  "examples": [],
+  "hints": [
+    "`OFFSET 100000` still makes the database read and discard 100,000 rows. And if `order_date` has many equal values, what decides the order among them?",
+    "Keyset pagination: remember the last row's sort key and ask for rows *after* it: `WHERE (order_date, order_id) < (%s, %s) ORDER BY order_date DESC, order_id DESC LIMIT 51`.",
+    "Return an opaque `next_cursor` (e.g. base64 of the last row's key). Fetch `limit + 1` rows to know whether there is a next page."
+  ],
+  "starter_code": "## 1. Why it's slow / why rows repeat or vanish\n\n## 2. API contract\n\n## 3. Query and index\n\n## 4. Trade-offs (counts, jump-to-page, other sorts, export)\n",
+  "solution_code": "",
+  "solution_md": "## 1. The two problems\n\n**Slowness.** `OFFSET k` doesn't skip rows for free: PostgreSQL must produce the first `k + 50` rows in sorted order\nand throw away `k`. Page 2000 = 100,000 rows read (and possibly sorted) to return 50. Cost grows linearly with page\nnumber.\n\n**Duplicates/skips.** Offsets are positions in a *moving* list. When 3 new orders arrive while the user is on\npage 1, everything shifts down by 3, so page 2 starts with 3 rows they already saw. Deletes/status changes (with a\nstatus filter) shift rows up and cause skips. Separately, `ORDER BY order_date DESC` alone is **not a total\norder** - thousands of orders share a date, and PostgreSQL may return ties in different orders between queries, so\nrows can repeat or vanish even with no writes.\n\n## 2. API contract - keyset (cursor) pagination\n\n```\nGET /orders?channel=Myntra&status=DELIVERED&from=2024-03-01&to=2024-03-31&limit=50&cursor=eyJk...\n```\n\n```json\n{\n  \"data\": [ { \"order_id\": 98123, \"order_ref\": \"MYN-1001\", \"order_date\": \"2024-03-31\", ... } ],\n  \"page\": { \"limit\": 50, \"next_cursor\": \"eyJkIjoiMjAyNC0wMy0zMCIsImlkIjo5ODA3NH0\", \"has_more\": true }\n}\n```\n\n- `cursor` is **opaque** (base64 JSON of the last row's sort key, ideally signed/HMAC'd so clients can't forge it).\n  Clients just echo it. This lets you change the internals later.\n- `limit` has a default (50) and a max (e.g. 200).\n- Filters must be identical across pages; encode them (or a hash) in the cursor and reject mismatches with `400`.\n- For \"Previous\", either keep a client-side stack of cursors or also return `prev_cursor` (query with the\n  comparison and sort reversed, then reverse the result).\n\n## 3. Query and index\n\n```sql\nSELECT order_id, order_ref, channel, status, order_date, total_amount\nFROM orders\nWHERE org_id = %(org_id)s\n  AND channel = %(channel)s\n  AND order_date BETWEEN %(from)s AND %(to)s\n  AND (order_date, order_id) < (%(cur_date)s, %(cur_id)s)   -- omitted on the first page\nORDER BY order_date DESC, order_id DESC\nLIMIT %(limit_plus_one)s;\n```\n\nFetch `limit + 1` rows: if you got 51, there's a next page; return 50 and build `next_cursor` from the 50th row.\n\n```sql\nCREATE INDEX idx_orders_org_channel_date ON orders (org_id, channel, order_date DESC, order_id DESC);\n```\n\nEquality columns first (`org_id`, `channel`), then the sort columns. PostgreSQL walks the index from the cursor\nposition and stops after 51 entries - page 2000 costs the same as page 1. Check with `EXPLAIN (ANALYZE, BUFFERS)`:\nyou want an Index Scan with no Sort node and a small `rows` count. The row-value comparison `(a, b) < (x, y)` is\nindex-friendly in PostgreSQL; in databases without it, expand to\n`order_date < x OR (order_date = x AND order_id < y)`.\n\nWith optional filters (status sometimes present) you may need a second index or accept a filter step; don't create\nan index for every combination - look at real query patterns.\n\n## 4. Trade-offs\n\n- **Total count**: `COUNT(*)` over millions of rows on every request is expensive. Return `has_more` instead; if the\n  UI needs a number, compute it separately, cache it, or show an estimate (\"10,000+\").\n- **Jump to page N**: keyset can't do it directly. Most order-browsing UIs don't need it; offer date filters\n  (\"jump to March\") instead. Keep offset pagination only for small, bounded lists (admin tables < 10k rows).\n- **Other sorts** (by amount): the cursor must contain that sort key plus the unique tie-breaker, and you need a\n  matching index (`org_id, total_amount DESC, order_id DESC`). Support only the sorts you index.\n- **Consistency**: keyset never duplicates/skips existing rows; rows inserted *behind* the cursor (newer orders) won't\n  appear until a refresh, which is acceptable for browsing.\n- **Export**: use the same keyset query with a large `limit` (1,000-5,000), ordered by `order_id ASC` for a stable,\n  append-friendly scan - or better, a dedicated async export endpoint that streams a CSV to S3, so the nightly job\n  doesn't make thousands of API calls.",
+  "tests": null
+}

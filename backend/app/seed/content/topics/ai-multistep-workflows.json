@@ -1,0 +1,150 @@
+{
+  "slug": "ai-multistep-workflows",
+  "title": "Multi-step LLM workflows: pipelines, routing, state machines",
+  "skill": "ai-agents",
+  "extra_skills": [
+    "backend-architecture",
+    "message-queues"
+  ],
+  "category": "AI",
+  "difficulty": "advanced",
+  "tags": [
+    "workflows",
+    "routing",
+    "plan-and-execute",
+    "state-machine",
+    "retries",
+    "idempotency"
+  ],
+  "summary": "Most reliable LLM systems are workflows: a fixed sequence or graph of steps where some steps call a model. Routing, plan-and-execute and explicit state machines add flexibility while keeping control, and standard job-runner techniques — persisted state, retries, idempotency — make them production-grade.",
+  "why_md": "- In production, deterministic pipelines beat free-roaming agents on cost, latency and debuggability; interviewers want to hear you know the difference.\n- LLM steps fail in new ways (timeouts, malformed JSON, rate limits), so retry/idempotency design is essential.\n- This maps directly onto job-scheduler skills you already have.",
+  "details_md": "### Spectrum of control\n- **Deterministic pipeline**: fixed steps, e.g. `extract -> validate -> generate SQL -> execute -> summarise`. Each step is testable alone.\n- **Routing**: a cheap classifier (small model, rules, or embeddings) picks a branch: `sql_question`, `policy_question` (RAG), `chit_chat`, `out_of_scope`. Each branch is its own pipeline.\n- **Plan-and-execute**: one model call produces a structured plan (list of steps from an allow-list); your code executes the steps, possibly re-planning on failure. More flexible than a pipeline, more controllable than an open agent loop.\n- **Agent**: the model picks the next action each turn. Most flexible, least predictable.\n\n### State machines\nModel the workflow as explicit states and allowed transitions (`PENDING -> RETRIEVING -> GENERATING -> VALIDATING -> DONE | FAILED`). Persist the current state and intermediate outputs (e.g. in a Postgres table). Benefits: resumability after crashes, clear audit trail, impossible transitions are rejected, and a UI can show progress. LangGraph expresses agents as graphs of nodes and edges over a shared state object — the same idea.\n\n### Retries\nRetry only transient failures: timeouts, 429/5xx, connection errors — with exponential backoff and jitter, and a max attempt count. A **validation failure** (bad JSON, SQL that fails EXPLAIN) is different: retry by re-prompting with the error message, a bounded number of times.\n\n### Idempotency\nA step may run twice (worker crash after doing the work but before recording it). Make steps idempotent:\n- deterministic step keys (`job_id:step_name`) stored with `INSERT ... ON CONFLICT DO NOTHING`;\n- cache model outputs per step so a retry doesn't pay twice;\n- side effects (emails, writes) guarded by idempotency keys.\n\n### Workers\nLong workflows (document ingestion, batch enrichment) run in background workers claiming work with `SELECT ... FOR UPDATE SKIP LOCKED`, exactly like a job runner.",
+  "code_md": "```python\n# Router + pipeline with explicit, validated state transitions.\nfrom enum import Enum\n\nclass S(str, Enum):\n    PENDING = \"pending\"; ROUTED = \"routed\"; ANSWERED = \"answered\"; FAILED = \"failed\"\n\nALLOWED = {S.PENDING: {S.ROUTED, S.FAILED}, S.ROUTED: {S.ANSWERED, S.FAILED}}\n\ndef transition(run: dict, new: S) -> None:\n    if new not in ALLOWED.get(run[\"state\"], set()):\n        raise ValueError(f\"illegal {run['state']} -> {new}\")\n    run[\"state\"] = new          # also persist: UPDATE workflow_run SET state=%s WHERE id=%s\n\ndef route(question: str) -> str:\n    q = question.lower()\n    if any(w in q for w in (\"how many\", \"total\", \"top\", \"sum\")):\n        return \"sql\"\n    if \"policy\" in q or \"return\" in q:\n        return \"rag\"\n    return \"general\"            # in practice: small classifier model with a JSON label\n\nHANDLERS = {\"sql\": lambda q: \"SQL pipeline\", \"rag\": lambda q: \"RAG pipeline\", \"general\": lambda q: \"chat\"}\n\ndef handle(run: dict) -> str:\n    branch = route(run[\"question\"]); transition(run, S.ROUTED)\n    answer = HANDLERS[branch](run[\"question\"]); transition(run, S.ANSWERED)\n    return answer\n```\n\n```sql\n-- Idempotent step results: a retried step reuses the stored output instead of re-calling the model.\nCREATE TABLE workflow_step (\n    run_id     bigint NOT NULL,\n    step       text   NOT NULL,\n    output     jsonb,\n    tokens     int,\n    created_at timestamptz DEFAULT now(),\n    PRIMARY KEY (run_id, step)\n);\nINSERT INTO workflow_step (run_id, step, output, tokens)\nVALUES (%s, 'generate_sql', %s, %s)\nON CONFLICT (run_id, step) DO NOTHING;\n```",
+  "use_cases_md": "- **Analytics chat**: route -> (SQL pipeline | policy RAG | refuse) instead of one giant agent.\n- **Document ingestion**: download from S3 -> extract text -> chunk -> embed -> upsert vectors, each step resumable.\n- **Product listing generation**: plan (which attributes to write) -> generate per attribute -> validate length/banned words -> store for review.\n- **Report summarisation** for many orgs in a nightly batch, with per-step idempotency so reruns cost nothing extra.",
+  "mistakes_md": "- **Using an agent for a fixed process** – paying latency and unpredictability for flexibility you don't need.\n- **Retrying non-transient errors with backoff** – a malformed JSON output won't fix itself by waiting; re-prompt with the error instead, bounded.\n- **Non-idempotent steps** – a retry sends two emails or charges tokens twice. Use step keys and stored outputs.\n- **State only in memory** – a container restart loses the run. Persist state transitions.\n- **Unbounded re-planning** – plan-and-execute loops need limits like agents do.",
+  "best_practices_md": "- Default to a pipeline; add routing; use agents only for genuinely open-ended steps.\n- Make routing output a constrained label (enum) and log it; evaluate the router separately.\n- Persist state + step outputs; make every step idempotent.\n- Classify errors: transient (backoff retry) vs validation (re-prompt) vs permanent (fail fast).\n- Put per-run budgets (steps, tokens, time) in config.\n- Trace each step with run_id for observability.",
+  "my_context_md": "`ForcesightJobSchedulerAndRunner` is the template: jobs claimed with `SELECT ... FOR UPDATE SKIP LOCKED`, a `ThreadPoolExecutor` runner, tests for locking and next-run calculation. An LLM ingestion or batch-summarisation workflow is that same runner with steps that call a model. `ECSMarketplaceDataUpload`'s registry dispatcher (150+ processors, lazy imports) is a router — an LLM router just replaces the lookup key with a classified label — and its upload status tracking plus deadlock retry are the state-machine and retry ideas here. Your `INSERT ... ON CONFLICT` experience gives you idempotent step storage.",
+  "revision_notes_md": "- Pipeline < routing < plan-and-execute < agent (increasing flexibility, decreasing control).\n- Router outputs a fixed label; each branch is its own pipeline.\n- Plan-and-execute: model writes a structured plan from allowed steps; code executes.\n- State machine: explicit states, allowed transitions, persisted -> resumable + auditable.\n- Retry transient errors with backoff+jitter; re-prompt on validation errors (bounded).\n- Idempotency: (run_id, step) key, ON CONFLICT DO NOTHING, cached outputs, idempotency keys for side effects.\n- Background workers: FOR UPDATE SKIP LOCKED.",
+  "exercises_md": "1. Build a `workflow_run` + `workflow_step` schema in local Postgres and a runner that resumes a half-finished run after you kill the process.\n2. Write a router with a fake classifier and pytest-parametrize 15 questions to check routing accuracy.\n3. Implement `call_with_retry` that backs off on timeouts/429 but re-prompts (max 2) on JSON parse errors; test both paths with fakes.\n4. Sketch a plan-and-execute flow where the plan is JSON validated against an allow-list of step names.",
+  "related": [
+    "ai-agents-tool-calling",
+    "retries-backoff-idempotency",
+    "be-background-tasks",
+    "message-queues",
+    "registry-dispatcher-pattern",
+    "ai-structured-outputs"
+  ],
+  "flashcards": [
+    {
+      "front": "Plan-and-execute in one sentence?",
+      "back": "A model produces a structured plan from an allowed set of steps; deterministic code executes it, re-planning only on failure with limits."
+    },
+    {
+      "front": "Transient vs validation errors: how to retry each?",
+      "back": "Transient (timeout, 429, 5xx): exponential backoff + jitter. Validation (bad JSON/SQL): re-prompt with the error message, bounded attempts."
+    },
+    {
+      "front": "Why persist workflow state?",
+      "back": "Resumability after crashes, audit trail, rejecting illegal transitions, progress visibility."
+    },
+    {
+      "front": "How to make an LLM step idempotent?",
+      "back": "Key results by (run_id, step), store with ON CONFLICT DO NOTHING, reuse stored output on retry; idempotency keys for side effects."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A support flow always does: classify intent -> fetch order -> draft reply. What architecture fits best?",
+      "options": [
+        "Open-ended agent with all tools",
+        "Deterministic pipeline (possibly with a router)",
+        "Fine-tuned model with no code",
+        "Multi-agent debate"
+      ],
+      "answer_index": 1,
+      "explanation": "Known, fixed steps -> pipeline: cheaper, predictable, testable."
+    },
+    {
+      "type": "mcq",
+      "prompt": "The model returned invalid JSON for a step. What is the best retry strategy?",
+      "options": [
+        "Sleep with exponential backoff and resend the identical request forever",
+        "Fail the whole workflow immediately with no retry",
+        "Switch to a different database",
+        "Re-prompt including the parse error, with a small max attempts"
+      ],
+      "answer_index": 3,
+      "explanation": "Validation failures aren't transient; feed the error back so the model can fix it, bounded."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Background workers can claim pending workflow runs without blocking each other using SELECT ... FOR UPDATE ____.",
+      "answers": [
+        "skip locked"
+      ],
+      "explanation": "SKIP LOCKED lets concurrent workers take different rows."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A step that can safely run twice with the same effect as running once is ____.",
+      "answers": [
+        "idempotent"
+      ],
+      "explanation": "Idempotency makes retries safe."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this state-machine code print?",
+      "code": "ALLOWED = {\n    \"pending\": {\"retrieving\", \"failed\"},\n    \"retrieving\": {\"generating\", \"failed\"},\n    \"generating\": {\"done\", \"failed\"},\n}\nstate = \"pending\"\nfor nxt in [\"retrieving\", \"done\", \"generating\", \"done\", \"pending\"]:\n    if nxt in ALLOWED.get(state, set()):\n        state = nxt\n        print(\"ok ->\", state)\n    else:\n        print(\"rejected\", nxt, \"from\", state)\n",
+      "answers": [
+        "ok -> retrieving\nrejected done from retrieving\nok -> generating\nok -> done\nrejected pending from done"
+      ],
+      "explanation": "'done' is illegal from retrieving; 'done' has no outgoing transitions, so 'pending' is rejected at the end."
+    },
+    {
+      "type": "output",
+      "prompt": "Steps are cached by (run_id, step) to make retries idempotent. What does this print?",
+      "code": "calls = 0\nstore = {}\n\ndef run_step(run_id, step):\n    global calls\n    key = (run_id, step)\n    if key in store:\n        return store[key]\n    calls += 1\n    store[key] = f\"{step}-out-{calls}\"\n    return store[key]\n\nfor attempt in range(3):\n    run_step(7, \"embed\")\nprint(run_step(7, \"embed\"), run_step(8, \"embed\"))\nprint(\"model calls:\", calls)\n",
+      "answers": [
+        "embed-out-1 embed-out-2\nmodel calls: 2"
+      ],
+      "explanation": "Only the first call for (7, 'embed') and the first for (8, 'embed') hit the 'model'."
+    },
+    {
+      "type": "debug",
+      "prompt": "This ingestion worker sometimes embeds and inserts the same document twice after crashes. What's wrong and how do you fix it?",
+      "code": "def process(doc_id):\n    text = load_text(doc_id)\n    for i, chunk in enumerate(split(text)):\n        vec = embed(chunk)                      # paid model call\n        cur.execute(\"INSERT INTO chunks (doc_id, idx, text, embedding) VALUES (%s,%s,%s,%s)\",\n                    (doc_id, i, chunk, vec))\n    conn.commit()\n    mark_done(doc_id)\n",
+      "answer": "The step isn't idempotent: if the worker crashes after `commit()` but before `mark_done`, the job is retried and every chunk is embedded (paid) and inserted again. There's no unique key to stop duplicates.\n\nFix: unique key + upsert, skip already-embedded chunks, and mark done in the same transaction.\n```sql\nALTER TABLE chunks ADD CONSTRAINT chunks_doc_idx UNIQUE (doc_id, idx);\n```\n```python\ndef process(doc_id):\n    done = existing_idx(doc_id)              # SELECT idx FROM chunks WHERE doc_id=%s\n    for i, chunk in enumerate(split(text)):\n        if i in done:\n            continue\n        vec = embed(chunk)\n        cur.execute(\"\"\"INSERT INTO chunks (doc_id, idx, text, embedding) VALUES (%s,%s,%s,%s)\n                       ON CONFLICT (doc_id, idx) DO NOTHING\"\"\", (doc_id, i, chunk, vec))\n    cur.execute(\"UPDATE ingest_job SET status='done' WHERE doc_id=%s\", (doc_id,))\n    conn.commit()                            # data + status in one transaction\n```",
+      "rubric": [
+        "Identifies crash window between commit and mark_done",
+        "No unique constraint -> duplicates",
+        "Upsert / ON CONFLICT on (doc_id, idx)",
+        "Skip existing work and commit status atomically"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between a deterministic pipeline, routing, plan-and-execute and an agent, and when you'd use each.",
+      "answer": "- **Pipeline**: fixed steps; use when the process is known (ingestion, text-to-SQL with validation).\n- **Routing**: a classifier chooses one of several pipelines; use when requests fall into distinct categories.\n- **Plan-and-execute**: model writes a structured plan from allowed steps, code executes; use for variable but bounded multi-step tasks (reports needing several queries).\n- **Agent**: model chooses each next action; use for open-ended exploration. Trade-off: flexibility vs cost, latency, predictability and testability. Start left, move right only when needed.",
+      "rubric": [
+        "Defines all four",
+        "Gives a fitting use case for each",
+        "Explains flexibility vs control trade-off",
+        "Recommends starting with the simplest"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Design a resumable document-ingestion workflow for a RAG system.",
+      "difficulty": "hard",
+      "answer_md": "Tables: `ingest_job(id, s3_key, org_id, state, attempts, error)` and `chunks(doc_id, idx, text, embedding, UNIQUE(doc_id, idx))`. States: `pending -> extracting -> chunking -> embedding -> indexed | failed`. Workers claim jobs with `SELECT ... FOR UPDATE SKIP LOCKED LIMIT n` and update state in short transactions. Each step is idempotent: extraction output stored in S3 keyed by content hash; embeddings upserted with `ON CONFLICT DO NOTHING`, skipping existing `(doc_id, idx)`. Errors: transient (S3/embedding API 429) -> backoff with jitter, increment attempts; permanent (corrupt PDF) -> `failed` with error text, no retry. Batch embedding calls for throughput. Metrics: jobs per state, step latency, embedding tokens/cost per org. A re-ingest of a changed file uses a new content hash and deletes old chunks transactionally."
+    },
+    {
+      "question": "How would you route user questions in an analytics chat product?",
+      "difficulty": "medium",
+      "answer_md": "A cheap, fast router returning a constrained label: `sql`, `docs`, `smalltalk`, `out_of_scope`. Options: rules for obvious cases, a small model with structured output (enum), or embedding similarity to labelled examples. Each label maps to a pipeline in a registry dict. I'd log the label with each message, build a labelled eval set (a few hundred real questions) to measure router accuracy, and use confidence thresholds: low confidence -> ask a clarifying question or fall back to the safest pipeline. Misroutes appear in user downvotes, so votes are tied back to the route for analysis."
+    }
+  ]
+}

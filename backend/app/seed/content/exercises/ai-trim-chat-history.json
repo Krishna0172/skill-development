@@ -1,0 +1,180 @@
+{
+  "slug": "ai-trim-chat-history",
+  "title": "Trim chat history to a token budget",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "llm-applications",
+  "concepts": [
+    "context window",
+    "token budgets",
+    "conversation memory",
+    "sliding window"
+  ],
+  "related_topics": [
+    "ai-context-tokens-cost",
+    "ai-memory-management",
+    "ai-llm-apis"
+  ],
+  "problem_md": "The chat product stores full session history, but each LLM call must fit a context budget. Implement:\n\n```python\ndef trim_history(messages: list[dict], budget: int) -> list[dict]\n```\n\nEach message is `{\"role\": \"system\"|\"user\"|\"assistant\", \"content\": str}`; tokens = `len(content.split())` (a stand-in for a real tokenizer).\n- If the **first** message is `system`, it is always kept. If it alone exceeds `budget`, raise `ValueError`.\n- Then keep the **most recent** messages that fit in the remaining budget, walking backwards and stopping at the first message that doesn't fit (keep a contiguous tail - never skip a big message to sneak in older ones).\n- If the oldest kept non-system message is an `assistant` message, drop it too (a reply without its question confuses the model).\n- Return messages in original order (system first). Do not mutate the input.",
+  "examples": [
+    {
+      "input": "budget=7, [system 'be brief'(2), user 'hi there'(2), assistant 'hello how can I help'(5), user 'refund status'(2)]",
+      "output": "[system, user 'refund status']",
+      "explanation": "After system (2) and the last user (2), the assistant (5) doesn't fit; stop."
+    }
+  ],
+  "hints": [
+    "Split off the system message, compute `remaining = budget - tokens(system)`, then iterate `reversed(rest)` accumulating until one doesn't fit; `break` there.",
+    "Reverse the kept tail back, then `while tail and tail[0]['role'] == 'assistant': tail.pop(0)`."
+  ],
+  "starter_code": "def trim_history(messages, budget):\n    # Keeps the newest messages that fit, but loses the system prompt\n    kept, used = [], 0\n    for m in reversed(messages):\n        t = len(m['content'].split())\n        if used + t <= budget:\n            kept.append(m)\n            used += t\n    return list(reversed(kept))\n",
+  "solution_code": "def _tokens(message):\n    return len(message['content'].split())\n\n\ndef trim_history(messages, budget):\n    system, rest = [], list(messages)\n    if rest and rest[0]['role'] == 'system':\n        system, rest = [rest[0]], rest[1:]\n    remaining = budget - sum(_tokens(m) for m in system)\n    if remaining < 0:\n        raise ValueError('system prompt alone exceeds the budget')\n    tail = []\n    for m in reversed(rest):\n        t = _tokens(m)\n        if t > remaining:\n            break\n        tail.append(m)\n        remaining -= t\n    tail.reverse()\n    while tail and tail[0]['role'] == 'assistant':\n        tail.pop(0)\n    return system + tail\n",
+  "solution_md": "The system prompt carries instructions (and in text-to-SQL, the schema) - dropping it silently changes behaviour, which is the starter's bug. It also *skips* large messages and keeps older small ones, producing a conversation with holes. Walking backwards and stopping at the first misfit keeps a coherent recent window; dropping a leading orphan assistant turn keeps the dialogue well-formed. O(n), no input mutation.\n\nProduction: count with the model's tokenizer (or the provider's token-counting endpoint), reserve room for the response (`max_tokens`) and retrieved context, and summarise evicted turns into a running summary message instead of discarding them outright. Tool-call/tool-result pairs must be kept or dropped together.",
+  "tests": {
+    "function": "trim_history",
+    "cases": [
+      {
+        "args": [
+          [
+            {
+              "role": "system",
+              "content": "be brief"
+            },
+            {
+              "role": "user",
+              "content": "hi there"
+            },
+            {
+              "role": "assistant",
+              "content": "hello how can I help"
+            },
+            {
+              "role": "user",
+              "content": "refund status"
+            }
+          ],
+          7
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "role": "system",
+            "content": "be brief"
+          },
+          {
+            "role": "user",
+            "content": "refund status"
+          }
+        ]
+      },
+      {
+        "args": [
+          [
+            {
+              "role": "system",
+              "content": "you write SQL"
+            },
+            {
+              "role": "user",
+              "content": "top skus"
+            },
+            {
+              "role": "assistant",
+              "content": "SELECT sku"
+            },
+            {
+              "role": "user",
+              "content": "only amazon"
+            },
+            {
+              "role": "assistant",
+              "content": "SELECT sku WHERE channel"
+            }
+          ],
+          11
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "role": "system",
+            "content": "you write SQL"
+          },
+          {
+            "role": "user",
+            "content": "only amazon"
+          },
+          {
+            "role": "assistant",
+            "content": "SELECT sku WHERE channel"
+          }
+        ]
+      },
+      {
+        "args": [
+          [
+            {
+              "role": "user",
+              "content": "a b c d e f"
+            },
+            {
+              "role": "assistant",
+              "content": "x"
+            },
+            {
+              "role": "user",
+              "content": "short q"
+            }
+          ],
+          4
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "role": "user",
+            "content": "short q"
+          }
+        ]
+      },
+      {
+        "args": [
+          [
+            {
+              "role": "system",
+              "content": "s"
+            },
+            {
+              "role": "user",
+              "content": "q"
+            }
+          ],
+          100
+        ],
+        "kwargs": {},
+        "expected": [
+          {
+            "role": "system",
+            "content": "s"
+          },
+          {
+            "role": "user",
+            "content": "q"
+          }
+        ]
+      },
+      {
+        "args": [
+          [
+            {
+              "role": "system",
+              "content": "a very long system prompt"
+            }
+          ],
+          3
+        ],
+        "raises": "ValueError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

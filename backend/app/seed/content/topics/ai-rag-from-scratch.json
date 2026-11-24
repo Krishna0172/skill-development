@@ -1,0 +1,194 @@
+{
+  "slug": "ai-rag-from-scratch",
+  "title": "RAG from scratch: a minimal end-to-end pipeline in pure Python",
+  "skill": "rag",
+  "extra_skills": [
+    "llm-applications",
+    "nlp-basics"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "rag",
+    "retrieval",
+    "chunking",
+    "embeddings",
+    "pipeline"
+  ],
+  "summary": "Retrieval-Augmented Generation answers questions using your own documents by retrieving relevant passages and putting them in the prompt. This topic builds the whole pipeline in plain Python (load, chunk, embed, store, retrieve, prompt, cite) so you understand every moving part before using a framework.",
+  "why_md": "- RAG is the default way to give an LLM private or fresh knowledge without retraining it.\n- Knowing the pipeline stage by stage lets you debug bad answers: is it chunking, retrieval, or generation?\n- Frameworks hide the stages; interviews ask you to design one from first principles.\n- The same pattern powers schema retrieval in text-to-SQL and long-term memory in agents.",
+  "details_md": "### The idea\nAn LLM only knows its training data and the prompt. RAG adds a **retrieval step**: find the few passages most relevant to the question, paste them into the prompt, and instruct the model to answer from them. This grounds answers, allows citations and keeps knowledge updatable (re-index documents; no retraining).\n\n### Indexing (offline)\n1. **Load** documents (PDF, HTML, database rows, markdown) and extract clean text plus metadata (source, title, date, access group).\n2. **Chunk**: split into passages of ~200-500 tokens, often with some overlap (10-20%), preferring natural boundaries (headings, paragraphs). Chunks too big dilute relevance and waste tokens; too small lose context.\n3. **Embed**: convert each chunk into a vector with an embedding model; similar meaning -> nearby vectors.\n4. **Store** vectors with chunk text and metadata in a vector index (pgvector, a vector DB, or an in-memory list for small data).\n\n### Query time (online)\n1. **Embed the query** with the *same* model.\n2. **Retrieve top-k** chunks by similarity (cosine similarity or dot product on normalised vectors), optionally filtered by metadata (tenant, document type). Common k: 3-8.\n3. **(Optional) rerank**: a stronger model re-scores the candidates; cuts noise.\n4. **Build the prompt**: instructions + numbered context chunks + the question. Tell the model to answer only from the context, cite chunk numbers and say \"I don't know\" if the context lacks the answer.\n5. **Generate** and return the answer with sources.\n\n### Cosine similarity\ncos(a, b) = (a . b) / (|a| |b|): 1 means same direction, 0 unrelated. Real systems use dense embeddings from a model; in this topic we use simple word-count vectors so the whole pipeline runs without libraries. The structure is identical; only `embed()` changes.\n\n### Why answers go wrong (debug by stage)\n- **Not retrieved**: the right chunk is not in top-k (bad chunking, weak embeddings, vocabulary mismatch). Fix: better chunks, hybrid keyword+vector search, query rewriting, higher k with reranking.\n- **Retrieved but ignored**: too much noise or the answer is buried. Fix: fewer, better chunks; clearer prompt.\n- **Generated beyond context**: hallucination. Fix: stricter instruction, citation requirement, abstain option.\n- **Stale or unauthorised data**: filter by metadata and permissions at retrieval time, not afterwards.\n\n### Evaluate retrieval separately\nMeasure **hit rate / recall@k** (is the gold chunk in the top-k?) and MRR on a golden set of questions, separate from answer quality (faithfulness, correctness). Most RAG failures are retrieval failures.\n\n### Production considerations\nRe-embed when the embedding model changes (vectors are not comparable across models); store a chunk hash to skip unchanged content; keep metadata for filtering; track latency (embed + search + generate) and token cost per answer.",
+  "code_md": "A complete toy pipeline. `embed()` is word-count based here; swap in a real embedding model call without changing anything else.\n```python\nimport math\nfrom collections import Counter\n\nDOCS = {\n    \"returns.md\": \"Items can be returned within 30 days. Refunds are issued to the original payment method within 5 business days.\",\n    \"shipping.md\": \"Standard shipping takes 3 to 5 business days. Express shipping takes 1 to 2 business days.\",\n}\n\ndef chunk(text, size=12, overlap=3):\n    words = text.split()\n    step = size - overlap\n    return [\" \".join(words[i:i + size]) for i in range(0, max(len(words) - overlap, 1), step)]\n\ndef embed(text):                          # placeholder for a real embedding model\n    return Counter(w.strip(\".,\").lower() for w in text.split())\n\ndef cosine(a, b):\n    dot = sum(a[k] * b[k] for k in a if k in b)\n    na = math.sqrt(sum(v * v for v in a.values()))\n    nb = math.sqrt(sum(v * v for v in b.values()))\n    return dot / (na * nb) if na and nb else 0.0\n\n# --- indexing ---\nindex = []\nfor source, text in DOCS.items():\n    for n, c in enumerate(chunk(text)):\n        index.append({\"source\": source, \"chunk_id\": n, \"text\": c, \"vec\": embed(c)})\n\n# --- retrieval ---\ndef retrieve(question, k=2):\n    q = embed(question)\n    scored = sorted(index, key=lambda d: cosine(q, d[\"vec\"]), reverse=True)\n    return scored[:k]\n\n# --- prompt ---\ndef build_prompt(question, hits):\n    ctx = \"\\n\".join(f\"[{i+1}] ({h['source']}) {h['text']}\" for i, h in enumerate(hits))\n    return (\"Answer using ONLY the context. Cite like [1]. If the context does not contain \"\n            \"the answer, say you don't know.\\n\\n\"\n            f\"Context:\\n{ctx}\\n\\nQuestion: {question}\\nAnswer:\")\n\nhits = retrieve(\"how long do refunds take?\")\nprompt = build_prompt(\"how long do refunds take?\", hits)\n# answer = llm_client.complete(prompt)     # provider-specific call\n```\nMeasuring retrieval hit rate:\n```python\nGOLD = [(\"how long do refunds take\", \"returns.md\"), (\"express shipping time\", \"shipping.md\")]\ndef hit_rate(k=2):\n    hits = sum(any(h[\"source\"] == src for h in retrieve(q, k)) for q, src in GOLD)\n    return hits / len(GOLD)\n```\npgvector flavour of the retrieval step (SQL):\n```sql\nSELECT source, text FROM chunks\nWHERE tenant_id = %s\nORDER BY embedding <=> %s      -- cosine distance operator\nLIMIT 5;\n```",
+  "use_cases_md": "- **Policy and FAQ assistant** answering from returns, shipping and marketplace-policy documents with citations.\n- **Internal runbook search**: ask questions over engineering docs and incident notes.\n- **Catalogue Q&A**: answer product questions from specs and reviews.\n- **Schema retrieval** for text-to-SQL: retrieve relevant table descriptions instead of sending the whole schema.\n- **Support copilot**: suggest replies grounded in past resolved tickets.",
+  "mistakes_md": "- **Different embedding models for indexing and querying**: vectors are incomparable. Fix: same model; re-embed on change.\n- **Chunks split mid-sentence or with no context**: Fix: split on structure, add overlap, include title in chunk.\n- **Ignoring permissions**: retrieving documents the user may not see. Fix: metadata filter in the retrieval query.\n- **Stuffing too many chunks**: noise and cost. Fix: smaller k, rerank.\n- **No 'I don't know' path**: invents answers. Fix: explicit instruction and a low-similarity cut-off.\n- **Judging only the final answer**: hides retrieval failures. Fix: measure recall@k separately.",
+  "best_practices_md": "- Start with the simple pipeline and a golden set; add reranking or hybrid search only when the evals show a retrieval gap.\n- Store source, section and permissions as metadata on every chunk.\n- Show citations so users can verify.\n- Use a similarity threshold to abstain.\n- Keep indexing idempotent (content hash) so re-runs are cheap.\n- Log query, retrieved chunk ids, scores and answer for debugging.",
+  "my_context_md": "Your listed services have no embeddings or vector search yet, but the building blocks are familiar: Postgres is the natural place to try pgvector with your psycopg2 habits (parameterised queries instead of f-strings), and your ingestion code in ECSMarketplaceDataUpload shows the load-and-clean stage RAG indexing needs. The text-to-SQL chat backend (GetLlmData / ECSLlmQueryProcess) could use the same retrieval idea to select relevant table descriptions.",
+  "revision_notes_md": "- RAG = retrieve relevant passages, put in prompt, answer from them with citations.\n- Index: load -> chunk (200-500 tokens, overlap) -> embed -> store with metadata.\n- Query: embed query (same model) -> top-k by cosine -> optional rerank -> prompt -> generate.\n- cosine = dot/(norms); dense embeddings capture meaning, word counts only exact words.\n- Debug by stage: not retrieved vs ignored vs hallucinated vs unauthorised.\n- Evaluate retrieval separately: recall@k, MRR.\n- Filter by metadata/permissions during retrieval.\n- Abstain when similarity is low or context lacks the answer.\n- Re-embed when the embedding model changes.",
+  "exercises_md": "1. Run the pipeline with 5 short documents of your own and print the retrieved chunks and scores for 5 questions.\n2. Change chunk size/overlap and re-measure `hit_rate` on 10 gold questions; note which setting wins.\n3. Add a similarity threshold so the pipeline returns 'I don't know' for an unrelated question.\n4. Sketch a `chunks` table for pgvector (id, tenant_id, source, text, embedding) and write the parameterised psycopg2 query for top-5 retrieval filtered by tenant.",
+  "related": [
+    "ai-embeddings",
+    "ai-chunking",
+    "ai-vector-databases",
+    "ai-retrieval-pipelines",
+    "ai-rag-evaluation"
+  ],
+  "flashcards": [
+    {
+      "front": "What are the two phases of a RAG system?",
+      "back": "Indexing (load, chunk, embed, store) offline and querying (embed, retrieve, prompt, generate) online."
+    },
+    {
+      "front": "Why chunk documents?",
+      "back": "To retrieve focused passages that fit the prompt; embedding a whole document dilutes meaning."
+    },
+    {
+      "front": "Why must query and chunk embeddings use the same model?",
+      "back": "Vectors from different models live in different spaces and are not comparable."
+    },
+    {
+      "front": "What is recall@k for retrieval?",
+      "back": "The fraction of questions whose gold chunk appears in the top-k results."
+    },
+    {
+      "front": "How do you enforce document permissions in RAG?",
+      "back": "Filter by metadata (tenant/group) in the retrieval query, before anything reaches the prompt."
+    },
+    {
+      "front": "Where do most RAG failures occur?",
+      "back": "Retrieval: the right chunk is not in the top-k."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What does RAG add to a plain LLM call?",
+      "options": [
+        "A retrained model",
+        "A bigger context window",
+        "Retrieved passages inserted into the prompt",
+        "Lower temperature"
+      ],
+      "answer_index": 2,
+      "explanation": "Retrieval of relevant passages grounds the answer."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your RAG bot answers wrongly although the correct paragraph exists in your index. First thing to measure?",
+      "options": [
+        "Whether the chunk appears in the top-k retrieval results",
+        "Output temperature",
+        "The server CPU",
+        "The number of users"
+      ],
+      "answer_index": 0,
+      "explanation": "Check retrieval recall before blaming the generator."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the right place to apply user permissions?",
+      "options": [
+        "After generation, by deleting words",
+        "In the font size",
+        "Nowhere",
+        "In the retrieval filter on metadata"
+      ],
+      "answer_index": 3,
+      "explanation": "Unauthorised text must never reach the prompt."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Similarity between two vectors measured by the angle between them is called ____ similarity.",
+      "answers": [
+        "cosine"
+      ],
+      "explanation": "Cosine similarity."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Splitting documents into passages before embedding is called ____.",
+      "answers": [
+        "chunking",
+        "chunk"
+      ],
+      "explanation": "Chunking."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def chunk(text, size=4, overlap=1):\n    words = text.split()\n    step = size - overlap\n    return [\" \".join(words[i:i + size]) for i in range(0, max(len(words) - overlap, 1), step)]\nfor c in chunk(\"a b c d e f g h i j\"):\n    print(c)",
+      "answers": [
+        "a b c d\nd e f g\ng h i j"
+      ],
+      "explanation": "Window of 4 words stepping by 3 produces overlapping chunks."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import math\nfrom collections import Counter\ndef embed(t): return Counter(t.lower().split())\ndef cos(a, b):\n    dot = sum(a[k] * b[k] for k in a if k in b)\n    return dot / (math.sqrt(sum(v*v for v in a.values())) * math.sqrt(sum(v*v for v in b.values())))\ndocs = [\"refund within 30 days\", \"express shipping 2 days\", \"refund method original payment\"]\nq = embed(\"how long for refund\")\nscores = [(round(cos(q, embed(d)), 3), d) for d in docs]\nfor s, d in sorted(scores, reverse=True):\n    print(s, d)",
+      "answers": [
+        "0.25 refund within 30 days\n0.25 refund method original payment\n0.0 express shipping 2 days"
+      ],
+      "explanation": "Documents are ranked by cosine similarity with the query; the refund documents rank first."
+    },
+    {
+      "type": "debug",
+      "prompt": "Retrieval returns irrelevant chunks for most queries after you switched embedding models. What likely went wrong?",
+      "code": "# indexing (done last month with model A)\nvectors = [embed_a(c) for c in chunks]\n\n# query time (service now configured with model B)\nq = embed_b(question)\nhits = top_k(q, vectors, k=5)",
+      "answer": "The index was built with embedding model A but queries use model B; the vector spaces are incompatible so similarities are meaningless. Re-embed all chunks with the new model (or keep using model A for queries), store the model name/version with the index, and fail fast if they differ.",
+      "rubric": [
+        "Identifies mismatched embedding models",
+        "Fix: re-embed or use the same model",
+        "Suggests recording model version with the index"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Describe the full RAG pipeline and where each stage can fail.",
+      "answer": "Indexing: load and clean documents, chunk with overlap, embed, store with metadata. Query: embed question with the same model, retrieve top-k (with permission filters), optionally rerank, build a prompt with numbered context and instructions to cite or abstain, generate. Failures: bad chunking or weak embeddings miss the answer; noise buries it; the model may ignore context or hallucinate; permissions or stale data can leak or mislead. Evaluate retrieval (recall@k) separately from answer faithfulness.",
+      "rubric": [
+        "Lists indexing and query stages",
+        "Names failure points per stage",
+        "Separates retrieval evaluation from generation evaluation"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you decide chunk size and top-k for a policy-document assistant?",
+      "answer": "Start with 200-400 token chunks with ~15% overlap split at headings, k around 4-5. Build a golden set of questions with the source chunk, measure recall@k and answer faithfulness while varying chunk size, overlap and k, and pick the cheapest setting that meets the target. Add reranking or hybrid search if recall stays low, and consider including the section title in each chunk.",
+      "rubric": [
+        "Reasonable starting values",
+        "Empirical comparison on golden set",
+        "Mentions rerank/hybrid or title context as follow-ups"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which prompt instruction best reduces hallucination in RAG?",
+      "options": [
+        "Be creative",
+        "Answer only from the context and say you don't know otherwise",
+        "Use at least 500 words",
+        "Ignore the context"
+      ],
+      "answer_index": 1,
+      "explanation": "Grounding with an abstain path."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain RAG and when you would pick it over fine-tuning.",
+      "difficulty": "medium",
+      "answer_md": "RAG retrieves relevant passages at query time and puts them in the prompt, so knowledge stays current, citable and access-controlled. Fine-tuning changes model behaviour or style but is poor at injecting frequently changing facts. Choose RAG for knowledge, fine-tuning for format/tone/skills, and often both."
+    },
+    {
+      "question": "How do you evaluate a RAG system?",
+      "difficulty": "hard",
+      "answer_md": "Separate retrieval and generation. Retrieval: recall@k and MRR against a golden set of questions with known source chunks. Generation: faithfulness (is every claim supported by retrieved context), answer correctness and abstention behaviour, using programmatic checks and a calibrated LLM judge. Track latency and cost, and add production failures to the set."
+    },
+    {
+      "question": "How would you build RAG over data with per-tenant access control?",
+      "difficulty": "hard",
+      "answer_md": "Store tenant/group metadata on every chunk and apply it as a filter in the retrieval query (pgvector WHERE clause or vector-DB metadata filter) so unauthorised text never reaches the prompt. Do not rely on the LLM to hide content. Log retrieved chunk ids for audit and test with cross-tenant queries that must return nothing."
+    }
+  ]
+}

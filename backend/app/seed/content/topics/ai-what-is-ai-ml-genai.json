@@ -1,0 +1,193 @@
+{
+  "slug": "ai-what-is-ai-ml-genai",
+  "title": "What is AI, ML, Deep Learning and GenAI?",
+  "skill": "ml-fundamentals",
+  "extra_skills": [
+    "llm-applications"
+  ],
+  "category": "AI",
+  "difficulty": "beginner",
+  "tags": [
+    "basics",
+    "ml",
+    "genai",
+    "glossary",
+    "beginner"
+  ],
+  "summary": "AI, machine learning, deep learning and generative AI are nested ideas, not synonyms. This topic explains each in plain language, shows what it means for a model to 'learn' from examples, and gives you a glossary you will meet everywhere else in the AI track.",
+  "why_md": "- Every later AI topic (embeddings, RAG, agents) assumes you know these words; fuzzy vocabulary makes everything else harder.\n- Interviews for AI-engineer roles start with 'what is the difference between ML and a rules-based program?' and 'what does training mean?'.\n- Knowing that an LLM is 'just' a very large trained function helps you reason about its failures (hallucination, cost, latency) instead of treating it as magic.\n- As a backend developer you will mostly *use* trained models through APIs; understanding what they are tells you what can go wrong.",
+  "details_md": "### The nesting dolls\n- **Artificial Intelligence (AI)**: the broad goal of making software do things that normally need human judgment. A chess engine with hand-written rules counts as AI.\n- **Machine Learning (ML)**: a *way* of doing AI where you do not write the rules. You show the program many examples and it finds the rules itself.\n- **Deep Learning (DL)**: ML that uses *neural networks* with many layers. It is what made image recognition, speech and language models work well.\n- **Generative AI (GenAI)**: deep-learning models that *produce new content* (text, images, code, audio) instead of only labelling things. ChatGPT-style assistants and Claude are *large language models (LLMs)*, a kind of GenAI.\n\n### Traditional program vs ML\nA normal program: you write rules, give it data, get answers. `if \"free money\" in email: spam`.\n\nML flips it: you give it **data plus the right answers** (labelled examples) and it produces the **rules** (a *model*). The model is then applied to new data.\n\n### How does a model \"learn\"?\nA model is a function with adjustable numbers called **parameters** (or weights). Training is a loop:\n1. **Predict**: feed an example in, get the model's guess.\n2. **Measure error**: a **loss function** scores how wrong the guess was.\n3. **Adjust**: nudge each parameter a little in the direction that reduces the loss (this is **gradient descent**).\n4. **Repeat** over many examples, many times (each full pass over the data is an **epoch**).\n\nNothing mystical: it is \"guess, measure the error, adjust, repeat\". A GPT-style model has billions of parameters; a toy model might have two.\n\n### Training vs inference\n- **Training**: the expensive phase where parameters change. Done once (or occasionally) by the model provider.\n- **Inference**: using the finished model to make predictions. This is what your API call does. Parameters are frozen.\n\n### How an LLM generates text\nAn LLM is trained on huge amounts of text to predict the **next token** (a chunk of a word). To answer you, it predicts one token, appends it, predicts the next, and so on. It produces *plausible* text, not looked-up facts, which is why it can **hallucinate** (state something false confidently).\n\n### Kinds of learning\n- **Supervised**: examples come with answers (email -> spam/not spam).\n- **Unsupervised**: no answers; find structure (group similar customers).\n- **Reinforcement learning**: learn by reward (used to polish assistant behaviour).\n\n### Overfitting in one sentence\nA model that memorises its training examples but fails on new ones has **overfit**; we check this with data the model never saw during training.",
+  "code_md": "A tiny \"model\" with one parameter `w` that learns y = 2x by gradient descent (pure Python, no libraries):\n```python\ndata = [(1, 2), (2, 4), (3, 6)]   # (input x, correct answer y)\nw = 0.0                            # the single parameter, starts as a bad guess\nlr = 0.05                          # learning rate: how big each nudge is\n\nfor epoch in range(50):\n    for x, y in data:\n        pred = w * x               # 1. predict\n        error = pred - y           # 2. how wrong?\n        w -= lr * error * x        # 3. nudge w to reduce squared error\nprint(round(w, 3))                 # close to 2.0: the model \"learned\" the rule\n```\nA rules-based program vs a learned one:\n```python\n# Rules (you write the logic)\ndef is_spam_rules(text):\n    return \"free money\" in text.lower()\n\n# Learned (the logic is the numbers found from labelled examples)\nspam_words = {\"free\": 2.0, \"money\": 1.5, \"meeting\": -2.0}   # pretend these were learned\ndef is_spam_learned(text):\n    score = sum(spam_words.get(w, 0) for w in text.lower().split())\n    return score > 1\nprint(is_spam_learned(\"free money now\"), is_spam_learned(\"meeting at noon\"))\n```\nTraining vs inference, conceptually:\n```python\n# training: parameters change      -> model.fit(X_train, y_train)\n# inference: parameters are frozen -> model.predict(new_data)\n```",
+  "use_cases_md": "- **Classification**: tag an incoming support ticket as 'refund', 'shipping' or 'other' (supervised ML).\n- **Prediction**: forecast next week's order volume from past weeks.\n- **Clustering**: group products or customers with similar behaviour (unsupervised).\n- **Generation**: draft a product description or summarise a long review thread (GenAI).\n- **Natural-language data access**: ask a question in English and have an LLM write the SQL for it (text-to-SQL).",
+  "mistakes_md": "- **Saying 'AI' when you mean 'LLM'**: an LLM is one kind of GenAI, which is one kind of deep learning, which is one kind of ML, which is one kind of AI.\n- **Thinking the model looks things up**: a bare LLM predicts likely text; it has no built-in database of facts. Fix: add retrieval (RAG) or tools when you need correct facts.\n- **Believing training happens on every API call**: calls are inference; the model does not learn from your request.\n- **Judging a model on its training data**: it will look perfect. Fix: always evaluate on held-out data.\n- **Expecting determinism**: LLM output can vary between calls; design for that.",
+  "best_practices_md": "- Use the precise term (ML model, LLM, embedding model) rather than 'AI' in design discussions.\n- Start by asking 'is a simple rule enough?'. Use ML only when rules are hard to write.\n- Always keep some data aside for testing.\n- Treat LLM output as a draft that needs validation, not as ground truth.\n- Keep a personal glossary and add terms as you meet them.",
+  "my_context_md": "You work on a backend where an LLM chat product stores chat sessions, messages, votes, per-org USD cost and the SQL the model generated (the GetLlmData / ECSLlmQueryProcess services). That product is *inference* on a pre-trained LLM: the model's parameters are frozen and your backend only sends text in and stores text out.",
+  "revision_notes_md": "- AI > ML > Deep Learning > GenAI (nested sets).\n- ML = learn rules from (data, answers) instead of hand-writing rules.\n- Model = function with adjustable parameters (weights).\n- Training loop: predict, measure loss, adjust (gradient descent), repeat; one pass = epoch.\n- Training changes parameters; inference uses frozen ones.\n- LLM = trained to predict the next token; output is plausible, not guaranteed true -> hallucination.\n- Supervised (labels) / unsupervised (no labels) / reinforcement (rewards).\n- Overfitting = memorised training data, bad on new data; test on unseen data.\n- Parameters are learned; hyperparameters (learning rate, epochs) are chosen by you.",
+  "exercises_md": "1. Run the gradient-descent snippet, then change `lr` to 0.5 and to 0.001 and note what happens to `w` after 50 epochs.\n2. Change the data to `(1, 3), (2, 6), (3, 9)` and predict what `w` converges to before running.\n3. Write 5 one-line definitions in your own words: parameter, loss, epoch, inference, hallucination.\n4. List three features in your own backend that could be replaced by a learned model and three that should stay as plain rules; justify each.",
+  "related": [
+    "ai-ml-fundamentals",
+    "ai-llm-fundamentals",
+    "ai-python-ml-toolkit-basics"
+  ],
+  "flashcards": [
+    {
+      "front": "What is the relationship between AI, ML, DL and GenAI?",
+      "back": "Nested: ML is a way of doing AI; deep learning is ML with many-layer neural networks; GenAI is deep learning that generates new content."
+    },
+    {
+      "front": "What does it mean for a model to 'learn'?",
+      "back": "Its parameters are adjusted, step by step, to reduce a loss that measures how wrong its predictions are on training examples."
+    },
+    {
+      "front": "Training vs inference?",
+      "back": "Training changes the parameters (expensive, done once). Inference uses the frozen model to predict on new inputs (what an API call does)."
+    },
+    {
+      "front": "What is an LLM trained to do?",
+      "back": "Predict the next token in text. Generation repeats this one token at a time."
+    },
+    {
+      "front": "What is hallucination?",
+      "back": "When a model outputs fluent but false information, because it generates plausible text rather than retrieving verified facts."
+    },
+    {
+      "front": "What is overfitting?",
+      "back": "Memorising the training data so well that performance on unseen data is poor."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which statement correctly orders these from broadest to narrowest?",
+      "options": [
+        "Deep learning > ML > AI > GenAI",
+        "ML > AI > GenAI > Deep learning",
+        "AI > ML > Deep learning > GenAI",
+        "GenAI > AI > ML > Deep learning"
+      ],
+      "answer_index": 2,
+      "explanation": "AI is the broad goal; ML is one approach; deep learning is ML with neural networks; GenAI is deep learning that generates content."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is the main difference between a traditional program and an ML model?",
+      "options": [
+        "ML learns its rules from example data instead of having them hand-written",
+        "ML runs faster",
+        "ML never makes mistakes",
+        "ML does not need data"
+      ],
+      "answer_index": 0,
+      "explanation": "In ML you provide data and answers and the algorithm derives the rules."
+    },
+    {
+      "type": "mcq",
+      "prompt": "When you call an LLM through an API, what is happening?",
+      "options": [
+        "Training on your prompt",
+        "The model is being deleted and rebuilt",
+        "A database lookup of facts",
+        "Inference with frozen parameters"
+      ],
+      "answer_index": 3,
+      "explanation": "An API call runs the finished model; its weights do not change."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Each full pass of the training loop over the whole dataset is called an ____.",
+      "answers": [
+        "epoch",
+        "an epoch"
+      ],
+      "explanation": "An epoch is one complete pass through the training data."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A model that scores perfectly on training data but poorly on new data has ____ the training data.",
+      "answers": [
+        "overfit",
+        "overfitted",
+        "overfit to"
+      ],
+      "explanation": "That is overfitting."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "data = [(1, 3), (2, 6), (3, 9)]\nw = 0.0\nlr = 0.05\nfor epoch in range(100):\n    for x, y in data:\n        error = w * x - y\n        w -= lr * error * x\nprint(round(w, 2))",
+      "answers": [
+        "3.0"
+      ],
+      "explanation": "The model learns y = 3x, so w converges to 3.0."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "weights = {\"free\": 2.0, \"money\": 1.5, \"meeting\": -2.0}\ndef score(text):\n    return sum(weights.get(w, 0) for w in text.split())\nfor msg in [\"free money\", \"meeting free\", \"hello\"]:\n    print(msg, score(msg) > 1)",
+      "answers": [
+        "free money True\nmeeting free False\nhello False"
+      ],
+      "explanation": "'free money' scores 3.5 (True); 'meeting free' scores 0.0 (False); 'hello' scores 0 (False)."
+    },
+    {
+      "type": "debug",
+      "prompt": "This training loop never improves the model. What is wrong?",
+      "code": "w = 0.0\nlr = 0.1\ndata = [(1, 2), (2, 4), (3, 6)]\nfor epoch in range(20):\n    for x, y in data:\n        error = w * x - y\n        w += lr * error * x\nprint(w)",
+      "answer": "The update sign is wrong: `w += lr * error * x` moves the parameter *up* the loss slope (gradient ascent), so w diverges. Gradient descent must subtract: `w -= lr * error * x`.",
+      "rubric": [
+        "Identifies the sign of the update (+= instead of -=)",
+        "Names it as moving with, not against, the gradient",
+        "Gives the corrected line"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior developer what 'training' a model means and how it differs from using it.",
+      "answer": "Training is a loop where the model predicts on an example, a loss function measures how wrong it was, and an optimiser (gradient descent) nudges the parameters to reduce that loss; repeated over many examples and epochs. The result is a set of fixed parameters. Using it (inference) just runs the input through those frozen parameters to get an output; nothing is learned from that call.",
+      "rubric": [
+        "Describes predict / measure loss / adjust loop",
+        "States parameters change during training",
+        "States parameters are frozen during inference"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why can an LLM hallucinate, and what are two ways to reduce it?",
+      "answer": "An LLM is trained to predict the most plausible next token, not to look up verified facts, so it can produce fluent but wrong statements. Reduce it by grounding answers in retrieved documents (RAG), by giving it tools/databases to query, by asking it to cite sources and say 'I don't know', and by validating outputs.",
+      "rubric": [
+        "Explains next-token prediction yields plausible not verified text",
+        "Mentions retrieval/grounding or tools",
+        "Mentions validation or instructing it to abstain"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is an example of unsupervised learning?",
+      "options": [
+        "Predicting spam from labelled emails",
+        "Grouping customers into segments with no labels",
+        "Predicting house price from past sales with known prices",
+        "Training with rewards from a game score"
+      ],
+      "answer_index": 1,
+      "explanation": "Unsupervised learning has no labels and finds structure such as clusters."
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between AI, ML and deep learning?",
+      "difficulty": "easy",
+      "answer_md": "AI is the broad goal of machines doing tasks that need human-like judgment. ML is a subset where the system learns patterns from data rather than following hand-written rules. Deep learning is a subset of ML using multi-layer neural networks, which excel on unstructured data like text, images and audio. GenAI is deep learning that generates new content, e.g. LLMs. Example: a hand-coded rule engine is AI but not ML; a spam classifier trained on labelled emails is ML; an LLM drafting replies is deep learning and GenAI."
+    },
+    {
+      "question": "Explain gradient descent in simple terms.",
+      "difficulty": "easy",
+      "answer_md": "Imagine standing on a hill in fog and wanting to reach the valley: you feel the slope and step downhill, repeatedly. In training, the 'height' is the loss, and the slope is the gradient of the loss with respect to each parameter. Each step subtracts learning_rate times the gradient. Too big a learning rate overshoots or diverges; too small is slow. Example: for y = w*x the update is w -= lr * (w*x - y) * x."
+    },
+    {
+      "question": "Why does an LLM sometimes make things up, and how would you design a backend feature around that?",
+      "difficulty": "medium",
+      "answer_md": "An LLM predicts plausible tokens; it has no guarantee of truth and no live knowledge of your data. For a backend feature I would ground it with retrieved data or tool calls, constrain output with schemas, validate results (for example check generated SQL before running it), log inputs and outputs for review, and give users a way to give feedback such as votes. I would also treat the answer as untrusted input and never act on it without checks."
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "slug": "sql-net-amount-null-handling",
+  "title": "Fix the net amount query (COALESCE / NULLIF)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "easy",
+  "skill": "sql",
+  "concepts": [
+    "COALESCE",
+    "NULLIF",
+    "NULL arithmetic",
+    "division by zero",
+    "ROUND"
+  ],
+  "related_topics": [
+    "sql-null-handling"
+  ],
+  "problem_md": "A marketplace order-items report sometimes leaves `discount` empty (loaded as `NULL`), and cancelled lines arrive\nwith `quantity = 0`. The starter query was written by a teammate and produces wrong results: `NULL` net amounts\nand broken per-unit prices.\n\n```sql\nCREATE TABLE order_items (\n  order_item_id INTEGER PRIMARY KEY,\n  order_id      INTEGER NOT NULL,\n  sku           TEXT NOT NULL,\n  quantity      INTEGER NOT NULL,\n  gross_amount  REAL NOT NULL,\n  discount      REAL            -- NULL when the report column was empty\n);\n```\n\n> Money columns are `REAL` in this sandbox (they would be `NUMERIC(12,2)` in production PostgreSQL). Dates are ISO `'YYYY-MM-DD'` text.\n\n**Task.** Return one row per order item:\n\n| column | rule |\n|---|---|\n| `order_item_id` | |\n| `net_amount` | `gross_amount - discount`, where a missing discount counts as `0` |\n| `unit_net_price` | `net_amount / quantity` rounded to 2 decimals; `NULL` when `quantity` is `0` (no division-by-zero error) |\n\nOrder by `order_item_id`.",
+  "examples": [
+    {
+      "input": "(2, qty 1, gross 299, discount NULL), (3, qty 3, gross 1047, discount 47), (6, qty 0, gross 799, discount 799)",
+      "output": "order_item_id | net_amount | unit_net_price\n2             | 299        | 299\n3             | 1000       | 333.33\n6             | 0          | NULL",
+      "explanation": "Any arithmetic with NULL yields NULL, so the discount must be defaulted first. Dividing by NULLIF(quantity, 0) yields NULL instead of an error."
+    }
+  ],
+  "hints": [
+    "In SQL, `299 - NULL` is `NULL`. Which function replaces a NULL with a default?",
+    "`COALESCE(discount, 0)` fixes the subtraction. For the division, turn a zero divisor into NULL.",
+    "`ROUND((gross_amount - COALESCE(discount, 0)) / NULLIF(quantity, 0), 2)`."
+  ],
+  "starter_code": "-- This query is buggy. Fix it.\nSELECT order_item_id,\n       gross_amount - discount AS net_amount,\n       gross_amount / quantity AS unit_net_price\nFROM order_items\nORDER BY order_item_id\n",
+  "solution_code": "SELECT order_item_id,\n       gross_amount - COALESCE(discount, 0) AS net_amount,\n       ROUND((gross_amount - COALESCE(discount, 0)) / NULLIF(quantity, 0), 2) AS unit_net_price\nFROM order_items\nORDER BY order_item_id;",
+  "solution_md": "**Two NULL tools:**\n\n- `COALESCE(a, b, ...)` returns the first non-NULL argument. `COALESCE(discount, 0)` treats a missing discount as\n  zero, so `net_amount` is never NULL.\n- `NULLIF(a, b)` returns NULL when `a = b`, otherwise `a`. Dividing by `NULLIF(quantity, 0)` turns the\n  divide-by-zero case into `x / NULL = NULL` instead of an error.\n\n**Why the original was wrong.** Any arithmetic involving NULL is NULL, so items 2, 4 and 7 had NULL net amounts.\n`gross_amount / 0` raises `division by zero` in PostgreSQL (SQLite silently returns NULL, which hides the bug -\nanother reason to be explicit). It also divided the *gross*, not the net, amount.\n\n**PostgreSQL note.** With `NUMERIC(12,2)` columns, `ROUND(numeric, 2)` works as written. If the columns were\n`double precision`, PostgreSQL has no `round(double precision, int)`; you would cast: `ROUND((...)::numeric, 2)`.\n\n**Ingestion tip.** Decide at load time whether \"empty\" means 0 or unknown. If discount is truly \"not reported\",\nkeep NULL in storage and apply `COALESCE` in queries; if it means zero, normalize to 0 in the loader so every\nconsumer doesn't have to remember.",
+  "tests": {
+    "schema_sql": "CREATE TABLE order_items (\n  order_item_id INTEGER PRIMARY KEY,\n  order_id      INTEGER NOT NULL,\n  sku           TEXT NOT NULL,\n  quantity      INTEGER NOT NULL,\n  gross_amount  REAL NOT NULL,\n  discount      REAL            -- NULL when the report column was empty\n);\n\nINSERT INTO order_items VALUES\n (1,1,'TSHIRT-BLK-M',2,1198.00,100.00),\n (2,1,'SOCKS-3PK',   1, 299.00,NULL),\n (3,2,'LIPSTICK-RED',3,1047.00,47.00),\n (4,2,'KAJAL-01',    0,   0.00,NULL),\n (5,3,'JEANS-32',    1,2499.00,500.00),\n (6,3,'BELT-BRN',    0, 799.00,799.00),\n (7,4,'SERUM-30ML',  2,1300.00,NULL);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "order_item_id",
+        "net_amount",
+        "unit_net_price"
+      ],
+      "rows": [
+        [
+          1,
+          1098,
+          549
+        ],
+        [
+          2,
+          299,
+          299
+        ],
+        [
+          3,
+          1000,
+          333.33
+        ],
+        [
+          4,
+          0,
+          null
+        ],
+        [
+          5,
+          1999,
+          1999
+        ],
+        [
+          6,
+          0,
+          null
+        ],
+        [
+          7,
+          1300,
+          650
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

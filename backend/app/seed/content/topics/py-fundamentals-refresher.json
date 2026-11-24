@@ -1,0 +1,152 @@
+{
+  "slug": "py-fundamentals-refresher",
+  "title": "Python fundamentals: the interview traps",
+  "skill": "python",
+  "extra_skills": [
+    "python-internals"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "mutability",
+    "identity",
+    "truthiness",
+    "copy",
+    "unpacking",
+    "evaluation-order"
+  ],
+  "summary": "The handful of core-language behaviours that cause real bugs and show up in every Python interview: names bound to objects, mutable vs immutable types, `is` vs `==`, truthiness, small-int/string caching, slicing and unpacking, shallow vs deep copy, and when default arguments are evaluated.",
+  "why_md": "- Most 'weird' Python bugs (shared default lists, a dict mutated through a copy, `is` comparisons that pass locally and fail in prod) come from not modelling *names → objects* precisely.\n- Interviewers use these as fast filters: mutable defaults, `a is b` on ints, `copy` vs `deepcopy`, `t[0] += [x]` on a tuple.\n- In ETL code, accidental aliasing of rows/configs silently corrupts data across records instead of crashing.\n- Knowing the evaluation model lets you read unfamiliar code fast and reason about it without running it.",
+  "details_md": "### Names are references\nAssignment never copies. `b = a` binds a second name to the *same object*. Whether that matters depends on mutability: `list`, `dict`, `set`, and most user objects can change in place; `int`, `str`, `tuple`, `frozenset`, `bytes` cannot. `x += 1` on an int rebinds `x` to a new object; `lst += [1]` mutates the list in place (it calls `__iadd__`) and *then* rebinds.\n\n### Identity vs equality\n`==` calls `__eq__` (value); `is` compares identity (same object, `id()`). Use `is` only for singletons: `None`, `True`/`False`, sentinels. CPython caches ints in `[-5, 256]` and interns many identifier-like string literals, so `a is b` may be `True` for small values and `False` for larger or runtime-built ones. That is an implementation detail, never a contract.\n\n### Truthiness\nFalsy: `None`, `False`, `0`, `0.0`, `Decimal(0)`, empty containers/strings, and objects whose `__bool__` returns False or `__len__` returns 0. Trap: `if not qty:` treats `0` the same as `None`; when 0 is valid data, write `if qty is None:`. A pandas DataFrame raises on `bool(df)` — use `df.empty`.\n\n### Slicing and unpacking\nSlicing a list returns a *shallow* new list; `lst[:]` is a copy idiom. Slices never raise IndexError. Extended unpacking: `first, *rest = row`, `a, b = b, a` (the right side is built as a tuple first, then assigned left to right).\n\n### Copy vs deepcopy\n`copy.copy` / `dict(d)` / `list(l)` create a new outer container whose elements are the *same* objects. `copy.deepcopy` recursively copies (handling cycles via a memo dict). Nested configs or rows with list fields need a deep copy if you intend to mutate them independently.\n\n### Evaluation order and defaults\nDefault argument values are evaluated **once**, when `def` runs, and stored on the function (`f.__defaults__`). A mutable default is therefore shared across calls. Python evaluates expressions left to right, function arguments before the call, and the right-hand side of an assignment before the targets. Chained comparisons `a < b < c` evaluate `b` once and short-circuit.\n\n### The tuple `+=` puzzle\n`t = ([1],); t[0] += [2]` mutates the inner list *and then* raises `TypeError` when storing back into the tuple — the list ends up `[1, 2]` anyway.",
+  "code_md": "```python\n# Mutable default: evaluated once at def time\ndef add_sku(sku, seen=None):        # use None as sentinel\n    seen = [] if seen is None else seen\n    seen.append(sku)\n    return seen\n\n# Identity vs equality\nx = 1000\ny = int(\"1000\")\nprint(x == y, x is y)               # True False  (never rely on `is` for values)\nprint(None is None)                 # the right use of `is`\n\n# 0 is valid data -> don't use truthiness\ndef apply_discount(price, discount=None):\n    if discount is None:            # not `if not discount:` (0 would be skipped)\n        discount = 0.05\n    return price * (1 - discount)\n```\n\n```python\nimport copy\n\nbase_cfg = {\"marketplace\": \"amazon\", \"columns\": [\"sku\", \"qty\"]}\n\nshallow = dict(base_cfg)\nshallow[\"columns\"].append(\"price\")   # also changes base_cfg[\"columns\"]!\n\nsafe = copy.deepcopy(base_cfg)\nsafe[\"columns\"].append(\"fee\")       # independent\n\n# Unpacking a CSV row\nheader, *rows = [[\"sku\", \"qty\"], [\"A1\", 3], [\"B2\", 0]]\nfor sku, qty in rows:\n    ...\n```",
+  "use_cases_md": "- Building per-marketplace configs from a shared base dict: deep-copy before customising nested column lists.\n- Treating `0` units sold or `0.0` fee as real values instead of 'missing' when cleaning report rows.\n- Using a module-level `_MISSING = object()` sentinel with `is` to distinguish 'not passed' from `None`.\n- Swapping / unpacking rows from `csv.reader` (`sku, qty, *extra = row`).\n- Reviewing PRs for mutable default args and accidental aliasing of row dicts appended to a list.",
+  "mistakes_md": "- **Mutable default args** (`def f(rows=[])`): state leaks between calls. Fix: `None` default and create inside.\n- **`is` for value comparison** (`if status is 'done'`): works by interning luck; Python 3.8+ even warns (`SyntaxWarning`). Fix: `==`.\n- **`if not value:` when 0/'' are valid**: drops legitimate zeros. Fix: `is None`.\n- **Shallow copy of nested data**: `dict(d)` then mutating a nested list mutates the original. Fix: `copy.deepcopy` or build new nested objects.\n- **`[[0] * 3] * 3`**: three references to one inner list. Fix: `[[0] * 3 for _ in range(3)]`.\n- **Appending the same dict in a loop** and mutating it each iteration: all list entries end up identical. Fix: create a new dict per iteration.",
+  "best_practices_md": "- Use `is` only for `None`, booleans and sentinels.\n- Default to immutable types (tuples, frozenset) for constants and config keys.\n- Copy at boundaries: if a function must mutate an input, copy it explicitly or document it.\n- Prefer explicit `is None` checks over truthiness when zero/empty are meaningful.\n- Use comprehensions to build nested structures, never multiplication of mutable inner lists.\n- Enable linters (ruff `B006` for mutable defaults, `F632` for `is` with literals).",
+  "my_context_md": "The audit of `python-postgres` found **85 mutable default arguments** — each is a potential cross-call state leak, especially in long-running ECS services where the function object lives for the whole process. A quick win: run `ruff check --select B006,B008` across the repo and fix them with the `None` sentinel pattern. Also look in the `ECSMarketplaceDataUpload` processors for places where a base config/column-mapping dict is copied with `dict(...)` or `.copy()` and then nested lists are modified — those need `copy.deepcopy`.",
+  "revision_notes_md": "- Assignment binds names; it never copies.\n- Mutable: list, dict, set, most objects. Immutable: int, float, str, tuple, frozenset, bytes.\n- `is` = identity (singletons only); `==` = value.\n- Small ints -5..256 cached and some strings interned in CPython — implementation detail.\n- Falsy: None, False, 0, 0.0, '', empty containers, `__bool__`/`__len__` returning False/0.\n- Defaults evaluated once at `def` time → never use mutable defaults.\n- `copy.copy` = new outer container; `copy.deepcopy` = recursive.\n- `[[0]*n]*m` aliases inner lists.\n- `lst += x` mutates in place; `t[0] += [x]` mutates then raises.\n- `a, b = b, a`: RHS tuple built first.",
+  "exercises_md": "1. Run `ruff check --select B006` on one of your services, list the mutable defaults it finds, and fix three of them with the `None` sentinel.\n2. Write a function `merge_config(base, override)` that returns a new nested config without mutating `base`; prove it with an assertion test that mutates the result.\n3. Write a small script that demonstrates `[[0]*3]*3` vs the comprehension version and prints `id()` of each inner list.\n4. Find a place in your code using `if not x:` on a numeric field and decide whether `0` should be treated as missing; rewrite it explicitly.",
+  "related": [
+    "python-data-structures",
+    "python-functions-args",
+    "py-internals-memory",
+    "python-oop-dataclasses"
+  ],
+  "flashcards": [
+    {
+      "front": "When are default argument values evaluated?",
+      "back": "Once, when the `def` statement executes. They are stored in `func.__defaults__`, so a mutable default is shared across calls."
+    },
+    {
+      "front": "When should you use `is` instead of `==`?",
+      "back": "Only for identity with singletons/sentinels: `None`, `True`/`False`, or a custom `_MISSING = object()`."
+    },
+    {
+      "front": "Shallow vs deep copy?",
+      "back": "Shallow (`copy.copy`, `dict(d)`, `lst[:]`) makes a new outer container referencing the same inner objects. `copy.deepcopy` recursively copies inner objects too."
+    },
+    {
+      "front": "What does `t = ([1],); t[0] += [2]` do?",
+      "back": "Raises TypeError (tuple item assignment), but the list was already extended in place, so `t == ([1, 2],)`."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which comparison is the correct, portable way to check whether a variable holds no value?",
+      "options": [
+        "`if value == None:`",
+        "`if value is None:`",
+        "`if not value:`",
+        "`if value is 0:`"
+      ],
+      "answer_index": 1,
+      "explanation": "`None` is a singleton, so identity is exact and cannot be overridden by `__eq__`. `not value` also treats 0, '' and [] as missing; `is 0` relies on int caching."
+    },
+    {
+      "type": "mcq",
+      "prompt": "`grid = [[0] * 3] * 3; grid[0][0] = 9` — what is `grid` afterwards?",
+      "options": [
+        "`[[9, 0, 0], [0, 0, 0], [0, 0, 0]]`",
+        "`TypeError`",
+        "`[[9, 9, 9], [0, 0, 0], [0, 0, 0]]`",
+        "`[[9, 0, 0], [9, 0, 0], [9, 0, 0]]`"
+      ],
+      "answer_index": 3,
+      "explanation": "The outer `* 3` copies the reference to one inner list three times, so all rows are the same object."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To copy a nested dict so that changes to its inner lists don't affect the original, use `copy.____(cfg)`.",
+      "answers": [
+        "deepcopy",
+        "deepcopy()"
+      ],
+      "explanation": "`copy.copy` is shallow; `copy.deepcopy` recursively copies nested objects."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A function's default values are stored on the function object in the attribute `func.____`.",
+      "answers": [
+        "__defaults__",
+        "defaults"
+      ],
+      "explanation": "Positional defaults live in `__defaults__` (keyword-only ones in `__kwdefaults__`), created once at def time."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def add(item, bucket=[]):\n    bucket.append(item)\n    return bucket\n\na = add(1)\nb = add(2)\nprint(a, b, a is b)",
+      "answers": [
+        "[1, 2] [1, 2] True"
+      ],
+      "explanation": "The default list is created once and shared, so both calls return the same list object."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import copy\n\norig = {\"sku\": \"A1\", \"tags\": [\"new\"]}\nshallow = copy.copy(orig)\ndeep = copy.deepcopy(orig)\nshallow[\"tags\"].append(\"sale\")\nshallow[\"sku\"] = \"B2\"\nprint(orig)\nprint(deep[\"tags\"])",
+      "answers": [
+        "{'sku': 'A1', 'tags': ['new', 'sale']}\n['new']"
+      ],
+      "explanation": "Rebinding `shallow['sku']` only affects the copy, but the `tags` list is shared between `orig` and `shallow`. The deep copy has its own list."
+    },
+    {
+      "type": "debug",
+      "prompt": "This builds one output row per order line, but every row in the result ends up identical. What's wrong and how do you fix it?",
+      "code": "def build_rows(lines):\n    rows = []\n    row = {}\n    for line in lines:\n        row[\"sku\"] = line[\"sku\"]\n        row[\"qty\"] = line[\"qty\"] or None   # 0 means missing?\n        rows.append(row)\n    return rows",
+      "answer": "Two bugs:\n1. A single `row` dict is created once and appended repeatedly, so every list entry references the same object and shows the last line's values.\n2. `line[\"qty\"] or None` turns a legitimate `0` into `None`.\n\n```python\ndef build_rows(lines):\n    rows = []\n    for line in lines:\n        rows.append({\"sku\": line[\"sku\"], \"qty\": line[\"qty\"]})\n    return rows\n# or: [{\"sku\": l[\"sku\"], \"qty\": l[\"qty\"]} for l in lines]\n```",
+      "rubric": [
+        "Same dict object appended each iteration (aliasing)",
+        "Create a new dict per iteration",
+        "`or None` wrongly converts 0 to None"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior why `a is b` can be True for `a = 256; b = 256` but False for `a = 1000; b = int('1000')`, and what they should do instead.",
+      "answer": "`is` compares object identity, not value. CPython pre-allocates and caches small integers in the range -5..256, so any expression producing 256 returns the same cached object and `is` happens to be True. Larger ints are created on demand, so two equal values can be different objects (and the compiler may or may not fold constants in the same code object, which makes results even less predictable). Strings behave similarly because of interning. All of this is an implementation detail and can differ across versions/interpreters. Use `==` for values and keep `is` for singletons such as `None` and sentinels; linters and Python itself (`SyntaxWarning: \"is\" with a literal`) flag the misuse.",
+      "rubric": [
+        "`is` checks identity, `==` checks value",
+        "Small-int cache -5..256 / interning is a CPython implementation detail",
+        "Use `==` for values, `is` only for None/sentinels"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What's the problem with `def f(items=[])` and how do you fix it?",
+      "difficulty": "easy",
+      "answer_md": "Default values are evaluated once, when the `def` statement runs, and stored in `f.__defaults__`. A mutable default list is therefore shared by every call that doesn't pass `items`; appending to it in one call leaks into the next. In a long-lived worker (ECS task, Flask app) that state accumulates for the life of the process.\n\n```python\ndef f(items=None):\n    if items is None:\n        items = []\n    items.append(1)\n    return items\n```\n\nThe same applies to `dict`, `set`, and calls like `datetime.now()` used as defaults (evaluated once, so every call gets the import-time timestamp). Ruff rules B006/B008 catch both."
+    },
+    {
+      "question": "Explain shallow vs deep copy with an example where the difference causes a bug.",
+      "difficulty": "medium",
+      "answer_md": "A shallow copy (`copy.copy`, `dict(d)`, `lst[:]`, `df.copy(deep=False)`) creates a new outer container but the elements are the same objects. A deep copy (`copy.deepcopy`) recursively copies them, using a memo to handle cycles.\n\n```python\nBASE = {\"columns\": [\"sku\", \"qty\"]}\namazon = dict(BASE)\namazon[\"columns\"].append(\"asin\")\nprint(BASE[\"columns\"])  # ['sku', 'qty', 'asin'] - base config corrupted\n```\n\nEvery later marketplace built from `BASE` now has an `asin` column. Fix with `copy.deepcopy(BASE)` or by building new nested values (`{**BASE, \"columns\": [*BASE[\"columns\"], \"asin\"]}`). Deep copy is slower and can fail on objects that aren't copyable (locks, connections), so copy only what you mutate."
+    },
+    {
+      "question": "What happens with `t = ([1, 2],); t[0] += [3]`?",
+      "difficulty": "hard",
+      "answer_md": "It raises `TypeError: 'tuple' object does not support item assignment` — but `t` is now `([1, 2, 3],)`.\n\n`t[0] += [3]` is executed as: load `t[0]` (the list), call `list.__iadd__([3])` which extends the list **in place** and returns it, then try `t[0] = result`. The final store fails because tuples are immutable, but the mutation already happened.\n\nTakeaways: augmented assignment is 'mutate if possible, then rebind'; an immutable container can still hold mutable objects, so a tuple is not deeply immutable (and is unhashable if it contains a list). Use `t[0].extend([3])` if you mean to mutate, and avoid putting mutable objects in tuples used as constants or dict keys."
+    }
+  ]
+}

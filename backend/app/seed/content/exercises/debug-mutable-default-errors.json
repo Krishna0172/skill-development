@@ -1,0 +1,114 @@
+{
+  "slug": "debug-mutable-default-errors",
+  "title": "Debug: validation errors leaking between rows",
+  "category": "debugging",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "python",
+  "concepts": [
+    "mutable default arguments",
+    "function definition time",
+    "None sentinel"
+  ],
+  "related_topics": [
+    "python-functions-args"
+  ],
+  "problem_md": "This validator runs over every row of an orders report:\n\n```python\ndef validate_order(order: dict, errors: list = []) -> list[str]:\n```\n\nIt should return the list of problems for **that one order** (appended to `errors` if the caller passes their own list). Rules:\n- `\"missing order_id\"` if `order_id` is missing or empty.\n- `\"qty must be a positive integer\"` if `qty` is missing, not an `int`, or `<= 0`.\n\n**Observed bug:** the first bad row is reported correctly, but after that, *every* row — even perfectly valid ones — comes back with the errors of all previous rows:\n\n```python\n>>> validate_order({\"order_id\": \"A1\", \"qty\": 0})\n['qty must be a positive integer']\n>>> validate_order({\"order_id\": \"A3\", \"qty\": 1})   # valid!\n['qty must be a positive integer']\n```\n\nFix `validate_order` so each call without an `errors` argument starts from a fresh list, while a caller-supplied list is still appended to and returned. Keep the signature callable as `validate_order(order)` and `validate_order(order, errors)`.",
+  "examples": [
+    {
+      "input": "validate_order({'order_id': 'A1', 'qty': 0}); validate_order({'order_id': 'A3', 'qty': 1})",
+      "output": "['qty must be a positive integer'] then []",
+      "explanation": "The second call must not see the first call's errors."
+    },
+    {
+      "input": "validate_order({'order_id': 'A5', 'qty': 3}, ['row 5: bad date'])",
+      "output": "['row 5: bad date']"
+    }
+  ],
+  "hints": [
+    "When is the default value `[]` created — each call, or once?",
+    "Default argument values are evaluated **once**, when the `def` statement runs. Every call that omits `errors` shares that single list.",
+    "Use `errors: list | None = None` and inside the function `if errors is None: errors = []`."
+  ],
+  "starter_code": "def validate_order(order: dict, errors: list = []) -> list[str]:\n    if not order.get(\"order_id\"):\n        errors.append(\"missing order_id\")\n    qty = order.get(\"qty\")\n    if not isinstance(qty, int) or qty <= 0:\n        errors.append(\"qty must be a positive integer\")\n    return errors\n",
+  "solution_code": "def validate_order(order: dict, errors: list | None = None) -> list[str]:\n    if errors is None:\n        errors = []\n    if not order.get(\"order_id\"):\n        errors.append(\"missing order_id\")\n    qty = order.get(\"qty\")\n    if not isinstance(qty, int) or qty <= 0:\n        errors.append(\"qty must be a positive integer\")\n    return errors\n",
+  "solution_md": "**Root cause:** default values are evaluated once, at function definition time, and stored on the function object (`validate_order.__defaults__`). The `[]` is therefore one shared list; each call that relies on the default appends to the *same* list, so errors accumulate across rows.\n\n**Fix:** use `None` as a sentinel and create the list inside the function body, which runs on every call.\n\nWhy `if errors is None` and not `errors = errors or []`? Because a caller who passes their own *empty* list expects that exact list to be filled in — `or` would silently replace it with a new one.\n\n**How to spot it:** linters flag this (`B006` in flake8-bugbear / Ruff, `W0102` dangerous-default-value in pylint). The same trap applies to `{}` and `set()` defaults, and to dataclass fields (which is why `dataclasses.field(default_factory=list)` exists).\n\n**Testing lesson:** a test suite that calls the function only once per fresh process would never catch this — the bug only shows up on the *second* call.",
+  "tests": {
+    "function": "validate_order",
+    "cases": [
+      {
+        "args": [
+          {
+            "order_id": "A1",
+            "qty": 0
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "qty must be a positive integer"
+        ]
+      },
+      {
+        "args": [
+          {
+            "order_id": "",
+            "qty": 2
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "missing order_id"
+        ]
+      },
+      {
+        "args": [
+          {
+            "order_id": "A3",
+            "qty": 1
+          }
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          {
+            "qty": -1
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "missing order_id",
+          "qty must be a positive integer"
+        ]
+      },
+      {
+        "args": [
+          {
+            "order_id": "A5",
+            "qty": 3
+          },
+          [
+            "row 5: bad date"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          "row 5: bad date"
+        ]
+      },
+      {
+        "args": [
+          {
+            "order_id": "A6",
+            "qty": "2"
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "qty must be a positive integer"
+        ]
+      }
+    ]
+  }
+}

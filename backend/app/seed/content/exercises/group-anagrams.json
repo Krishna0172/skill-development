@@ -1,0 +1,142 @@
+{
+  "slug": "group-anagrams",
+  "title": "Group anagrams",
+  "category": "problem-solving",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "dsa",
+  "concepts": [
+    "hash map",
+    "canonical keys",
+    "sorting"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "Implement:\n\n```python\ndef group_anagrams(words: list[str]) -> list[list[str]]:\n```\n\nGroup words that are anagrams of each other (same letters, same counts). For a deterministic answer:\n\n- Sort the words **inside** each group alphabetically.\n- Sort the **groups** by their first word.\n- Duplicate words are kept (each occurrence appears in its group).\n- Comparison is case-sensitive (`\"Listen\"` and `\"Silent\"` are *not* anagrams here).\n- An empty input returns `[]`. The empty string `\"\"` is a valid word.",
+  "examples": [
+    {
+      "input": "words = ['eat', 'tea', 'tan', 'ate', 'nat', 'bat']",
+      "output": "[['ate', 'eat', 'tea'], ['bat'], ['nat', 'tan']]"
+    },
+    {
+      "input": "words = ['']",
+      "output": "[['']]"
+    }
+  ],
+  "hints": [
+    "Anagrams become identical once you put their letters in a canonical form.",
+    "Use `''.join(sorted(word))` as a dict key and collect words into lists.",
+    "Finally: `sorted(sorted(g) for g in groups.values())` — sorting a list of lists compares first elements first."
+  ],
+  "starter_code": "def group_anagrams(words: list[str]) -> list[list[str]]:\n    # your code here\n    ...\n",
+  "solution_code": "from collections import defaultdict\n\n\ndef group_anagrams(words: list[str]) -> list[list[str]]:\n    groups = defaultdict(list)\n    for word in words:\n        groups[\"\".join(sorted(word))].append(word)\n    return sorted(sorted(group) for group in groups.values())\n",
+  "solution_md": "Map each word to a canonical key — its letters sorted — and bucket words by key. Then apply the determinism rules: sort within groups, then sort the groups (list comparison is lexicographic, so this orders by first word; groups never share a first word, so ties can't occur).\n\n- **Time:** O(n · m log m) for n words of length up to m, plus the final sort\n- **Space:** O(n · m)\n\n**Alternative key:** a 26-length tuple of letter counts gives O(m) per word instead of O(m log m) — only valid if input is restricted to `a-z`, and mostly matters for very long words.\n\nThe same \"canonical key\" idea is how you'd dedupe messy records in ETL: normalise (strip, lowercase, sort tokens…) into a key, then group.",
+  "tests": {
+    "function": "group_anagrams",
+    "cases": [
+      {
+        "args": [
+          [
+            "eat",
+            "tea",
+            "tan",
+            "ate",
+            "nat",
+            "bat"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            "ate",
+            "eat",
+            "tea"
+          ],
+          [
+            "bat"
+          ],
+          [
+            "nat",
+            "tan"
+          ]
+        ]
+      },
+      {
+        "args": [
+          []
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [
+            ""
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            ""
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            "abc",
+            "cab",
+            "abc"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            "abc",
+            "abc",
+            "cab"
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            "Listen",
+            "Silent"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            "Listen"
+          ],
+          [
+            "Silent"
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            "zz",
+            "a",
+            "z"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            "a"
+          ],
+          [
+            "z"
+          ],
+          [
+            "zz"
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "slug": "debug-dict-mutation-during-iteration",
+  "title": "Debug: crash while dropping out-of-stock SKUs",
+  "category": "debugging",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "python",
+  "concepts": [
+    "dict iteration",
+    "mutation during iteration",
+    "dict comprehensions",
+    "side effects"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "Before pushing inventory to a marketplace, you remove SKUs with no stock:\n\n```python\ndef drop_out_of_stock(inventory: dict[str, int]) -> dict[str, int]:\n```\n\nIt should return a dict containing only SKUs with quantity `> 0`, in the original order, **without modifying the caller's dict** (the caller still uses the full inventory for a stock report afterwards).\n\n**Observed bug:** it works on days when everything is in stock, but as soon as any SKU has `0` (or negative) stock the job crashes:\n\n```\nRuntimeError: dictionary changed size during iteration\n```\n\nFix the function.",
+  "examples": [
+    {
+      "input": "drop_out_of_stock({'A': 5, 'B': 0, 'C': 2})",
+      "output": "{'A': 5, 'C': 2}"
+    },
+    {
+      "input": "drop_out_of_stock({'A': 0, 'B': -3})",
+      "output": "{}"
+    }
+  ],
+  "hints": [
+    "The error message tells you exactly what's wrong: the loop is deleting keys from the dict it is iterating over.",
+    "Even iterating over `list(inventory)` would stop the crash — but it would still modify the caller's dict. Check the requirements again.",
+    "Build a **new** dict instead: `{sku: qty for sku, qty in inventory.items() if qty > 0}`."
+  ],
+  "starter_code": "def drop_out_of_stock(inventory: dict[str, int]) -> dict[str, int]:\n    for sku in inventory:\n        if inventory[sku] <= 0:\n            del inventory[sku]\n    return inventory\n",
+  "solution_code": "def drop_out_of_stock(inventory: dict[str, int]) -> dict[str, int]:\n    return {sku: qty for sku, qty in inventory.items() if qty > 0}\n",
+  "solution_md": "**Root cause:** a dict iterator checks that the dict's size hasn't changed since iteration began; `del inventory[sku]` changes it, so the next step of the loop raises `RuntimeError`. (Lists don't raise — they silently skip elements instead, which is worse.)\n\n**Second, quieter bug:** even if it didn't crash, the function mutated and returned the caller's dict, so the later stock report would lose the zero-stock SKUs. Functions that \"filter\" should generally return new data.\n\n**Fix:** a dict comprehension builds a new dict in one pass and preserves insertion order.\n\n- **Time:** O(n)\n- **Space:** O(n) for the new dict\n\nIf you genuinely need in-place removal (e.g. a huge dict you own), iterate over a snapshot of the keys:\n\n```python\nfor sku in [k for k, q in inventory.items() if q <= 0]:\n    del inventory[sku]\n```\n\n**pandas equivalent:** `df[df[\"qty\"] > 0]` — also returns a new frame; use `.copy()` before modifying it to avoid `SettingWithCopyWarning`.",
+  "tests": {
+    "function": "drop_out_of_stock",
+    "cases": [
+      {
+        "args": [
+          {
+            "A": 5,
+            "B": 0,
+            "C": 2
+          }
+        ],
+        "kwargs": {},
+        "expected": {
+          "A": 5,
+          "C": 2
+        }
+      },
+      {
+        "args": [
+          {
+            "A": 1
+          }
+        ],
+        "kwargs": {},
+        "expected": {
+          "A": 1
+        }
+      },
+      {
+        "args": [
+          {}
+        ],
+        "kwargs": {},
+        "expected": {}
+      },
+      {
+        "args": [
+          {
+            "A": 0,
+            "B": -3
+          }
+        ],
+        "kwargs": {},
+        "expected": {}
+      },
+      {
+        "args": [
+          {
+            "X": 3,
+            "Y": 0,
+            "Z": 0,
+            "W": 7
+          }
+        ],
+        "kwargs": {},
+        "expected": {
+          "X": 3,
+          "W": 7
+        }
+      }
+    ]
+  }
+}

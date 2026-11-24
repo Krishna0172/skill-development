@@ -1,0 +1,177 @@
+{
+  "slug": "ai-reciprocal-rank-fusion",
+  "title": "Reciprocal rank fusion of ranked lists",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "rag",
+  "concepts": [
+    "reciprocal rank fusion",
+    "hybrid search",
+    "rank-based fusion"
+  ],
+  "related_topics": [
+    "ai-hybrid-search",
+    "ai-retrieval-pipelines",
+    "ai-semantic-search"
+  ],
+  "problem_md": "Hybrid search runs BM25 and vector search separately; their scores live on different scales, so you fuse **ranks** instead. Implement RRF:\n\n```python\ndef rrf(rankings: list[list[str]], k: int = 60, top_n: int | None = None) -> list[list]\n```\n\n- `score(d) = sum over lists containing d of 1 / (k + rank)`, where `rank` is 1-based.\n- If an id appears more than once in the same list, only its **first** (best) position counts.\n- Return `[[doc_id, round(score, 6)], ...]` sorted by score desc, ties by id asc; truncate to `top_n` if given.\n- `k < 0` -> `ValueError`.",
+  "examples": [
+    {
+      "input": "rrf([['a','b','c'], ['b','c','d']], k=60)",
+      "output": "[['b', 0.032522], ['c', 0.032002], ['a', 0.016393], ['d', 0.015873]]",
+      "explanation": "b = 1/62 + 1/61, c = 1/63 + 1/62; a and d appear in one list each."
+    }
+  ],
+  "hints": [
+    "Use a `defaultdict(float)`; for each list keep a `seen` set so duplicates are skipped, and `enumerate(lst, start=1)` for 1-based ranks.",
+    "Round the scores, then `sorted(scores.items(), key=lambda t: (-t[1], t[0]))`."
+  ],
+  "starter_code": "def rrf(rankings, k=60, top_n=None):\n    scores = {}\n    for lst in rankings:\n        for rank, doc_id in enumerate(lst):\n            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank)\n    out = sorted(([d, round(s, 6)] for d, s in scores.items()), key=lambda t: -t[1])\n    return out[:top_n] if top_n else out\n",
+  "solution_code": "from collections import defaultdict\n\n\ndef rrf(rankings, k=60, top_n=None):\n    if k < 0:\n        raise ValueError('k must be >= 0')\n    scores = defaultdict(float)\n    for lst in rankings:\n        seen = set()\n        for rank, doc_id in enumerate(lst, start=1):\n            if doc_id in seen:\n                continue\n            seen.add(doc_id)\n            scores[doc_id] += 1 / (k + rank)\n    fused = sorted(((d, round(s, 6)) for d, s in scores.items()), key=lambda t: (-t[1], t[0]))\n    if top_n is not None:\n        fused = fused[:top_n]\n    return [[d, s] for d, s in fused]\n",
+  "solution_md": "RRF (Cormack et al., 2009) ignores raw scores entirely - only positions matter - so a cosine of 0.83 and a BM25 of 14.2 never need normalising. `k` (60 by convention) damps the advantage of the very top ranks: with k=60, rank 1 vs rank 2 differ only slightly, so a doc ranked well by *both* retrievers beats one ranked first by only one. The starter's bugs: 0-based ranks, double-counting duplicates, nondeterministic ties.\n\nO(total list length) plus a sort. Weighted RRF (multiply each list's contribution by a weight) is a common tweak. Elasticsearch, OpenSearch and several vector DBs ship RRF as their hybrid fusion.",
+  "tests": {
+    "function": "rrf",
+    "cases": [
+      {
+        "args": [
+          [
+            [
+              "a",
+              "b",
+              "c"
+            ],
+            [
+              "b",
+              "c",
+              "d"
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            "b",
+            0.032522
+          ],
+          [
+            "c",
+            0.032002
+          ],
+          [
+            "a",
+            0.016393
+          ],
+          [
+            "d",
+            0.015873
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            [
+              "x",
+              "y"
+            ],
+            [
+              "y",
+              "x"
+            ]
+          ]
+        ],
+        "kwargs": {
+          "k": 0
+        },
+        "expected": [
+          [
+            "x",
+            1.5
+          ],
+          [
+            "y",
+            1.5
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            [
+              "p",
+              "q",
+              "p",
+              "r"
+            ],
+            [
+              "r"
+            ]
+          ]
+        ],
+        "kwargs": {
+          "k": 1
+        },
+        "expected": [
+          [
+            "r",
+            0.7
+          ],
+          [
+            "p",
+            0.5
+          ],
+          [
+            "q",
+            0.333333
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            [
+              "a",
+              "b",
+              "c"
+            ],
+            [
+              "c",
+              "b",
+              "a"
+            ],
+            [
+              "b"
+            ]
+          ]
+        ],
+        "kwargs": {
+          "top_n": 2
+        },
+        "expected": [
+          [
+            "b",
+            0.048652
+          ],
+          [
+            "a",
+            0.032266
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            [
+              "a"
+            ]
+          ]
+        ],
+        "kwargs": {
+          "k": -1
+        },
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

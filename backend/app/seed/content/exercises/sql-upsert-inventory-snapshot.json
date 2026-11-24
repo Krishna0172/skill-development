@@ -1,0 +1,94 @@
+{
+  "slug": "sql-upsert-inventory-snapshot",
+  "title": "Upsert an inventory snapshot (INSERT ... ON CONFLICT DO UPDATE)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "hard",
+  "skill": "postgresql",
+  "concepts": [
+    "INSERT ... SELECT",
+    "ON CONFLICT DO UPDATE",
+    "EXCLUDED",
+    "COALESCE to keep old values",
+    "conditional upsert WHERE"
+  ],
+  "related_topics": [
+    "postgres-upsert",
+    "sql-null-handling",
+    "transactions-isolation"
+  ],
+  "problem_md": "Every few hours an inventory report per channel is parsed into `inventory_staging`. You must merge it into the\n`inventory` table (primary key `(channel, sku)`) with **one statement**:\n\n1. New `(channel, sku)` pairs are **inserted**.\n2. Existing pairs get `available_qty` and `updated_on` from the staging row.\n3. Some reports don't include the warehouse column, so staging `warehouse` may be `NULL`: in that case **keep the\n   existing warehouse** (but a new row may be inserted with a NULL warehouse).\n4. Reports can arrive late. If the staging row's `updated_on` is **older** than the stored `updated_on`, the\n   existing row must be left **completely unchanged**.\n\n```sql\nCREATE TABLE inventory (\n  channel       TEXT NOT NULL,\n  sku           TEXT NOT NULL,\n  available_qty INTEGER NOT NULL,\n  warehouse     TEXT,\n  updated_on    TEXT NOT NULL,\n  PRIMARY KEY (channel, sku)\n);\n\nCREATE TABLE inventory_staging (\n  channel       TEXT NOT NULL,\n  sku           TEXT NOT NULL,\n  available_qty INTEGER NOT NULL,\n  warehouse     TEXT,\n  updated_on    TEXT NOT NULL\n);\n```\n\n**Task.** Write the DML statement. The checker then runs:\n\n```sql\nSELECT channel, sku, available_qty, warehouse, updated_on FROM inventory ORDER BY channel, sku;\n```",
+  "examples": [
+    {
+      "input": "inventory (Myntra, TSHIRT-BLK-M, 40, BLR-WH1, 2024-03-01); staging (Myntra, TSHIRT-BLK-M, 35, NULL, 2024-03-02). inventory (Blinkit, KAJAL-01, 30, DEL-DS4, 2024-03-03); staging (Blinkit, KAJAL-01, 99, NULL, 2024-03-02)",
+      "output": "Myntra  | TSHIRT-BLK-M | 35 | BLR-WH1 | 2024-03-02\nBlinkit | KAJAL-01     | 30 | DEL-DS4 | 2024-03-03",
+      "explanation": "The T-shirt keeps its warehouse because staging had NULL. The Blinkit staging row is older than what's stored, so it is ignored."
+    }
+  ],
+  "hints": [
+    "`INSERT INTO inventory (...) SELECT ... FROM inventory_staging ... ON CONFLICT (channel, sku) DO UPDATE SET ...`. Inside `DO UPDATE`, `EXCLUDED` is the row you tried to insert.",
+    "`warehouse = COALESCE(EXCLUDED.warehouse, inventory.warehouse)`. `DO UPDATE` accepts its own `WHERE` clause to skip stale rows.",
+    "In SQLite, an `INSERT ... SELECT` followed by `ON CONFLICT` needs a `WHERE` on the SELECT (even `WHERE true`) to avoid a parsing ambiguity. Finish with `WHERE EXCLUDED.updated_on >= inventory.updated_on`."
+  ],
+  "starter_code": "-- Write your INSERT ... ON CONFLICT statement here\n",
+  "solution_code": "INSERT INTO inventory (channel, sku, available_qty, warehouse, updated_on)\nSELECT channel, sku, available_qty, warehouse, updated_on\nFROM inventory_staging\nWHERE true\nON CONFLICT (channel, sku) DO UPDATE\nSET available_qty = EXCLUDED.available_qty,\n    warehouse     = COALESCE(EXCLUDED.warehouse, inventory.warehouse),\n    updated_on    = EXCLUDED.updated_on\nWHERE EXCLUDED.updated_on >= inventory.updated_on;",
+  "solution_md": "**How `ON CONFLICT DO UPDATE` works.** PostgreSQL tries to insert each row; if it violates the unique constraint\nnamed in the conflict target `(channel, sku)` - which must match a unique index/constraint exactly - it updates the\nexisting row instead. Inside `DO UPDATE`:\n\n- `EXCLUDED.col` is the value from the row you *tried* to insert.\n- `inventory.col` (or the table alias) is the value currently stored.\n- The optional trailing `WHERE` decides whether to update at all; if false, the conflicting row is left as is\n  (and isn't counted/returned).\n\n**Rule by rule:**\n\n| requirement | clause |\n|---|---|\n| insert new pairs | the `INSERT ... SELECT` itself (Nykaa SERUM-30ML, Zepto KAJAL-01) |\n| overwrite qty/date | `available_qty = EXCLUDED.available_qty, updated_on = EXCLUDED.updated_on` |\n| keep warehouse when the report omits it | `COALESCE(EXCLUDED.warehouse, inventory.warehouse)` - same pattern you use in production |\n| ignore late/stale snapshots | `WHERE EXCLUDED.updated_on >= inventory.updated_on` (Blinkit KAJAL-01 stays 30) |\n\n**Gotchas.**\n\n- *SQLite parsing ambiguity:* `INSERT ... SELECT ... ON CONFLICT` needs a `WHERE` on the SELECT (`WHERE true`) so\n  `ON` isn't parsed as a join constraint. PostgreSQL doesn't need it but accepts it.\n- *Duplicate keys in one statement:* if staging contained the same `(channel, sku)` twice, PostgreSQL raises\n  `ON CONFLICT DO UPDATE command cannot affect row a second time`. Dedupe the source first, e.g.\n  `SELECT DISTINCT ON (channel, sku) ... ORDER BY channel, sku, updated_on DESC`.\n- *`DO NOTHING` vs `DO UPDATE`:* `DO NOTHING` is right for immutable facts (an order line); snapshots like stock\n  levels need `DO UPDATE`.\n- *Concurrency:* the upsert is atomic per row, so two Lambdas loading overlapping reports can't create duplicates.\n  Concurrent upserts touching the same keys in *different orders* can deadlock - sort the source by the key\n  (`ORDER BY channel, sku`) to lock rows in a consistent order.\n- *`RETURNING`:* add `RETURNING channel, sku, (xmax = 0) AS inserted` in PostgreSQL to count inserts vs updates for\n  your `fs_upload` status record.",
+  "tests": {
+    "schema_sql": "CREATE TABLE inventory (\n  channel       TEXT NOT NULL,\n  sku           TEXT NOT NULL,\n  available_qty INTEGER NOT NULL,\n  warehouse     TEXT,\n  updated_on    TEXT NOT NULL,\n  PRIMARY KEY (channel, sku)\n);\n\nCREATE TABLE inventory_staging (\n  channel       TEXT NOT NULL,\n  sku           TEXT NOT NULL,\n  available_qty INTEGER NOT NULL,\n  warehouse     TEXT,\n  updated_on    TEXT NOT NULL\n);\n\nINSERT INTO inventory VALUES\n ('Myntra', 'TSHIRT-BLK-M', 40,'BLR-WH1','2024-03-01'),\n ('Myntra', 'JEANS-32',     12,'BLR-WH1','2024-03-01'),\n ('Nykaa',  'LIPSTICK-RED',100,'MUM-WH2','2024-03-01'),\n ('Blinkit','KAJAL-01',     30,'DEL-DS4','2024-03-03');\n\nINSERT INTO inventory_staging VALUES\n ('Myntra', 'TSHIRT-BLK-M', 35,NULL,     '2024-03-02'),\n ('Myntra', 'JEANS-32',      0,'BLR-WH2','2024-03-02'),\n ('Nykaa',  'SERUM-30ML',   25,'MUM-WH2','2024-03-02'),\n ('Blinkit','KAJAL-01',     99,NULL,     '2024-03-02'),\n ('Zepto',  'KAJAL-01',     15,NULL,     '2024-03-02');",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "channel",
+        "sku",
+        "available_qty",
+        "warehouse",
+        "updated_on"
+      ],
+      "rows": [
+        [
+          "Blinkit",
+          "KAJAL-01",
+          30,
+          "DEL-DS4",
+          "2024-03-03"
+        ],
+        [
+          "Myntra",
+          "JEANS-32",
+          0,
+          "BLR-WH2",
+          "2024-03-02"
+        ],
+        [
+          "Myntra",
+          "TSHIRT-BLK-M",
+          35,
+          "BLR-WH1",
+          "2024-03-02"
+        ],
+        [
+          "Nykaa",
+          "LIPSTICK-RED",
+          100,
+          "MUM-WH2",
+          "2024-03-01"
+        ],
+        [
+          "Nykaa",
+          "SERUM-30ML",
+          25,
+          "MUM-WH2",
+          "2024-03-02"
+        ],
+        [
+          "Zepto",
+          "KAJAL-01",
+          15,
+          null,
+          "2024-03-02"
+        ]
+      ]
+    },
+    "check_sql": "SELECT channel, sku, available_qty, warehouse, updated_on FROM inventory ORDER BY channel, sku"
+  }
+}

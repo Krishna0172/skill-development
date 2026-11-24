@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit" if e else "New" }} exercise{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>{{ "Edit exercise" if e else "New exercise" }}</h1>
+  <p>Python tests: a function name plus cases. On save, your solution is run against the tests so you know they are solvable.</p></div>
+  <div class="actions"><a class="btn" href="{{ '/practice/' ~ e.id if e else '/practice' }}">Cancel</a></div></div>
+{% if error %}<div class="q incorrect"><div class="qhead"><span class="bad">{{ error }}</span></div></div>{% endif %}
+<form method="post" action="/practice/save" class="card" style="max-width:900px"><div class="body form-grid">
+  {% if e %}<input type="hidden" name="id" value="{{ e.id }}">{% endif %}
+  <label class="field">Title<input name="title" required maxlength="200" value="{{ f.get('title', '') }}"></label>
+  <div class="grid g3">
+    <label class="field">Category<select name="category">{% for k, v in categories.items() %}<option value="{{ k }}" {{ 'selected' if f.get('category') == k }}>{{ v }}</option>{% endfor %}</select></label>
+    <label class="field">Language{% if e %}<input value="{{ e.language }}" disabled><input type="hidden" name="language" value="{{ e.language }}">{% else %}<select name="language">{% for l in ["python", "sql", "text"] %}<option value="{{ l }}" {{ 'selected' if f.get('language') == l }}>{{ l }}</option>{% endfor %}</select>{% endif %}</label>
+    <label class="field">Difficulty<select name="difficulty">{% for d in ["easy", "medium", "hard"] %}<option value="{{ d }}" {{ 'selected' if (f.get('difficulty') or 'medium') == d }}>{{ d }}</option>{% endfor %}</select></label>
+  </div>
+  <label class="field">Skill <span class="hint">optional</span><select name="skill_id"><option value="">—</option>{% for sid, name in skills %}<option value="{{ sid }}" {{ 'selected' if e and e.skill_id == sid }}>{{ name }}</option>{% endfor %}</select></label>
+  <label class="field">Problem <span class="hint">markdown</span><textarea name="problem_md" rows="8" required>{{ f.get('problem_md', '') }}</textarea></label>
+  <label class="field">Starter code<textarea class="code" name="starter_code" rows="6" spellcheck="false">{{ f.get('starter_code', '') }}</textarea></label>
+  <label class="field">Solution code<textarea class="code" name="solution_code" rows="8" spellcheck="false">{{ f.get('solution_code', '') }}</textarea></label>
+  <label class="field">Solution explanation <span class="hint">markdown, optional</span><textarea name="solution_md" rows="3">{{ f.get('solution_md', '') }}</textarea></label>
+  <label class="field">Hints <span class="hint">one per line</span><textarea name="hints" rows="3">{{ f.get('hints', '') }}</textarea></label>
+  <label class="field">Tests <span class="hint">JSON — leave empty for a self-assessed exercise</span><textarea class="code" name="tests" rows="8" spellcheck="false" placeholder="{{ tests_hint['python'] }}">{{ f.get('tests', '') }}</textarea></label>
+  <details class="fold"><summary>SQL tests example</summary><pre class="block">{{ tests_hint["sql"] }}</pre></details>
+  <div class="row"><button class="btn primary">Save exercise</button></div>
+</div></form>
+{% endblock %}

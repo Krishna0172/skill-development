@@ -1,0 +1,190 @@
+{
+  "slug": "be-observability-basics",
+  "title": "Observability: logs, metrics, traces, health checks",
+  "skill": "backend-architecture",
+  "extra_skills": [
+    "python-exceptions-logging"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "observability",
+    "logging",
+    "metrics",
+    "tracing",
+    "health-checks",
+    "opentelemetry"
+  ],
+  "summary": "Observability lets you understand what a running system is doing from the outside. The three pillars are structured logs, metrics and distributed traces, complemented by health checks. This topic shows what each answers and how to implement the basics in Python.",
+  "why_md": "- In production you cannot attach a debugger; telemetry is how you find out why something is slow or failing.\n- Good observability cuts incident time from hours to minutes.\n- Orchestrators (ECS, Kubernetes) rely on health checks to restart or route traffic.\n- 'How would you debug a slow request across three services?' is a standard senior interview question.",
+  "details_md": "### Monitoring vs observability\nMonitoring tells you *that* something is wrong (alerts on known failure modes). Observability lets you ask new questions about *why*, using rich data you collected beforehand.\n\n### Pillar 1: structured logs\nA log is a timestamped event. **Structured** logging writes each event as JSON with fields (`level`, `message`, `order_id`, `request_id`, `duration_ms`) instead of free text, so a log platform can filter and aggregate: `level=ERROR AND tenant=acme`. Key practices:\n- Use the `logging` module with levels (DEBUG, INFO, WARNING, ERROR) and a handler writing to stdout (containers collect stdout).\n- Add a **correlation / request id** to every line of a request (via `contextvars`) so you can follow one request across log lines and services.\n- Log events, not noise; never log secrets or full personal data.\n- Use `logger.exception(...)` to include the traceback.\n\n### Pillar 2: metrics\nMetrics are numeric time series, cheap to store and perfect for alerting and dashboards. Types (Prometheus naming):\n- **Counter**: only goes up (requests_total, errors_total). Use `rate()` to see per-second.\n- **Gauge**: goes up and down (queue_depth, in_flight_requests).\n- **Histogram**: distribution in buckets (request_duration_seconds) enabling percentiles p50/p95/p99.\nCommon frameworks: **RED** for services (Rate, Errors, Duration) and **USE** for resources (Utilization, Saturation, Errors); the four golden signals are latency, traffic, errors, saturation. Beware **high-cardinality labels** (user_id, full URL): every unique label combination is a separate series and can blow up storage. Label by route template (`/orders/{id}`), method and status class.\n\n### Pillar 3: distributed tracing\nA **trace** follows one request across services. It is a tree of **spans** (a timed operation with attributes) linked by a trace id propagated in headers (W3C `traceparent`). It answers 'where did the 2 seconds go?': gateway 20 ms, API 50 ms, Postgres query 1.8 s. **OpenTelemetry** (OTel) is the vendor-neutral standard: SDKs create spans, auto-instrumentation covers FastAPI, requests/httpx and psycopg2, and an exporter/collector sends data to Jaeger, Tempo, Datadog etc. High-traffic systems use **sampling** (keep a fraction, keep all errors).\n\n### Health checks\n- **Liveness**: 'is the process stuck?' Fail -> restart. Keep it trivial (no dependency calls).\n- **Readiness**: 'can I serve traffic now?' Check critical dependencies (database reachable, migrations applied). Fail -> remove from load balancer, do not restart.\n- **Startup**: for slow boot.\nExpose as `GET /health/live` and `GET /health/ready`, return 200/503 quickly with a short timeout on dependency checks.\n\n### Alerting\nAlert on symptoms users feel (error rate, p95 latency, queue lag) tied to SLOs, not on every CPU spike. Each alert should be actionable and link to a runbook.\n\n### How they connect\nMetrics tell you *something* is off, traces *locate* the slow service/span, logs (found by trace id) explain *what happened*. Put the trace id in log lines to join them.",
+  "code_md": "```python\n# 1) Structured JSON logging with a request id (stdlib only)\nimport json, logging, sys, contextvars\n\nrequest_id = contextvars.ContextVar(\"request_id\", default=\"-\")\n\nclass JsonFormatter(logging.Formatter):\n    def format(self, record):\n        payload = {\"level\": record.levelname, \"msg\": record.getMessage(),\n                   \"logger\": record.name, \"request_id\": request_id.get()}\n        payload.update(getattr(record, \"ctx\", {}))      # extra fields\n        if record.exc_info:\n            payload[\"exc\"] = self.formatException(record.exc_info)\n        return json.dumps(payload)\n\nhandler = logging.StreamHandler(sys.stdout)\nhandler.setFormatter(JsonFormatter())\nlog = logging.getLogger(\"orders\")\nlog.addHandler(handler); log.setLevel(logging.INFO)\n\nrequest_id.set(\"req-42\")\nlog.info(\"order created\", extra={\"ctx\": {\"order_id\": 7, \"duration_ms\": 31}})\n```\n\n```python\n# 2) Metrics with prometheus_client + a FastAPI middleware sketch\nimport time\nfrom fastapi import FastAPI, Request\nfrom prometheus_client import Counter, Histogram, make_asgi_app\n\nREQS = Counter(\"http_requests_total\", \"Requests\", [\"method\", \"route\", \"status\"])\nLAT = Histogram(\"http_request_duration_seconds\", \"Latency\", [\"route\"])\n\napp = FastAPI()\napp.mount(\"/metrics\", make_asgi_app())          # scraped by Prometheus\n\n@app.middleware(\"http\")\nasync def metrics_mw(request: Request, call_next):\n    start = time.perf_counter()\n    response = await call_next(request)\n    route = request.scope.get(\"route\").path if request.scope.get(\"route\") else \"unmatched\"\n    REQS.labels(request.method, route, response.status_code).inc()   # route template, low cardinality\n    LAT.labels(route).observe(time.perf_counter() - start)\n    return response\n\n@app.get(\"/health/live\")\ndef live(): return {\"status\": \"ok\"}\n```\n\n```python\n# 3) A manual OpenTelemetry span (opentelemetry-api / sdk)\nfrom opentelemetry import trace\ntracer = trace.get_tracer(\"orders\")\n\ndef charge(order_id: int):\n    with tracer.start_as_current_span(\"charge_card\") as span:\n        span.set_attribute(\"order.id\", order_id)\n        ...  # call the payment provider; exceptions are recorded on the span\n```",
+  "use_cases_md": "- Finding which downstream call causes a checkout p99 spike using a trace.\n- Alerting when the 5xx rate of an inventory-sync service exceeds 2% for 5 minutes.\n- Searching JSON logs by `order_id` or `request_id` to reconstruct what happened to one order.\n- A readiness probe that keeps a container out of rotation until the database connection works.\n- Tracking queue depth and job age for background workers.",
+  "mistakes_md": "- **`print()` instead of logging**: no levels, no structure, no timestamps.\n- **Unstructured, multi-line logs** that cannot be queried or that split in log collectors.\n- **High-cardinality metric labels** (user ids, raw URLs): memory and cost explosion.\n- **Liveness probes that check the database**: a DB blip restarts every instance (cascading failure).\n- **Logging secrets/PII** such as tokens, card numbers.\n- **Alerts on causes, not symptoms**, causing alert fatigue.\n- **No correlation id**, making cross-service debugging guesswork.\n- **Swallowing exceptions** (`except: pass`) so nothing is ever logged.",
+  "best_practices_md": "- JSON logs to stdout with level, message, request/trace id and business ids.\n- Propagate a correlation id (contextvars + headers); include trace id in logs.\n- Follow RED for services and USE for resources; use histograms for latency.\n- Label metrics by route template, method, status class.\n- Separate liveness (cheap) from readiness (dependencies).\n- Instrument with OpenTelemetry; sample traces but keep errors.\n- Define SLOs and alert on burn rate / user-visible symptoms; link runbooks.",
+  "my_context_md": "The learner's code base facts show a gap to practise on: print() is used about 11 times more than logging and 432 `except: pass` blocks exist across his work repo. Pick one service (for example `ForcesightJobSchedulerAndRunner/src/runner.py`) and replace prints with structured logging that includes job id and duration, log exceptions with `logger.exception`, and add a `/health/ready`-style check that verifies the database pool in `db_transaction()` style code can obtain a connection.",
+  "revision_notes_md": "- Monitoring = known failures; observability = ask new questions.\n- Three pillars: logs (events), metrics (numbers over time), traces (request path across services).\n- Structured JSON logs + correlation id via contextvars; `logger.exception` keeps tracebacks.\n- Metric types: counter, gauge, histogram; RED (rate, errors, duration) and USE.\n- Avoid high-cardinality labels.\n- Trace = tree of spans with propagated trace id (`traceparent`); OpenTelemetry is the standard.\n- Liveness = restart if stuck (cheap); readiness = can serve traffic (checks deps).\n- Alert on symptoms/SLOs; join logs and traces by trace id.",
+  "exercises_md": "1. Add a JSON formatter and request-id contextvar to a small FastAPI app; verify that two concurrent requests keep separate ids.\n2. Expose `/metrics` with a request counter and latency histogram labelled by route template; load it with 100 requests and read the output.\n3. Create `/health/live` and `/health/ready` where ready checks a database connection with a 1-second timeout.\n4. Instrument two nested functions with OpenTelemetry spans and print them with the console exporter.",
+  "related": [
+    "py-logging",
+    "be-fastapi-middleware",
+    "ai-evaluation-observability",
+    "ai-monitoring",
+    "be-request-lifecycle",
+    "python-exceptions"
+  ],
+  "flashcards": [
+    {
+      "front": "Three pillars of observability?",
+      "back": "Logs, metrics, traces."
+    },
+    {
+      "front": "Counter vs gauge vs histogram?",
+      "back": "Counter only increases; gauge goes up/down; histogram records distributions (percentiles)."
+    },
+    {
+      "front": "Liveness vs readiness?",
+      "back": "Liveness: restart if the process is stuck. Readiness: remove from traffic if it cannot serve (dependencies down)."
+    },
+    {
+      "front": "Why avoid user_id as a metric label?",
+      "back": "High cardinality creates one time series per user and explodes storage."
+    },
+    {
+      "front": "What links logs to traces?",
+      "back": "A shared trace/correlation id written into log lines."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which signal best answers 'where did this single request spend its time across services?'",
+      "options": [
+        "Counter",
+        "Distributed trace",
+        "Gauge",
+        "Liveness probe"
+      ],
+      "answer_index": 1,
+      "explanation": "Traces show spans per service."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which metric type suits request latency percentiles?",
+      "options": [
+        "Counter",
+        "Gauge",
+        "Histogram",
+        "Label"
+      ],
+      "answer_index": 2,
+      "explanation": "Histograms bucket observations."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why should a liveness probe not call the database?",
+      "options": [
+        "It is slower to write",
+        "A DB outage would restart every instance",
+        "It breaks metrics",
+        "Probes cannot use HTTP"
+      ],
+      "answer_index": 1,
+      "explanation": "Dependency failure should affect readiness, not trigger restarts."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which label is the safest for an HTTP metric?",
+      "options": [
+        "user_id",
+        "full URL with ids",
+        "route template like /orders/{id}",
+        "request body"
+      ],
+      "answer_index": 2,
+      "explanation": "Low-cardinality route template."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A header such as W3C ____ propagates the trace id between services.",
+      "answers": [
+        "traceparent"
+      ],
+      "explanation": "traceparent."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A metric that only ever increases, such as requests_total, is a ____.",
+      "answers": [
+        "counter"
+      ],
+      "explanation": "Counter."
+    },
+    {
+      "type": "output",
+      "prompt": "What single line does the logger write?",
+      "code": "import json, logging, sys\nclass F(logging.Formatter):\n    def format(self, r):\n        return json.dumps({'level': r.levelname, 'msg': r.getMessage(), **getattr(r, 'ctx', {})}, sort_keys=True)\nh = logging.StreamHandler(sys.stdout)\nh.setFormatter(F())\nlog = logging.getLogger('app')\nlog.addHandler(h)\nlog.setLevel(logging.INFO)\nlog.debug('hidden')\nlog.info('paid %s', 42, extra={'ctx': {'order_id': 7}})",
+      "answers": [
+        "{\"level\": \"INFO\", \"msg\": \"paid 42\", \"order_id\": 7}"
+      ],
+      "explanation": "DEBUG is below INFO and suppressed; one JSON line is printed."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import contextvars\nrid = contextvars.ContextVar('rid', default='-')\ndef work():\n    return rid.get()\nprint(work())\nrid.set('req-1')\nctx = contextvars.copy_context()\nrid.set('req-2')\nprint(work(), ctx.run(work))",
+      "answers": [
+        "-\nreq-2 req-1"
+      ],
+      "explanation": "copy_context snapshots the value at copy time."
+    },
+    {
+      "type": "debug",
+      "prompt": "Every pod restarts during a short database outage and the outage lasts longer. Why?",
+      "code": "livenessProbe:\n  httpGet:\n    path: /health   # handler runs SELECT 1 on the database\n    port: 8000",
+      "answer": "The liveness probe depends on the database, so a DB outage makes all pods look dead and Kubernetes restarts them, making recovery worse. Use a trivial liveness endpoint and put the DB check in a readiness probe so pods just leave the load balancer.",
+      "rubric": [
+        "Liveness checks external dependency",
+        "Restart storm/cascading failure",
+        "Move dependency check to readiness"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how logs, metrics and traces work together during an incident.",
+      "answer": "An alert on a metric (error rate or p95 latency) shows something is wrong. A trace for a slow request shows which service or span is slow. The trace id lets you open the exact logs of that request to see the error and context. Metrics detect, traces locate, logs explain.",
+      "rubric": [
+        "Metrics detect",
+        "Traces locate",
+        "Logs explain, joined by trace id"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is metric cardinality and why does it matter?",
+      "answer": "Cardinality is the number of distinct label combinations, each creating a separate time series. Labels such as user_id or raw URLs create millions of series, consuming memory and money and slowing queries. Use bounded labels like route template, method and status class, and put unbounded details in logs or traces.",
+      "rubric": [
+        "One series per label combination",
+        "Unbounded labels explode cost",
+        "Use route templates/log the detail"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What are the three pillars of observability and what does each answer?",
+      "difficulty": "easy",
+      "answer_md": "Logs are discrete events and answer 'what happened and with what context'. Metrics are aggregated numbers over time and answer 'is something wrong and how bad'. Traces follow a request through services and answer 'where is the time or error'. Together with correlation ids they let you go from alert to root cause."
+    },
+    {
+      "question": "Design health checks for an API with Postgres and a queue.",
+      "difficulty": "medium",
+      "answer_md": "Expose `/health/live` that returns 200 if the event loop responds, with no dependency calls, used for liveness. Expose `/health/ready` that checks a connection from the pool with `SELECT 1` and the queue connection, each with short timeouts, returning 503 if any critical dependency fails; used for readiness so the load balancer stops routing but the pod is not killed. Add a startup probe for slow migrations."
+    },
+    {
+      "question": "How would you trace a request across three services?",
+      "difficulty": "hard",
+      "answer_md": "Adopt OpenTelemetry: auto-instrument the web framework and HTTP/DB clients, and propagate the W3C `traceparent` header on outgoing calls so each service continues the same trace id. Export spans through a collector to a backend such as Jaeger or Tempo, sample (keep errors and slow traces), and inject the trace id into logs so a slow span links to its log lines."
+    }
+  ]
+}

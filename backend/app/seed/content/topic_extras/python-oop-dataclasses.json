@@ -1,0 +1,54 @@
+{
+  "slug": "python-oop-dataclasses",
+  "why_md": "Most backend services are bags of functions sharing state through globals; classes and dataclasses give that state a name, a type and a lifecycle. Dataclasses (and later Pydantic models) are how configs, DTOs and job records are expressed in modern Python, and interviewers routinely ask about composition vs inheritance, `__eq__`/`__hash__`, MRO and `frozen`/`slots`.",
+  "revision_notes_md": "- `@dataclass` generates `__init__`, `__repr__`, `__eq__` from annotated fields.\n- Mutable defaults need `field(default_factory=list)`; `= []` raises ValueError.\n- `frozen=True` -> immutable and hashable (usable as dict key / set member).\n- `slots=True` (3.10+) -> less memory, no accidental attributes.\n- `__post_init__` for validation/derived fields.\n- Prefer composition (inject a writer/client) over deep inheritance.\n- `super()` follows the MRO (C3 linearization), not just the direct parent.\n- `@classmethod` for alternative constructors (`from_env`, `from_row`), `@property` for computed attributes.",
+  "exercises_md": "1. Model a marketplace upload job as a `@dataclass(slots=True)` with `org_id`, `report_type`, `status` and `errors: list[str]`; add `__post_init__` validation of `status`.\n2. Write a `ReportProcessor` class that receives a writer object in `__init__`, then test it with a fake writer that records rows in a list.",
+  "my_context_md": "`ECSInventoryPriceTracking/app/fetchers/spapi.py` already uses a `@dataclass` for its config - a good template to extend with `frozen=True` and a `from_env()` classmethod. `DebitNotes` defines custom exception classes, which is class inheritance used well; the 342 `global` statements found in the repo are the main candidates to turn into object state.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "A dataclass field defaulting to an empty list must use field(____=list).",
+      "answers": [
+        "default_factory"
+      ],
+      "explanation": "default_factory is called per instance."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Passing ____=True to @dataclass makes instances immutable and hashable.",
+      "answers": [
+        "frozen"
+      ],
+      "explanation": "frozen dataclasses get a generated __hash__."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from dataclasses import dataclass, field\n\n@dataclass(frozen=True)\nclass Key:\n    org: int\n    sku: str\n\n@dataclass\nclass Job:\n    key: Key\n    errors: list = field(default_factory=list)\n\na, b = Job(Key(1, \"X\")), Job(Key(1, \"X\"))\na.errors.append(\"bad row\")\nprint(a.key == b.key, a == b)\nprint(len({a.key, b.key}))",
+      "answers": [
+        "True False\n1"
+      ],
+      "explanation": "Keys compare equal and hash equal (frozen) so the set has 1 item; the Jobs differ because errors differ."
+    },
+    {
+      "type": "debug",
+      "prompt": "Why does this crash at class definition, and how do you fix it?",
+      "code": "from dataclasses import dataclass\n\n@dataclass\nclass Batch:\n    rows: list = []\n    size: int = 0",
+      "answer": "Dataclasses refuse mutable defaults (`ValueError: mutable default <class 'list'> for field rows is not allowed`) because a single list would be shared by every instance.\n\n```python\nfrom dataclasses import dataclass, field\n\n@dataclass\nclass Batch:\n    rows: list = field(default_factory=list)\n    size: int = 0\n```",
+      "rubric": [
+        "Mutable default would be shared across instances",
+        "Use field(default_factory=list)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain composition vs inheritance using a report processor that writes to PostgreSQL.",
+      "answer": "Inheritance ('is-a') would make `AmazonProcessor(DbWriter)` - the processor is now coupled to a concrete database class and every test needs a database. Composition ('has-a') passes the writer in: `AmazonProcessor(writer)`. The processor only depends on the writer's interface (`write(rows)`), so tests inject a fake, and you can swap the writer (batching, dry-run) without touching processors. Use inheritance for genuine subtype relations with shared behaviour (e.g. an exception hierarchy); default to composition otherwise.",
+      "rubric": [
+        "Inheritance couples subclass to parent implementation",
+        "Composition injects collaborators -> easy to fake in tests",
+        "Inheritance still fits true is-a hierarchies like exceptions"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "slug": "ai-structured-outputs",
+  "title": "Structured outputs: JSON, schemas and validation",
+  "skill": "prompt-engineering",
+  "extra_skills": [
+    "pydantic",
+    "llm-applications"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "json-mode",
+    "json-schema",
+    "pydantic",
+    "validation",
+    "repair-loop"
+  ],
+  "summary": "Backends need data, not prose. Ask the model for JSON that matches a schema - using the provider's JSON or schema-constrained mode when available - then parse and validate it with Pydantic, and on failure retry with the validation error fed back. Never trust model JSON without validation.",
+  "why_md": "- Free text forces brittle regex parsing; one extra sentence breaks your pipeline.\n- Structured output turns an LLM into a typed function: `review -> ReviewInsights`.\n- Pydantic validation is the boundary between untrusted model output and your database.\n- Common interview topic: 'how do you get reliable JSON from an LLM?'",
+  "details_md": "### Why free text is fragile\n'Here is the SQL you asked for:' followed by a markdown fence, a trailing explanation, or a renamed field - each breaks a parser. Even when prompted 'JSON only', models sometimes wrap output in code fences, use single quotes, add comments or truncate at `max_tokens`.\n\n### Levels of enforcement\n1. **Prompt-only**: describe the JSON shape and give an example. Cheapest, least reliable.\n2. **JSON mode** (`response_format={\"type\": \"json_object\"}` on OpenAI-compatible APIs): guarantees syntactically valid JSON, not your fields. You usually must still mention JSON in the prompt.\n3. **Schema-constrained output** (`response_format={\"type\": \"json_schema\", ...}` with a JSON Schema, or the provider's equivalent): decoding is constrained so output matches the schema. Support and the subset of JSON Schema allowed vary by provider and by local runtime (Ollama accepts a schema via its `format` option) - check docs.\n4. **Tool/function calling** with a schema is another way to get structured arguments.\n\nEven with constraints, **validate**: constrained decoding guarantees shape, not truth (a valid `order_id` that doesn't exist, a negative quantity if you didn't constrain it, truncated output when the token limit hits).\n\n### Pydantic as the contract\nDefine a Pydantic v2 model, generate the JSON Schema from it with `Model.model_json_schema()`, send it to the provider, and parse the reply with `Model.model_validate_json(text)`. Use `Literal`/`Enum` for categories, `Field(ge=0)` for ranges, `max_length` for lists, and validators for cross-field rules. One class is the single source of truth for prompt, API schema and validation.\n\n### Repair / retry loop\nOn `ValidationError` (or `json.JSONDecodeError`): append the bad output and the error text to the conversation and ask the model to return corrected JSON; cap at 1-2 retries, then fail loudly or route to a fallback. Strip code fences before parsing as a cheap pre-repair. Log every failure - frequent repairs signal a prompt or schema problem.\n\n### Design tips\nKeep schemas flat and small; prefer enums over free strings; include a nullable field or an `unknown` enum value so the model isn't forced to invent; put a short `reasoning` field *before* the answer only if you need it, since field order affects generation.\n",
+  "code_md": "```python\n# Pydantic v2 model -> JSON schema -> constrained call -> validation\nfrom typing import Literal\nfrom pydantic import BaseModel, Field, ValidationError\n\nclass ReviewInsight(BaseModel):\n    sentiment: Literal[\"positive\", \"neutral\", \"negative\"]\n    topics: list[Literal[\"delivery\", \"quality\", \"price\", \"packaging\", \"other\"]] = Field(max_length=5)\n    rating_guess: int = Field(ge=1, le=5)\n    refund_requested: bool\n\nschema = ReviewInsight.model_json_schema()\nresp = client.chat.completions.create(\n    model=MODEL, temperature=0,\n    messages=[{\"role\": \"system\", \"content\": \"Extract insights from the review as JSON.\"},\n              {\"role\": \"user\", \"content\": f\"<review>{review_text}</review>\"}],\n    # schema-constrained mode where supported; otherwise {\"type\": \"json_object\"}\n    response_format={\"type\": \"json_schema\",\n                     \"json_schema\": {\"name\": \"review_insight\", \"schema\": schema}},\n)\ninsight = ReviewInsight.model_validate_json(resp.choices[0].message.content)\n```\n\n```python\n# Repair loop: feed the validation error back, bounded attempts\nimport json, re\n\ndef strip_fences(text: str) -> str:\n    m = re.search(r\"```(?:json)?\\s*(.*?)```\", text, re.S)\n    return m.group(1) if m else text\n\ndef extract(messages, model_cls, max_attempts=3):\n    for attempt in range(max_attempts):\n        raw = complete(messages)                      # your client wrapper\n        try:\n            return model_cls.model_validate_json(strip_fences(raw).strip())\n        except ValidationError as e:\n            messages = messages + [\n                {\"role\": \"assistant\", \"content\": raw},\n                {\"role\": \"user\", \"content\": f\"Invalid JSON for the schema:\\n{e}\\nReturn corrected JSON only.\"},\n            ]\n    raise RuntimeError(\"model could not produce valid output\")  # log + alert, don't swallow\n```",
+  "use_cases_md": "- Extracting sentiment/topics/refund intent from Amazon reviews into typed columns.\n- Mapping messy marketplace report headers to canonical column names (enum-constrained).\n- Text-to-SQL returning `{\"sql\": ..., \"tables_used\": [...], \"confidence\": ...}` instead of bare text.\n- Parsing invoices/debit-note emails into a typed record before an upsert.",
+  "mistakes_md": "- **Regex-parsing prose** - breaks on any wording change.\n- **Trusting JSON mode = correct fields** - it only guarantees valid JSON syntax.\n- **No validation before INSERT** - bad types or invented enum values reach the DB.\n- **Unbounded repair retries** - cost explosion on a systematically bad prompt.\n- **Forcing a value with no 'unknown' option** - the model fabricates.\n- **`except Exception: pass` around parsing** - silently drops rows.",
+  "best_practices_md": "- One Pydantic model as source of truth for schema and validation.\n- Use the strongest enforcement the provider supports; still validate.\n- Enums, ranges and length limits in the schema.\n- Allow null/unknown; temperature low.\n- Bounded repair loop with the error message fed back; log failures.\n- Check `finish_reason` - truncated JSON is invalid JSON.",
+  "my_context_md": "Pydantic isn't used anywhere in your repo, and 88% of except blocks are broad with 432 `except: pass`. Structured LLM output is where that habit would hurt most: a swallowed `ValidationError` means silently missing data. `GetLlmData` stores model-generated SQL as text; returning a validated object (`sql`, `tables_used`, `needs_clarification`) would make that storage and downstream checks typed.",
+  "revision_notes_md": "- Free text is fragile; ask for JSON.\n- JSON mode = valid syntax only; schema mode = matches schema (provider-dependent).\n- Validate with Pydantic: model_json_schema() + model_validate_json().\n- Literal/Enum, Field(ge/le/max_length) constrain values.\n- Repair loop: send back output + error, cap 1-2 retries.\n- Strip code fences; check finish_reason for truncation.\n- Provide null/unknown options to avoid fabrication.",
+  "exercises_md": "1. Define a `ReviewInsight` Pydantic model and extract it from 20 real-looking reviews using a local Ollama model; count validation failures.\n2. Implement the repair loop and log attempts to a table; measure how often a second attempt is needed.\n3. Change text-to-SQL output from bare SQL to a validated JSON object with `sql` and `tables_used`, and reject tables not in an allow-list.\n4. Write pytest cases for `strip_fences` and the validator with malformed inputs.",
+  "related": [
+    "be-pydantic-validation",
+    "ai-prompt-engineering",
+    "ai-function-calling",
+    "ai-llm-apis",
+    "ai-guardrails"
+  ],
+  "flashcards": [
+    {
+      "front": "What does JSON mode guarantee?",
+      "back": "Syntactically valid JSON - not that the required fields, types or values are present."
+    },
+    {
+      "front": "Pydantic v2 method to parse and validate a JSON string?",
+      "back": "Model.model_validate_json(text)."
+    },
+    {
+      "front": "How do you get a JSON Schema from a Pydantic model?",
+      "back": "Model.model_json_schema()."
+    },
+    {
+      "front": "What is a repair loop?",
+      "back": "On validation failure, send the bad output plus the error back to the model asking for corrected JSON, with a small retry cap."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You enabled JSON mode (json_object). Which can still go wrong?",
+      "options": [
+        "The response is not parseable JSON",
+        "Required fields are missing or have the wrong type",
+        "The response contains markdown prose outside JSON",
+        "The API returns XML"
+      ],
+      "answer_index": 1,
+      "explanation": "JSON mode guarantees syntax, not your schema. Validate fields and types."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Best way to stop a classifier inventing a category when the review fits none?",
+      "options": [
+        "Raise temperature",
+        "Remove the enum so any string is allowed",
+        "Add an 'other'/'unknown' enum value and allow it in the schema",
+        "Increase max_tokens"
+      ],
+      "answer_index": 2,
+      "explanation": "Giving an explicit escape value avoids forced fabrication while staying enum-constrained."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In Pydantic v2, `ReviewInsight.____(text)` parses a JSON string and validates it in one step.",
+      "answers": [
+        "model_validate_json"
+      ],
+      "explanation": "model_validate_json parses and validates."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "If finish_reason is 'length', JSON output is likely ____ and will fail to parse.",
+      "answers": [
+        "truncated",
+        "cut off",
+        "incomplete"
+      ],
+      "explanation": "The token limit stopped generation mid-object."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (stdlib validation of model output)",
+      "code": "import json\n\nraw_outputs = [\n    '{\"sku\": \"A1\", \"qty\": 2}',\n    '```json\\n{\"sku\": \"B2\", \"qty\": \"3\"}\\n```',\n    \"{'sku': 'C3', 'qty': 1}\",\n    '{\"sku\": \"D4\"}',\n]\n\ndef parse(raw):\n    text = raw.strip().removeprefix(\"```json\").removesuffix(\"```\").strip()\n    try:\n        data = json.loads(text)\n    except json.JSONDecodeError:\n        return \"bad json\"\n    if not isinstance(data.get(\"qty\"), int):\n        return \"bad qty\"\n    return f\"{data['sku']} x{data['qty']}\"\n\nfor r in raw_outputs:\n    print(parse(r))",
+      "answers": [
+        "A1 x2\nbad qty\nbad json\nbad qty"
+      ],
+      "explanation": "1: valid. 2: fences stripped, but qty is the string '3' -> bad qty (no coercion here). 3: single quotes are not valid JSON. 4: qty missing -> data.get returns None -> bad qty."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong with this extraction code and how do you fix it?",
+      "code": "def extract_refund(review):\n    out = complete([{\"role\": \"user\", \"content\": \"Does this review ask for a refund? \" + review}])\n    try:\n        data = json.loads(out)\n        cur.execute(\"INSERT INTO review_flags (review_id, refund) VALUES (%s, %s)\",\n                    (review.id, data[\"refund\"]))\n    except:\n        pass",
+      "answer": "- Prompt doesn't specify a JSON shape, so output is often prose -> json.loads fails.\n- No schema validation; `data['refund']` could be 'yes', missing, etc.\n- Bare `except: pass` silently drops failures.\n- Review text not delimited.\n\n```python\nclass RefundFlag(BaseModel):\n    refund_requested: bool\n\nmsgs = [{\"role\": \"system\", \"content\": \"Return JSON {\\\"refund_requested\\\": true|false}.\"},\n        {\"role\": \"user\", \"content\": f\"<review>{review.text}</review>\"}]\ntry:\n    flag = extract(msgs, RefundFlag)            # schema mode + repair loop\nexcept RuntimeError:\n    log.exception(\"refund extraction failed\", extra={\"review_id\": review.id})\n    raise\ncur.execute(\"INSERT INTO review_flags (review_id, refund) VALUES (%s, %s)\",\n            (review.id, flag.refund_requested))\n```",
+      "rubric": [
+        "Specify the JSON shape / use JSON or schema mode",
+        "Validate with a Pydantic model",
+        "Replace bare except: pass with logging and explicit failure handling",
+        "Delimit the review text"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between JSON mode, schema-constrained output and validation, and why you still need validation.",
+      "answer": "JSON mode makes the model emit syntactically valid JSON. Schema-constrained output restricts decoding so the JSON matches a supplied JSON Schema (required keys, types, enums), where the provider/runtime supports it. Validation (Pydantic) checks the parsed object in your code. You still validate because: not every provider supports every schema feature; output can be truncated; constraints don't cover business rules (the SKU exists, dates in order); and you may switch to a model without constrained decoding. Validation is the trust boundary before data reaches the DB.",
+      "rubric": [
+        "JSON mode = syntax only",
+        "Schema mode = shape matches schema (provider-dependent)",
+        "Validation still needed for truncation, business rules, portability"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you design a retry strategy for invalid structured output?",
+      "answer": "Strip obvious wrappers (code fences) first. On parse/validation error, resend with the previous output and the exact error message and ask for corrected JSON only. Cap at 1-2 retries; then raise and record the failure (input, output, error) for analysis rather than inserting partial data. Track repair rate per prompt version; a rising rate means fix the prompt/schema, not add retries.",
+      "rubric": [
+        "Feed the validation error back to the model",
+        "Bounded retries then explicit failure",
+        "Log/measure failure rate per prompt version"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you get reliable structured data out of an LLM in production?",
+      "difficulty": "medium",
+      "answer_md": "Layered approach:\n1. **Schema first**: a Pydantic model with enums, ranges and an explicit unknown/null option; generate JSON Schema with `model_json_schema()`.\n2. **Strongest enforcement available**: schema-constrained output (or tool calling with that schema); fall back to JSON mode plus an example in the prompt.\n3. **Low temperature** and a clear system prompt; check `finish_reason` for truncation.\n4. **Validate** with `model_validate_json`; add business checks (does the order id exist for this org?).\n5. **Repair loop**: feed back the error, max 1-2 retries, then fail explicitly.\n6. **Monitor** parse/validation failure rate per prompt version.\n\nExample: extracting `{sentiment, topics, refund_requested}` from reviews; the validated object is then upserted with normal parameterised SQL."
+    },
+    {
+      "question": "Why not just ask the model to 'reply in JSON' and call json.loads?",
+      "difficulty": "easy",
+      "answer_md": "Because models drift from instructions: they wrap JSON in markdown fences, prepend 'Sure, here it is', use single quotes, omit keys, rename fields or truncate at the token limit. `json.loads` then raises, or worse, succeeds with the wrong shape and you `KeyError` later or insert bad values. Prompt-only JSON can be acceptable for prototypes, but production needs provider enforcement (JSON/schema mode) plus schema validation and a defined failure path."
+    }
+  ],
+  "category": "AI"
+}

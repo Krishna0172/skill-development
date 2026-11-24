@@ -1,0 +1,134 @@
+{
+  "slug": "chunk-list-into-batches",
+  "title": "Split records into fixed-size batches",
+  "category": "python",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "python",
+  "concepts": [
+    "slicing",
+    "range step",
+    "input validation"
+  ],
+  "related_topics": [
+    "python-generators-iterators",
+    "python-exceptions"
+  ],
+  "problem_md": "A third-party API accepts at most `size` records per request, so you need to split a list of records into batches before sending.\n\nImplement:\n\n```python\ndef chunk_list(items: list, size: int) -> list[list]:\n```\n\nRules:\n- Return consecutive batches of length `size`; the last batch may be shorter.\n- Preserve the original order.\n- An empty `items` returns `[]` (not `[[]]`).\n- If `size` is less than 1, raise `ValueError`.",
+  "examples": [
+    {
+      "input": "items = [1, 2, 3, 4, 5], size = 2",
+      "output": "[[1, 2], [3, 4], [5]]"
+    },
+    {
+      "input": "items = [], size = 3",
+      "output": "[]"
+    }
+  ],
+  "hints": [
+    "Validate `size` first, before doing any work.",
+    "`range(0, len(items), size)` gives you the start index of every batch.",
+    "`[items[i:i + size] for i in range(0, len(items), size)]` — slicing past the end of a list is safe in Python."
+  ],
+  "starter_code": "def chunk_list(items: list, size: int) -> list[list]:\n    # your code here\n    ...\n",
+  "solution_code": "def chunk_list(items: list, size: int) -> list[list]:\n    if size < 1:\n        raise ValueError(f\"size must be >= 1, got {size}\")\n    return [items[i:i + size] for i in range(0, len(items), size)]\n",
+  "solution_md": "Step through the list in strides of `size` and slice. Slicing beyond the end simply returns the shorter remainder, so the last batch needs no special case, and an empty list produces no starts at all → `[]`.\n\nValidate eagerly: `range(0, n, 0)` would raise a confusing `ValueError: range() arg 3 must not be zero`, and a negative step silently returns nothing.\n\n- **Time:** O(n)\n- **Space:** O(n) for the copies\n\n**Generator alternative** (useful for huge inputs or streaming from a DB cursor):\n\n```python\nfrom itertools import islice\n\ndef iter_batches(iterable, size):\n    it = iter(iterable)\n    while batch := list(islice(it, size)):\n        yield batch\n```\n\nPython 3.12+ also ships `itertools.batched(iterable, n)` which yields tuples.",
+  "tests": {
+    "function": "chunk_list",
+    "cases": [
+      {
+        "args": [
+          [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          2
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            1,
+            2,
+            3,
+            4
+          ],
+          2
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ]
+        ]
+      },
+      {
+        "args": [
+          [],
+          3
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [
+            "SKU-1"
+          ],
+          10
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            "SKU-1"
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            1,
+            2
+          ],
+          0
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      },
+      {
+        "args": [
+          [
+            1,
+            2,
+            3
+          ],
+          -1
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

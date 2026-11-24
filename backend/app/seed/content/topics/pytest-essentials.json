@@ -1,0 +1,121 @@
+{
+  "slug": "pytest-essentials",
+  "title": "pytest Essentials",
+  "skill": "testing",
+  "extra_skills": [
+    "python"
+  ],
+  "category": "Testing",
+  "difficulty": "beginner",
+  "tags": [
+    "pytest",
+    "testing",
+    "fixtures",
+    "mocking",
+    "parametrize",
+    "tdd"
+  ],
+  "summary": "pytest finds functions named `test_*` in files named `test_*.py` and runs them; you check results with plain `assert`. Fixtures provide reusable setup (test data, fake clients, temp files), `parametrize` runs one test against many inputs, and `monkeypatch`/`unittest.mock` replace slow or external things like HTTP calls and AWS. Start by testing pure functions - they're the easiest wins.",
+  "details_md": "### Discovery and running\npytest collects `test_*.py` / `*_test.py` files, `test_*` functions and `Test*` classes (no `__init__`). Common commands: `pytest -q`, `pytest -x` (stop at first failure), `pytest -k \"upsert and not slow\"`, `pytest tests/test_parse.py::test_rename -vv`, `pytest --lf` (last failed), `pytest -s` (show prints). Configure in `pyproject.toml` under `[tool.pytest.ini_options]` (`testpaths`, `addopts`, `markers`).\n\n### Plain assert, rich output\npytest rewrites `assert` statements to show both sides on failure (`assert {'a': 1} == {'a': 2}` prints a diff). Use `pytest.approx` for floats and `pytest.raises(ExcType, match=\"regex\")` for expected exceptions.\n\n### Fixtures\nA fixture is a function decorated with `@pytest.fixture`; tests request it by naming it as a parameter. Fixtures can depend on other fixtures, and `yield` fixtures run teardown after the test.\n- **Scope**: `function` (default, fresh each test), `class`, `module`, `session` (e.g. one DB container for the run).\n- `conftest.py` shares fixtures with every test in its directory tree - no import needed.\n- Built-ins: `tmp_path` (temp directory as `Path`), `monkeypatch`, `capsys`/`caplog` (captured output/logs), `request`.\n\n### Parametrize\n`@pytest.mark.parametrize(\"raw,expected\", [...])` generates one test per case, each reported separately. Use `pytest.param(..., id=\"name\")` for readable IDs and `marks=pytest.mark.xfail` for known failures.\n\n### Test doubles\n- `monkeypatch.setattr(module, \"name\", fake)`, `monkeypatch.setenv(\"KEY\", \"v\")` - undone automatically after the test.\n- `unittest.mock.Mock/MagicMock` record calls (`assert_called_once_with`); `patch(\"pkg.module.name\")` - **patch where the name is looked up**, not where it's defined.\n- Prefer **fakes** (small in-memory implementations) and **dependency injection** over deep mocking; heavily mocked tests break on refactors and can pass while production fails.\n- Libraries: `responses`/`requests-mock` for `requests`, `respx` for httpx, `moto` for AWS (S3, DynamoDB, Lambda), `freezegun`/`time-machine` for time.\n\n### What to test (the pyramid)\n1. **Unit tests** - pure functions: parsing, validation, column mapping, calculations. Fast, many.\n2. **Integration tests** - real PostgreSQL (Docker / testcontainers) for SQL like upserts and `COALESCE` behaviour; moto for AWS.\n3. **End-to-end/API tests** - FastAPI `TestClient`, a few happy paths and key failures.\nCharacterisation (\"golden\") tests are a great way to add tests to untested legacy code: feed a real sample file, snapshot the output, and protect it before refactoring.\n\n### Markers and organisation\n`@pytest.mark.slow`, `@pytest.mark.integration` (register them in config), then `pytest -m \"not integration\"` for quick runs. Keep tests independent - no reliance on execution order or shared mutable state.\n\n### Coverage and CI\n`pytest-cov` (`pytest --cov=app --cov-report=term-missing`) shows untested lines; coverage is a guide, not a goal. Running pytest on every push in CI (e.g. GitHub Actions) is what turns tests into a safety net. `pytest-xdist` (`-n auto`) parallelises big suites.\n\n### Async tests\nUse `pytest-asyncio` (`@pytest.mark.asyncio`) or `anyio`'s plugin to run `async def` tests.",
+  "code_md": "```python\n# app/transform.py - code under test\ndef normalise_columns(columns: list[str], rename: dict[str, str]) -> list[str]:\n    cleaned = [c.strip().lower() for c in columns]\n    return [rename.get(c, c) for c in cleaned]\n\nclass MissingColumns(Exception):\n    pass\n\ndef require(columns: list[str], required: set[str]) -> None:\n    missing = required - set(columns)\n    if missing:\n        raise MissingColumns(f\"missing: {sorted(missing)}\")\n```\n\n```python\n# tests/test_transform.py\nimport pytest\nfrom app.transform import normalise_columns, require, MissingColumns\n\n@pytest.mark.parametrize(\n    \"raw, expected\",\n    [\n        ([\" Order ID\", \"SKU \"], [\"order_id\", \"sku\"]),\n        ([\"QTY\"], [\"quantity\"]),\n        ([], []),\n    ],\n    ids=[\"strip-and-rename\", \"uppercase\", \"empty\"],\n)\ndef test_normalise_columns(raw, expected):\n    rename = {\"order id\": \"order_id\", \"qty\": \"quantity\"}\n    assert normalise_columns(raw, rename) == expected\n\ndef test_require_raises_with_missing_names():\n    with pytest.raises(MissingColumns, match=r\"missing: \\['qty'\\]\"):\n        require([\"sku\"], {\"sku\", \"qty\"})\n```\n\n```python\n# Fixtures, tmp_path, monkeypatch and a fake instead of a real DB\nimport pandas as pd\nimport pytest\n\nclass FakeWriter:                      # in-memory stand-in for a DatabaseManager\n    def __init__(self):\n        self.rows = []\n    def write_rows(self, table, rows):\n        self.rows.extend(rows)\n        return len(rows)\n\n@pytest.fixture\ndef writer():\n    return FakeWriter()\n\n@pytest.fixture\ndef sample_csv(tmp_path):\n    path = tmp_path / \"orders.csv\"\n    path.write_text(\"Order ID,SKU,Qty\\no1,A,2\\no2,,1\\n\")\n    return path\n\ndef process(path, writer):\n    df = pd.read_csv(path).dropna(subset=[\"SKU\"])\n    return writer.write_rows(\"orders\", list(df.itertuples(index=False, name=None)))\n\ndef test_process_skips_rows_without_sku(sample_csv, writer):\n    assert process(sample_csv, writer) == 1\n    assert writer.rows == [(\"o1\", \"A\", 2)]\n\ndef test_reads_env(monkeypatch):\n    monkeypatch.setenv(\"DB_HOST\", \"localhost\")   # restored after the test\n    import os\n    assert os.environ[\"DB_HOST\"] == \"localhost\"\n```\n\n```python\n# Mocking HTTP and AWS\nfrom unittest.mock import patch\nimport boto3\nfrom moto import mock_aws          # pip install \"moto[s3]\"\n\ndef download(url):\n    import requests\n    return requests.get(url, timeout=10).content\n\ndef test_download_uses_timeout():\n    with patch(\"requests.get\") as fake_get:        # patch where it's looked up\n        fake_get.return_value.content = b\"a,b\\n1,2\\n\"\n        assert download(\"https://x\") == b\"a,b\\n1,2\\n\"\n        fake_get.assert_called_once_with(\"https://x\", timeout=10)\n\n@mock_aws\ndef test_s3_roundtrip():\n    s3 = boto3.client(\"s3\", region_name=\"us-east-1\")\n    s3.create_bucket(Bucket=\"uploads\")\n    s3.put_object(Bucket=\"uploads\", Key=\"k.csv\", Body=b\"x\")\n    assert s3.get_object(Bucket=\"uploads\", Key=\"k.csv\")[\"Body\"].read() == b\"x\"\n```\n\n```bash\npip install pytest pytest-cov\npytest -q                               # run everything\npytest -x -k normalise -vv              # stop at first failure, filter by name\npytest --cov=app --cov-report=term-missing\n```",
+  "use_cases_md": "- Locking down parsing/validation logic for each report format with small sample files.\n- Testing SQL upsert behaviour against a real PostgreSQL in Docker.\n- Testing FastAPI endpoints with `TestClient` and dependency overrides.\n- Simulating AWS (S3, DynamoDB) with moto and HTTP APIs with `responses`/`respx`.\n- Characterisation tests before refactoring legacy code.\n- Regression tests: reproduce a production bug in a failing test, then fix it.",
+  "mistakes_md": "- **Patching the wrong path** - `patch(\"requests.get\")` doesn't affect `from requests import get` already imported in your module. Fix: patch `yourmodule.get` (where it's looked up).\n- **Over-mocking** - tests mirror implementation and pass while real behaviour breaks. Fix: test behaviour via fakes; integration tests for SQL/AWS.\n- **Tests depending on each other or on order** (shared globals, DB state). Fix: function-scoped fixtures, transactions rolled back per test.\n- **Hitting real external services** - slow, flaky, may cost money or mutate data. Fix: mocks/moto/local containers.\n- **Asserting too little** (`assert result`) or too much (entire huge objects). Fix: assert the behaviour that matters.\n- **Testing private details** instead of public behaviour - brittle. Fix: test through the public API.\n- **Writing tests only for the happy path**. Fix: parametrize edge cases and error paths.",
+  "best_practices_md": "- Name tests after behaviour: `test_upsert_keeps_existing_value_when_incoming_is_null`.\n- Arrange-Act-Assert structure; one behaviour per test.\n- Push I/O to the edges so the core logic is pure and easy to unit test.\n- Share fixtures through `conftest.py`; keep them small and composable.\n- Run tests in CI on every push; keep the default suite fast (mark slow/integration tests).\n- Use coverage to find untested risky code, not as a target number.\n- When fixing a bug, write the failing test first.",
+  "my_context_md": "- You currently have no automated tests anywhere - this topic closes a listed gap.\n- Highest-value starting points in ECSMarketplaceDataUpload: (1) a parametrised test that every `MODULE_DISPATCH` entry resolves to a callable; (2) unit tests for `read_and_validate()` with tiny CSV/XLSX fixtures in `tmp_path`, mocking `requests` instead of real presigned S3 URLs; (3) an integration test against PostgreSQL in Docker proving the `COALESCE(EXCLUDED.col, table.col)` upsert keeps existing values on NULLs.\n- Your `lambda_test.py` already simulates API Gateway events locally - converting those event dicts into pytest fixtures turns manual checks into repeatable tests; moto can stand in for S3 and the `fs-sync-requests-db` DynamoDB table.\n- For your FastAPI downloader apps, `TestClient` tests with the background executor stubbed out would cover job creation, status and cancellation endpoints.",
+  "related": [
+    "fastapi-essentials",
+    "registry-dispatcher-pattern",
+    "python-exceptions",
+    "github-actions-ci",
+    "docker-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "How do you assert an exception with a message in pytest?",
+      "back": "`with pytest.raises(MyError, match='regex'): ...`"
+    },
+    {
+      "front": "What does a `yield` fixture do?",
+      "back": "Code before yield is setup, the yielded value is injected, code after yield is teardown."
+    },
+    {
+      "front": "Where do shared fixtures go?",
+      "back": "`conftest.py` - automatically available to tests in that directory and below."
+    },
+    {
+      "front": "Rule for `unittest.mock.patch` targets?",
+      "back": "Patch where the name is looked up (the module using it), not where it's defined."
+    },
+    {
+      "front": "Built-in fixture for a temporary directory?",
+      "back": "`tmp_path` (a pathlib.Path unique per test)."
+    },
+    {
+      "front": "How to run only tests whose name matches 'upsert'?",
+      "back": "`pytest -k upsert`"
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Your module does `from requests import get` and you want to mock it. Which patch target is correct?",
+      "options": [
+        "patch('requests.get')",
+        "patch('mymodule.get')",
+        "patch('get')",
+        "patch('requests')"
+      ],
+      "answer_index": 1,
+      "explanation": "The name `get` was copied into mymodule's namespace at import; patch it there."
+    },
+    {
+      "question": "Which fixture scope gives a fresh value for every test?",
+      "options": [
+        "function (the default)",
+        "session",
+        "module",
+        "package"
+      ],
+      "answer_index": 0,
+      "explanation": "Function scope is the default and isolates tests from each other."
+    },
+    {
+      "question": "Best way to test the same parsing function against 12 sample inputs?",
+      "options": [
+        "12 copy-pasted test functions",
+        "A loop inside one test",
+        "Random inputs",
+        "@pytest.mark.parametrize"
+      ],
+      "answer_index": 3,
+      "explanation": "Parametrize produces separate, individually reported test cases."
+    },
+    {
+      "question": "Which tool lets you test boto3 S3 code without real AWS?",
+      "options": [
+        "freezegun",
+        "pytest-xdist",
+        "moto",
+        "pytest-cov"
+      ],
+      "answer_index": 2,
+      "explanation": "moto mocks AWS services in-process (`@mock_aws`)."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you introduce tests into a large codebase that has none?",
+      "difficulty": "medium",
+      "answer_md": "I'd prioritise by risk and ease, not by coverage:\n1. **Set up the harness**: pytest in dev dependencies, `pyproject.toml` config, a `tests/` folder, and a CI job running `pytest` on every push so tests can't rot.\n2. **Cheap, broad safety checks**: e.g. a parametrised test that every registry entry resolves/imports; smoke tests that each module imports.\n3. **Characterisation tests** around the most critical paths: feed real (anonymised) sample inputs, snapshot outputs, and assert they don't change. They document current behaviour before refactoring.\n4. **Unit tests for pure logic** that changes often (validation, mapping, calculations) - extract I/O so logic is testable.\n5. **Integration tests** for things mocks can't verify: SQL upserts against PostgreSQL in Docker, S3/DynamoDB with moto.\n6. **Rule going forward**: every bug fix comes with a failing test first; new code ships with tests.\n\nRefactor for testability incrementally: inject dependencies (DB writer, HTTP client) instead of creating them inside functions, so fakes can be passed in."
+    },
+    {
+      "question": "Explain pytest fixtures, scopes and conftest.py.",
+      "difficulty": "easy",
+      "answer_md": "A **fixture** is a function marked `@pytest.fixture` that provides a dependency to tests. A test requests it by naming it as a parameter; pytest resolves the dependency graph (fixtures can request other fixtures) and injects values.\n\n```python\n@pytest.fixture(scope=\"session\")\ndef pg_url():\n    with PostgresContainer(\"postgres:17\") as pg:   # testcontainers\n        yield pg.get_connection_url()\n\n@pytest.fixture\ndef conn(pg_url):\n    c = psycopg2.connect(pg_url)\n    yield c\n    c.rollback(); c.close()                        # teardown after each test\n```\n**Scopes** control how often a fixture is created: `function` (default - fresh per test, best isolation), `class`, `module`, `package`, `session` (once per run - for expensive things like a database container). A fixture can only depend on fixtures of equal or broader scope.\n\n**conftest.py** files hold fixtures (and hooks) shared by all tests in that directory and its subdirectories - pytest loads them automatically, no imports needed. Typical layout: a root `conftest.py` with DB/client fixtures, and nested ones for domain-specific data."
+    },
+    {
+      "question": "Mocks vs fakes vs integration tests: how do you decide?",
+      "difficulty": "hard",
+      "answer_md": "- **Mocks** (`unittest.mock`) replace a dependency and record interactions. Good for verifying a call happened with the right arguments at a boundary you don't own (e.g. \"we invoked the profitability Lambda with `InvocationType='Event'`\"). Risk: they encode implementation details, so tests break on harmless refactors and can pass when the real dependency would reject the call.\n- **Fakes** are working lightweight implementations (an in-memory writer, a dict-backed repository). Tests assert on **outcomes** (\"these rows were written\") rather than calls - more robust, and they double as documentation of the interface. Need dependency injection to plug in.\n- **Integration tests** use the real thing (PostgreSQL in Docker, moto for AWS, a local HTTP stub server). Necessary where behaviour lives in the dependency: SQL semantics (`ON CONFLICT`, `COALESCE`, constraints, deadlock handling), serialisation, real file parsers.\n\nMy default: pure logic -> plain unit tests; collaborators I own -> fakes; external HTTP -> `responses`/`respx` stubs; SQL -> integration tests against a real database; mocks only for asserting a specific outbound interaction. A few end-to-end tests on top cover wiring."
+    }
+  ]
+}

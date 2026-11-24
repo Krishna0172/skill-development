@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, kv %}
+{% block title %}{{ e.title }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><div class="small faint"><a href="/practice">Practice</a> · {{ category_label }} · <a href="/practice/{{ e.id }}/edit">edit</a></div>
+    <h1>{{ e.title }}</h1>
+    <div class="row">{{ badge(e.status) }}{{ badge(e.difficulty) }}<span class="badge">{{ e.language|upper }}</span>{% if e.auto_check %}<span class="small muted">{{ e.test_count }} hidden tests</span>{% else %}<span class="small muted">self-assessed</span>{% endif %}</div>
+  </div>
+</div>
+
+<div class="grid g-side">
+  <div class="stack">
+    {% call card() %}
+      <div class="md">{{ e.problem_md|md }}</div>
+      {% for ex in e.examples or [] %}
+        <div class="small muted mt">Example {{ loop.index }}</div>
+        <pre class="block">{% for k, v in ex.items() %}{{ k }}: {{ v }}
+{% endfor %}</pre>
+      {% endfor %}
+      {% for h in e.hints or [] %}
+        <details class="fold mt hint" ontoggle="if(this.open){this.dataset.opened=1};document.getElementById('hints_used').value=document.querySelectorAll('details.hint[data-opened]').length">
+          <summary>Hint {{ loop.index }}</summary><div class="md">{{ h|md }}</div></details>
+      {% endfor %}
+    {% endcall %}
+
+    <form method="post" action="/practice/{{ e.id }}/submit" class="card"><div class="body form-grid">
+      <input type="hidden" name="started" value="{{ started }}">
+      <input type="hidden" name="hints_used" id="hints_used" value="0">
+      <textarea class="code" name="code" rows="16" spellcheck="false" placeholder="{{ 'Write your answer…' if e.language == 'text' else 'Write your solution…' }}">{{ code }}</textarea>
+      <div class="row">
+        {% if e.auto_check %}
+          <button type="button" class="btn" hx-post="/practice/{{ e.id }}/run" hx-include="closest form" hx-target="#run-result" hx-swap="innerHTML">▶ Run tests</button>
+          {% if e.language == "python" %}<button type="button" class="btn" hx-post="/practice/{{ e.id }}/scratch" hx-include="closest form" hx-target="#run-result" hx-swap="innerHTML" title="Run your code as a plain script (no tests) so print() output shows">▶ Run as script</button>{% endif %}
+        {% else %}
+          <select name="self_outcome" style="max-width:220px"><option value="self_solved">I solved it</option><option value="self_failed">I couldn't solve it</option></select>
+        {% endif %}
+        <span class="tiny faint htmx-indicator">running…</span>
+      </div>
+      <div id="run-result">{% include "partials/run_result.html" %}</div>
+      <label class="field">What I learned <span class="hint">optional, markdown</span><textarea name="learned_md" rows="2"></textarea></label>
+      <label class="row small"><input type="checkbox" name="retry_needed" value="1"> Retry this later</label>
+      <div class="row">
+        <button class="btn primary">Submit attempt</button>
+        {% if not e.solution_available or e.status != "solved" %}<button class="btn danger" name="give_up" value="1" title="Records an attempt and shows the solution">Give up &amp; show solution</button>{% endif %}
+      </div>
+    </div></form>
+
+    {% if solution %}
+      {% call card("Solution") %}
+        <div id="solution">
+          {% if solution.solution_code %}{{ code_block(solution.solution_code, "sql" if e.language == "sql" else "python" if e.language == "python" else "text") }}{% endif %}
+          {% if solution.solution_md %}<div class="md mt">{{ solution.solution_md|md }}</div>{% endif %}
+        </div>
+      {% endcall %}
+    {% endif %}
+  </div>
+
+  <div class="stack">
+    {% call card("Progress") %}
+      {{ kv("Status", e.status|label) }}
+      {{ kv("Attempts", e.attempts) }}
+      {% if e.skill %}{{ kv("Skill", e.skill) }}{% endif %}
+      {% if e.concepts %}<div class="chips mt">{% for c in e.concepts %}<span class="chip">{{ c }}</span>{% endfor %}</div>{% endif %}
+      <div class="mt">
+        {% if e.solution_available and not solution %}<a class="btn sm" href="/practice/{{ e.id }}?solution=1#solution">Show solution</a>
+        {% elif not e.solution_available %}<span class="small faint">🔒 Solution unlocks after your first attempt.</span>{% endif %}
+      </div>
+    {% endcall %}
+    {% if e.topics %}
+      {% call card("Topics") %}<ul class="list compact">{% for t in e.topics %}<li><a href="/topics/{{ t.id }}">{{ t.title }}</a></li>{% endfor %}</ul>{% endcall %}
+    {% endif %}
+    {% if e.attempt_history %}
+      {% call card("Attempts", flush=True) %}
+        <ul class="list" id="attempts">{% for a in e.attempt_history %}
+          <li class="small">
+            <div class="between"><span>{{ badge(a.outcome) }}{% if a.tests_total %} <span class="num">{{ a.tests_passed }}/{{ a.tests_total }}</span>{% endif %}</span><span class="faint">{{ a.submitted_at|rel }}</span></div>
+            <div class="tiny faint">{% if a.duration_seconds %}{{ (a.duration_seconds / 60)|round|int }} min · {% endif %}{{ a.hints_used }} hints{% if a.solution_viewed %} · solution viewed{% endif %}{% if a.solved_independently %} · <span class="good">independent</span>{% endif %}{% if a.retry_needed %} · <span class="warn">retry</span>{% endif %}</div>
+            {% if a.learned_md %}<div class="md small mt" style="margin-top:4px">{{ a.learned_md|md }}</div>{% endif %}
+          </li>{% endfor %}
+        </ul>
+      {% endcall %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

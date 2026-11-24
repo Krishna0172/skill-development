@@ -1,0 +1,123 @@
+{
+  "slug": "transactions-isolation",
+  "title": "Transactions, Isolation Levels, Locks and Deadlocks",
+  "skill": "transactions-concurrency",
+  "extra_skills": [
+    "postgresql",
+    "psycopg2"
+  ],
+  "category": "Database",
+  "difficulty": "advanced",
+  "tags": [
+    "postgresql",
+    "transactions",
+    "acid",
+    "isolation",
+    "mvcc",
+    "locks",
+    "deadlock"
+  ],
+  "summary": "A transaction groups statements so they all succeed or all fail together (COMMIT or ROLLBACK). Isolation levels decide what a transaction can see of other transactions' changes; PostgreSQL defaults to READ COMMITTED. Concurrent writers to the same rows wait on row locks, and when two transactions wait on each other, PostgreSQL detects the deadlock and aborts one, which your code should retry.",
+  "details_md": "### ACID in one line each\n**Atomicity**: all or nothing. **Consistency**: constraints hold after commit. **Isolation**: concurrent transactions don't see each other's half-done work. **Durability**: once committed, the change survives a crash (via the write-ahead log).\n\n### MVCC: how PostgreSQL isolates\nPostgreSQL never overwrites a row in place. An UPDATE writes a **new row version** and marks the old one expired (`xmin`/`xmax` transaction IDs). Each statement or transaction reads using a **snapshot** that says which versions are visible. Result: **readers never block writers and writers never block readers**. Only writers to the same row block each other. Old versions are cleaned up later by VACUUM; long-running transactions prevent that cleanup and cause bloat.\n\n### Isolation levels in PostgreSQL\n| Level | Snapshot | Anomalies prevented | Possible errors |\n|---|---|---|---|\n| READ COMMITTED (default) | new snapshot **per statement** | dirty reads | none extra |\n| REPEATABLE READ | one snapshot **per transaction** | + non-repeatable reads, phantoms | `40001 could not serialize access due to concurrent update` |\n| SERIALIZABLE | per transaction + SSI conflict tracking | + write skew (all anomalies) | `40001` serialization failure |\n\nREAD UNCOMMITTED behaves like READ COMMITTED in PostgreSQL (no dirty reads ever).\n\n**READ COMMITTED subtlety:** if your UPDATE finds a row that a concurrent transaction is updating, it waits; after that transaction commits, it **re-evaluates its WHERE on the new version** and proceeds. That is why `UPDATE stock SET qty = qty - 1 WHERE id = 1` is safe, but read-modify-write in Python (`SELECT qty`, compute, `UPDATE qty = 9`) can lose updates.\n\n### Row locks\n- UPDATE/DELETE take row locks automatically.\n- `SELECT ... FOR UPDATE` locks rows you intend to change (pessimistic locking).\n- `FOR UPDATE SKIP LOCKED` skips locked rows, the standard pattern for a **job queue in Postgres** with multiple workers.\n- `FOR UPDATE NOWAIT` errors immediately instead of waiting.\n- Optimistic alternative: a `version` column and `UPDATE ... WHERE id = $1 AND version = $2`; 0 rows updated means someone else changed it.\n\n### Deadlocks\nT1 locks row A, then wants B; T2 locks B, then wants A. Both wait forever, so after `deadlock_timeout` (1 s) PostgreSQL detects the cycle and aborts one with `40P01 deadlock detected`. Prevention: **acquire locks in a consistent order** (sort batch keys), keep transactions short, and touch fewer rows per transaction. Recovery: **retry the whole transaction**.\n\n### Retryable errors\n`40001` (serialization_failure) and `40P01` (deadlock_detected) mean \"retry the entire transaction from the start\". Retry with bounded attempts and jittered backoff, and make the transaction's work idempotent.\n\n### Practical settings\n- `idle_in_transaction_session_timeout`: kill sessions that hold a transaction open while doing nothing.\n- `lock_timeout`: give up waiting for a lock (good for migrations).\n- `statement_timeout`: cap runaway queries.\n- Never hold a transaction open across network calls (HTTP downloads, S3 reads, Lambda invocations).\n\n### Savepoints\n`SAVEPOINT s; ... ROLLBACK TO SAVEPOINT s;` undoes part of a transaction. After any error in PostgreSQL the transaction is **aborted** (\"current transaction is aborted, commands ignored until end of transaction block\") until you roll back, or roll back to a savepoint.",
+  "code_md": "```sql\n-- 1) Atomic transfer between two inventory locations\nBEGIN;\nUPDATE inventory SET qty = qty - 5 WHERE sku = 'SKU-1' AND warehouse = 'BLR';\nUPDATE inventory SET qty = qty + 5 WHERE sku = 'SKU-1' AND warehouse = 'DEL';\nINSERT INTO inventory_ledger (sku, from_wh, to_wh, qty) VALUES ('SKU-1', 'BLR', 'DEL', 5);\nCOMMIT;      -- all three or none\n```\n\n```sql\n-- 2) Lost update vs atomic update (READ COMMITTED)\n-- BAD (application read-modify-write): two workers both read qty=10, both write 9\nSELECT qty FROM inventory WHERE id = 1;          -- 10\nUPDATE inventory SET qty = 9 WHERE id = 1;\n\n-- GOOD: let the database do the arithmetic under the row lock\nUPDATE inventory SET qty = qty - 1 WHERE id = 1 AND qty > 0;\n\n-- Or lock explicitly when logic must run in between\nBEGIN;\nSELECT qty FROM inventory WHERE id = 1 FOR UPDATE;   -- others wait here\nUPDATE inventory SET qty = 9 WHERE id = 1;\nCOMMIT;\n```\n\n```sql\n-- 3) Postgres as a job queue: many workers, no double-processing\nBEGIN;\nSELECT id, payload FROM jobs\nWHERE status = 'PENDING'\nORDER BY created_at\nLIMIT 10\nFOR UPDATE SKIP LOCKED;        -- rows locked by other workers are skipped, not waited on\n-- process them, then:\nUPDATE jobs SET status = 'DONE' WHERE id = ANY(ARRAY[1,2,3]);\nCOMMIT;\n```\n\n```python\n# 4) Retrying serialization failures and deadlocks (psycopg2)\nimport random, time\nfrom psycopg2 import errors\n\nRETRYABLE = (errors.SerializationFailure, errors.DeadlockDetected)\n\ndef run_in_tx(conn, fn, attempts=5):\n    for i in range(attempts):\n        try:\n            with conn:                     # COMMIT on success, ROLLBACK on exception\n                with conn.cursor() as cur:\n                    return fn(cur)         # fn must be safe to re-run from scratch\n        except RETRYABLE:\n            if i == attempts - 1:\n                raise\n            time.sleep(min(2 ** i * 0.1, 2) + random.random() * 0.1)   # jittered backoff\n\n# conn.set_session(isolation_level=\"SERIALIZABLE\") for strict invariants\n```",
+  "use_cases_md": "- Multi-table writes that must be consistent: order + order lines + ledger entry.\n- Inventory decrements without overselling (atomic `qty = qty - n` or `FOR UPDATE`).\n- Worker pools pulling jobs from a table with `SKIP LOCKED`.\n- Consistent reporting snapshots across several queries (`REPEATABLE READ`, read-only).\n- Enforcing cross-row invariants (\"at most one active config per org\") with `SERIALIZABLE` or constraints.",
+  "mistakes_md": "- **Read-modify-write in application code under READ COMMITTED**: lost updates. Use atomic SQL updates, `FOR UPDATE`, or optimistic version checks.\n- **Long transactions** (holding one open while downloading files or calling APIs): hold locks, block VACUUM, cause bloat and timeouts. Do I/O first, then open a short transaction.\n- **Not retrying 40001/40P01**: these are expected under concurrency, not bugs. Retry the whole transaction.\n- **Retrying only the failed statement**: the transaction is aborted; you must roll back and redo everything.\n- **Inconsistent lock order across code paths or batches**: deadlocks. Sort keys and always lock tables/rows in the same order.\n- **Assuming SERIALIZABLE means \"slow and locking\"**: in PostgreSQL it uses SSI with no extra blocking, just possible aborts you must retry.\n- **psycopg2 idle-in-transaction**: psycopg2 opens a transaction implicitly on the first statement; forgetting to commit leaves the connection \"idle in transaction\".",
+  "best_practices_md": "- Keep transactions short and focused on database work only.\n- Prefer single-statement atomic updates over explicit locking where possible.\n- Sort keys before bulk writes to avoid deadlocks.\n- Centralise retry logic for 40001/40P01 with bounded, jittered backoff.\n- Set `idle_in_transaction_session_timeout`, `statement_timeout` and `lock_timeout` sensibly.\n- Use `REPEATABLE READ READ ONLY` for multi-query reports that need a consistent view.\n- Make transactional work idempotent so retries are safe.",
+  "my_context_md": "Your orders upsert has a deadlock-retry loop on Citus, which is exactly the 40P01 recovery pattern here: the whole batch transaction is rolled back and retried. Deadlocks happen when concurrent upload jobs upsert overlapping `(id, orgid)` keys in different orders; on Citus a batch can also lock rows on several worker shards, so distributed deadlocks are possible and Citus has its own detector for them. Sorting each batch by the conflict key and keeping batches small reduces how often the retry runs. When you talk about \"transactional writes\" from your resume, the pattern to describe is: finish the network I/O (the presigned-URL download and parsing in `read_and_validate()`) before opening a transaction, keep the write transactions short, and commit the `fs_upload` status update separately, so that an Error status still gets recorded when the data transaction is rolled back.",
+  "related": [
+    "postgres-upsert",
+    "psycopg2-essentials",
+    "retries-backoff-idempotency",
+    "message-queues",
+    "postgres-indexes"
+  ],
+  "flashcards": [
+    {
+      "front": "PostgreSQL's default isolation level?",
+      "back": "READ COMMITTED: each statement sees a fresh snapshot of committed data."
+    },
+    {
+      "front": "What does MVCC give you?",
+      "back": "Readers don't block writers and writers don't block readers; each transaction reads a consistent snapshot of row versions."
+    },
+    {
+      "front": "SQLSTATE codes that mean 'retry the transaction'?",
+      "back": "40001 serialization_failure and 40P01 deadlock_detected."
+    },
+    {
+      "front": "How do multiple workers claim jobs from one table without collisions?",
+      "back": "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT n` inside a transaction."
+    },
+    {
+      "front": "How to prevent deadlocks in concurrent batch writes?",
+      "back": "Lock or update rows in a consistent order (sort by key), keep transactions short and batches small."
+    },
+    {
+      "front": "What happens after an error inside a PostgreSQL transaction?",
+      "back": "The transaction is aborted; every further command fails until ROLLBACK (or ROLLBACK TO SAVEPOINT)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Two sessions run `UPDATE inventory SET qty = qty - 1 WHERE id = 1` concurrently in READ COMMITTED, starting from qty = 10. Final qty?",
+      "options": [
+        "9",
+        "Undefined",
+        "Error 40001",
+        "8"
+      ],
+      "answer_index": 3,
+      "explanation": "The second waits for the row lock, then re-evaluates on the committed version (9) and writes 8."
+    },
+    {
+      "question": "Which anomaly does SERIALIZABLE prevent that REPEATABLE READ allows in PostgreSQL?",
+      "options": [
+        "Dirty reads",
+        "Write skew",
+        "Phantom reads",
+        "Non-repeatable reads"
+      ],
+      "answer_index": 1,
+      "explanation": "PG's REPEATABLE READ (snapshot isolation) already prevents phantoms; write skew needs SSI."
+    },
+    {
+      "question": "Best way to process a jobs table with 5 parallel workers?",
+      "options": [
+        "SELECT ... FOR UPDATE NOWAIT",
+        "LOCK TABLE jobs",
+        "SELECT ... FOR UPDATE SKIP LOCKED",
+        "SERIALIZABLE with no locks"
+      ],
+      "answer_index": 2,
+      "explanation": "SKIP LOCKED lets each worker grab different unlocked rows without waiting."
+    },
+    {
+      "question": "Why are long-running transactions harmful even if they only read?",
+      "options": [
+        "They hold the snapshot horizon back so VACUUM can't remove dead rows",
+        "They use too much CPU",
+        "They block all writes",
+        "They disable indexes"
+      ],
+      "answer_index": 0,
+      "explanation": "Old snapshots keep dead tuples alive, causing bloat; open transactions may also hold locks."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain PostgreSQL's isolation levels and when you'd use each.",
+      "difficulty": "medium",
+      "answer_md": "PostgreSQL implements three distinct levels (READ UNCOMMITTED maps to READ COMMITTED):\n\n- **READ COMMITTED (default)**: every *statement* sees data committed before it began. Two SELECTs in one transaction can see different data. Concurrent UPDATEs on the same row wait, then re-check their WHERE against the new version. It is right for most OLTP and ETL writes, provided you use atomic SQL (`qty = qty - 1`) or row locks for read-modify-write.\n- **REPEATABLE READ**: one snapshot for the whole *transaction*, so all reads are consistent. If you try to update a row someone else changed after your snapshot, you get `40001` and must retry. Good for **consistent multi-query reports** (`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`).\n- **SERIALIZABLE**: snapshot isolation plus **Serializable Snapshot Isolation** tracking of read/write dependencies; it aborts one transaction if the outcome couldn't have occurred serially. It prevents **write skew**, e.g. two doctors both going off call because each saw the other on call. Use it for invariants spanning multiple rows that constraints can't express, and always with a retry loop.\n\nHigher levels don't add blocking in PostgreSQL; they add *serialization failures* that the application must retry."
+    },
+    {
+      "question": "What is a deadlock, how does PostgreSQL handle it, and how do you prevent it in bulk upserts?",
+      "difficulty": "hard",
+      "answer_md": "A deadlock is a cycle of waits: T1 holds a lock on row A and waits for B; T2 holds B and waits for A. Neither can proceed.\n\nPostgreSQL waits `deadlock_timeout` (default 1 s), runs the deadlock detector, and aborts one transaction with `ERROR: deadlock detected (40P01)`; the other proceeds. The log shows both queries and the lock types.\n\nIn bulk upserts it typically happens when two workers upsert overlapping keys in different orders:\n```\nWorker 1: keys [5, 9]    Worker 2: keys [9, 5]\n```\nPrevention:\n1. **Sort** each batch by the conflict key (`(orgid, id)`) so all workers lock in the same order.\n2. **Deduplicate** batches and keep them **small** (fewer locks held, shorter windows).\n3. **Partition the work** so workers don't overlap (e.g. one worker per org or file).\n4. Keep transactions short: no network I/O while holding locks.\n\nRecovery: catch `psycopg2.errors.DeadlockDetected`, roll back, and **retry the entire transaction** with jittered exponential backoff, a bounded number of times. In distributed PostgreSQL like Citus, deadlocks can span worker nodes; Citus runs its own distributed deadlock detection, but the same prevention rules apply."
+    },
+    {
+      "question": "How would you prevent overselling inventory when two orders for the last unit arrive at the same time?",
+      "difficulty": "medium",
+      "answer_md": "Make the check and the decrement **one atomic operation** guarded by the row lock:\n\n```sql\nUPDATE inventory\nSET qty = qty - 1\nWHERE sku = 'SKU-1' AND qty >= 1\nRETURNING qty;\n```\n\nIn READ COMMITTED, the second transaction waits for the first one's row lock. When the first commits (qty now 0), the second **re-evaluates** `qty >= 1` on the new version, matches 0 rows and returns nothing, so the application reports \"out of stock\". No oversell, and no explicit locking needed.\n\nAlternatives:\n- **Pessimistic**: `SELECT qty FROM inventory WHERE sku = $1 FOR UPDATE`, check in code, then update, all in one short transaction.\n- **Optimistic**: a `version` column; `UPDATE ... WHERE sku = $1 AND version = $2`; if 0 rows, re-read and retry.\n- **Constraint as a safety net**: `CHECK (qty >= 0)` so a bug can never commit negative stock.\n\nAvoid reading qty in Python and writing an absolute value back without a lock; that is the classic lost update."
+    }
+  ]
+}

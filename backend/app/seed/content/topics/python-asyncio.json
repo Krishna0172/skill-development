@@ -1,0 +1,123 @@
+{
+  "slug": "python-asyncio",
+  "title": "asyncio & async/await",
+  "skill": "async-concurrency",
+  "extra_skills": [
+    "python",
+    "fastapi"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "python",
+    "asyncio",
+    "async",
+    "await",
+    "event-loop",
+    "concurrency",
+    "taskgroup"
+  ],
+  "summary": "asyncio runs many I/O-bound tasks concurrently on a single thread. An `async def` function returns a coroutine; `await` pauses it while waiting for I/O so the event loop can run other tasks. It shines for lots of simultaneous network calls, but any blocking call (like `time.sleep`, `requests.get` or a psycopg2 query) freezes everything - push those to a thread with `asyncio.to_thread`.",
+  "details_md": "### The model\nasyncio is **cooperative multitasking**. One thread runs an **event loop** that holds ready tasks. A task runs until it hits an `await` on something not ready yet (socket read, timer); it then yields control back to the loop, which resumes another ready task. The OS notifies the loop when I/O is ready (epoll/kqueue/IOCP). No preemption: if a coroutine never awaits, nothing else runs.\n\n### Coroutines, tasks, futures\n- `async def f()` - calling `f()` creates a **coroutine object**; nothing runs until it is awaited or scheduled.\n- `await coro` - runs it to completion *sequentially* within the current task.\n- `asyncio.create_task(coro)` - schedules it to run **concurrently**; returns a `Task`. Keep a reference, or it may be garbage-collected mid-flight.\n- A **Future** is a low-level placeholder for a result; Tasks are Futures wrapping coroutines.\n\n### Running things concurrently\n- `asyncio.gather(*coros)` - runs concurrently, returns results in order. By default the first exception propagates but other tasks keep running; `return_exceptions=True` returns exceptions as values.\n- `asyncio.TaskGroup` (3.11+) - **structured concurrency**: tasks are awaited when the `async with` exits; if one fails, the rest are cancelled and errors are raised as an `ExceptionGroup`. Prefer it for new code.\n- `asyncio.timeout(seconds)` (3.11+) context manager or `asyncio.wait_for` for deadlines.\n- `asyncio.Semaphore(n)` to cap concurrency (e.g. max 10 requests to a third-party API).\n- `asyncio.Queue` for producer/consumer pipelines.\n\n### Bridging blocking code\n- `await asyncio.to_thread(fn, *args, **kwargs)` (3.9+) runs a blocking function in the default thread pool.\n- `loop.run_in_executor(executor, fn, *args)` is the lower-level version (no kwargs; pass a `ProcessPoolExecutor` for CPU-bound work).\n- From a different thread, `asyncio.run_coroutine_threadsafe(coro, loop)` or `loop.call_soon_threadsafe` schedules work on the loop.\n\n### Cancellation\n`task.cancel()` raises `CancelledError` inside the task at its current `await`. Clean up in `finally` and **re-raise**; swallowing `CancelledError` breaks timeouts and TaskGroups. `asyncio.shield` protects an inner operation from outer cancellation.\n\n### Entry point\n`asyncio.run(main())` creates a loop, runs `main`, cancels leftovers, and closes the loop. Call it once per program. Inside FastAPI/Uvicorn the loop already exists - just write `async def` endpoints.\n\n### FastAPI specifics\n- `async def` endpoints run **on the event loop** - never call blocking code there.\n- Plain `def` endpoints run in a threadpool automatically - fine for blocking libraries like `requests`, psycopg2, boto3.\n- Use async-native clients (`httpx.AsyncClient`, `asyncpg`/psycopg 3 async, `aioboto3`) to stay fully async.\n\n### When asyncio is (not) the right tool\nGreat for: many concurrent network calls, websockets, SSE, high-concurrency APIs. Not helpful for CPU-bound work (still one thread - use processes) or for a few sequential blocking calls (threads are simpler). Debug mode (`PYTHONASYNCIODEBUG=1` or `asyncio.run(main(), debug=True)`) warns about never-awaited coroutines and slow callbacks that block the loop.",
+  "code_md": "```python\n# Concurrent HTTP calls with a concurrency cap and timeout (httpx is async-native)\nimport asyncio\nimport httpx\n\nasync def fetch(client: httpx.AsyncClient, sem: asyncio.Semaphore, url: str) -> int:\n    async with sem:                               # at most N in flight\n        r = await client.get(url, timeout=10)\n        return r.status_code\n\nasync def main(urls: list[str]) -> list[int]:\n    sem = asyncio.Semaphore(5)\n    async with httpx.AsyncClient() as client:\n        async with asyncio.timeout(30):          # overall deadline (3.11+)\n            return await asyncio.gather(*(fetch(client, sem, u) for u in urls))\n\n# print(asyncio.run(main([\"https://example.com\"] * 10)))\n```\n\n```python\n# Structured concurrency with TaskGroup (3.11+)\nimport asyncio\n\nasync def work(name: str, delay: float) -> str:\n    await asyncio.sleep(delay)            # non-blocking sleep\n    return name\n\nasync def main():\n    async with asyncio.TaskGroup() as tg:\n        t1 = tg.create_task(work(\"a\", 0.2))\n        t2 = tg.create_task(work(\"b\", 0.1))\n    # both done here; if one failed, the other was cancelled\n    print(t1.result(), t2.result())\n\nasyncio.run(main())   # total ~0.2s, not 0.3s\n```\n\n```python\n# Calling blocking code from async: to_thread vs blocking the loop\nimport asyncio, time\n\ndef blocking_download(url: str) -> str:   # e.g. requests / subprocess / psycopg2\n    time.sleep(1)\n    return url\n\nasync def bad():\n    blocking_download(\"x\")                 # freezes the whole event loop for 1s\n\nasync def good():\n    results = await asyncio.gather(\n        asyncio.to_thread(blocking_download, \"a\"),\n        asyncio.to_thread(blocking_download, \"b\"),\n    )\n    print(results)                         # ~1s total, loop stays responsive\n\nasyncio.run(good())\n```\n\n```python\n# Cancellation done right\nimport asyncio\n\nasync def worker():\n    try:\n        while True:\n            await asyncio.sleep(0.1)\n    except asyncio.CancelledError:\n        print(\"cleaning up\")\n        raise                              # always re-raise\n\nasync def main():\n    t = asyncio.create_task(worker())\n    await asyncio.sleep(0.3)\n    t.cancel()\n    try:\n        await t\n    except asyncio.CancelledError:\n        print(\"worker cancelled\")\n\nasyncio.run(main())\n```",
+  "use_cases_md": "- Fan-out calls to many third-party APIs (marketplaces, OMS, payment gateways) with a concurrency limit.\n- High-concurrency web APIs (FastAPI) where most time is spent waiting on I/O.\n- Streaming responses: Server-Sent Events, websockets, long polling.\n- Producer/consumer pipelines with `asyncio.Queue`.\n- Background tasks inside a running API process (with care about lifecycle).",
+  "mistakes_md": "- **Blocking calls inside `async def`** (`time.sleep`, `requests`, psycopg2, heavy pandas) - stalls every request. Fix: async libraries, `asyncio.to_thread`, or make the FastAPI endpoint a plain `def`.\n- **Forgetting `await`** - you get a coroutine object and a \"never awaited\" warning; the work never runs. Fix: await it or create a task.\n- **Fire-and-forget `create_task` without keeping a reference** - the task can be garbage-collected and exceptions are lost. Fix: store tasks in a set and remove on done, or use a TaskGroup.\n- **Swallowing `CancelledError`** - breaks timeouts and shutdown. Fix: clean up and re-raise.\n- **Calling `asyncio.run()` inside a running loop** - `RuntimeError`. Fix: just `await` (in FastAPI/Jupyter the loop already runs).\n- **Unbounded `gather` over thousands of URLs** - floods the remote API and exhausts sockets. Fix: Semaphore or a worker pool with a Queue.\n- **Using asyncio for CPU-bound work** - no speedup. Fix: `ProcessPoolExecutor`.",
+  "best_practices_md": "- Prefer `asyncio.TaskGroup` and `asyncio.timeout` (3.11+) for structured, cancellable concurrency.\n- Share one `httpx.AsyncClient`/session per app (connection pooling); close it in a lifespan handler.\n- Cap concurrency with semaphores; respect rate limits and `Retry-After`.\n- Keep the event loop free: anything > a few ms of CPU or any blocking I/O goes to a thread/process.\n- Enable asyncio debug mode in development to spot slow callbacks and un-awaited coroutines.\n- Make long-running tasks cancellation-aware (`try/finally`).",
+  "my_context_md": "- Your FastAPI downloader apps already bridge blocking work into async code with `asyncio.to_thread` and `loop.run_in_executor` - the correct approach since downloads/ffmpeg-style work would otherwise block the event loop.\n- Because those background jobs run in executor threads, cancellation uses `threading.Event` rather than `task.cancel()` - a cancelled asyncio task cannot interrupt a thread; the thread must cooperatively check the event.\n- Your SSE endpoints via `StreamingResponse` are a natural fit for async generators that `await asyncio.sleep()` between progress updates instead of blocking.\n- Your backend's REST integrations (Unicommerce, EasyEcom, OmsGuru) use `requests`, which is blocking; asyncio + httpx with a semaphore is the pattern if you ever need many concurrent calls.",
+  "related": [
+    "python-threading-gil",
+    "fastapi-essentials",
+    "server-sent-events",
+    "javascript-async",
+    "python-generators-iterators"
+  ],
+  "flashcards": [
+    {
+      "front": "What does calling an `async def` function return?",
+      "back": "A coroutine object - nothing runs until it's awaited or wrapped in a task."
+    },
+    {
+      "front": "`await coro` vs `asyncio.create_task(coro)`?",
+      "back": "`await` runs it to completion now (sequential). `create_task` schedules it to run concurrently and returns a Task."
+    },
+    {
+      "front": "How do you run a blocking function from async code?",
+      "back": "`await asyncio.to_thread(fn, *args, **kwargs)` (or `loop.run_in_executor`)."
+    },
+    {
+      "front": "TaskGroup behaviour when one task fails?",
+      "back": "Remaining tasks are cancelled; errors are raised together as an ExceptionGroup when the `async with` exits."
+    },
+    {
+      "front": "How do you limit concurrent requests in asyncio?",
+      "back": "`sem = asyncio.Semaphore(n)` and `async with sem:` around each request."
+    },
+    {
+      "front": "Where do plain `def` FastAPI endpoints run?",
+      "back": "In a threadpool (via AnyIO), so blocking calls there don't block the event loop."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "An `async def` FastAPI endpoint calls `requests.get()` that takes 2s. What happens under load?",
+      "options": [
+        "Each request gets its own thread automatically",
+        "requests becomes async automatically",
+        "FastAPI raises an error",
+        "The event loop is blocked; other requests wait"
+      ],
+      "answer_index": 3,
+      "explanation": "Blocking calls inside async def run on the loop thread and stall all concurrent requests. Use httpx.AsyncClient, to_thread, or a plain def endpoint."
+    },
+    {
+      "question": "What does `asyncio.gather(a(), b(), return_exceptions=True)` return if `b()` raises?",
+      "options": [
+        "Raises b's exception",
+        "A list with a's result and b's exception object",
+        "Only a's result",
+        "None"
+      ],
+      "answer_index": 1,
+      "explanation": "With return_exceptions=True, exceptions are returned in the results list instead of propagated."
+    },
+    {
+      "question": "Which is the correct way to handle CancelledError in a task?",
+      "options": [
+        "Do cleanup in finally/except and re-raise",
+        "Catch it and return None",
+        "Catch Exception, which includes it",
+        "Ignore cancellation entirely"
+      ],
+      "answer_index": 0,
+      "explanation": "CancelledError must propagate so timeouts, TaskGroups and shutdown work; it's a BaseException since 3.8."
+    },
+    {
+      "question": "Which workload benefits LEAST from asyncio?",
+      "options": [
+        "Calling 200 REST endpoints",
+        "Serving many websocket clients",
+        "Resizing 10,000 images with Pillow",
+        "Streaming SSE progress updates"
+      ],
+      "answer_index": 2,
+      "explanation": "Image processing is CPU-bound; a single-threaded event loop gives no parallelism. Use processes."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain how the asyncio event loop works and why blocking calls are harmful.",
+      "difficulty": "medium",
+      "answer_md": "The event loop is a single-threaded scheduler. It keeps a queue of ready callbacks/tasks and a set of I/O resources it's waiting on (via epoll/kqueue/IOCP). Each iteration it: runs ready tasks until each hits an `await` on something not ready, then asks the OS which sockets/timers are ready and marks the corresponding tasks runnable again.\n\nCoroutines voluntarily yield at `await` points - **cooperative** multitasking. That's what makes it cheap (thousands of tasks, no thread per connection), and also fragile: a coroutine that runs a blocking call (`time.sleep(2)`, `requests.get`, a psycopg2 query, a big pandas transform) never yields, so the loop is stuck and **every** other request, heartbeat, and timeout waits.\n\n```python\nasync def handler():\n    data = requests.get(url).json()          # blocks the loop\n    data = (await client.get(url)).json()    # yields while waiting\n    df = await asyncio.to_thread(parse, raw)  # CPU/blocking offloaded to a thread\n```\nDetect it with `asyncio.run(main(), debug=True)` (logs callbacks slower than 100 ms) or by watching latency of unrelated endpoints spike."
+    },
+    {
+      "question": "gather vs TaskGroup: what's the difference and which would you use?",
+      "difficulty": "medium",
+      "answer_md": "Both run awaitables concurrently.\n\n**`asyncio.gather(*aws)`**\n- Returns results in input order.\n- On the first exception it propagates that error to the awaiter, but **the other tasks keep running** in the background (not cancelled) unless the gather itself is cancelled.\n- `return_exceptions=True` collects exceptions as values - handy for \"try all, report failures\".\n\n**`asyncio.TaskGroup`** (3.11+)\n- Structured concurrency: all tasks created in the `async with` block are guaranteed finished when it exits.\n- If any task fails, the others are **cancelled**, and all errors are raised as an `ExceptionGroup` (handle with `except*`).\n- No orphaned tasks, cleaner cancellation semantics.\n\n```python\nasync with asyncio.TaskGroup() as tg:\n    tasks = [tg.create_task(sync_org(o)) for o in orgs]\nresults = [t.result() for t in tasks]\n```\nI'd use **TaskGroup** by default for all-or-nothing work, and `gather(..., return_exceptions=True)` when partial success is acceptable and I want every result/error (e.g. syncing 50 independent accounts where one failing shouldn't cancel the rest)."
+    },
+    {
+      "question": "How would you call 1,000 third-party API endpoints efficiently without getting rate-limited?",
+      "difficulty": "hard",
+      "answer_md": "Use asyncio with an async HTTP client, a **bounded** concurrency level, retries with backoff, and respect for rate-limit headers.\n\n```python\nimport asyncio, random, httpx\n\nasync def fetch(client, sem, url, attempts=4):\n    async with sem:\n        for i in range(attempts):\n            try:\n                r = await client.get(url, timeout=15)\n                if r.status_code == 429:\n                    await asyncio.sleep(float(r.headers.get(\"Retry-After\", 2 ** i)))\n                    continue\n                r.raise_for_status()\n                return r.json()\n            except (httpx.TransportError, httpx.HTTPStatusError) as e:\n                if i == attempts - 1 or (isinstance(e, httpx.HTTPStatusError) and e.response.status_code < 500):\n                    raise\n                await asyncio.sleep(random.uniform(0, 2 ** i))\n\nasync def main(urls):\n    sem = asyncio.Semaphore(10)\n    limits = httpx.Limits(max_connections=10)\n    async with httpx.AsyncClient(limits=limits) as client:\n        return await asyncio.gather(*(fetch(client, sem, u) for u in urls), return_exceptions=True)\n```\nKey points: one shared client (connection reuse), semaphore sized to the provider's limit, jittered exponential backoff on 5xx/timeouts, honour `Retry-After` on 429, don't retry 4xx, collect failures for a retry queue. For strict \"N requests per second\" limits, add a token-bucket limiter rather than just a concurrency cap."
+    }
+  ]
+}

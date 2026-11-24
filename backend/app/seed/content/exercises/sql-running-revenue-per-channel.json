@@ -1,0 +1,80 @@
+{
+  "slug": "sql-running-revenue-per-channel",
+  "title": "Daily and running revenue per channel (SUM OVER)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "medium",
+  "skill": "sql-window-functions",
+  "concepts": [
+    "SUM() OVER",
+    "running total",
+    "PARTITION BY",
+    "window frame",
+    "aggregate then window"
+  ],
+  "related_topics": [
+    "sql-window-functions",
+    "sql-group-by",
+    "sql-ctes"
+  ],
+  "problem_md": "Finance wants a month-to-date view: for each channel and each day that had sales, the **day's revenue** and the\n**cumulative revenue** so far. Cancelled orders don't count. A channel can have several orders on the same day.\n\n```sql\nCREATE TABLE channels (\n  channel_id INTEGER PRIMARY KEY,\n  name       TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  channel_id   INTEGER NOT NULL,\n  order_date   TEXT NOT NULL,\n  status       TEXT NOT NULL,\n  total_amount REAL NOT NULL\n);\n```\n\n> Money columns are `REAL` in this sandbox (they would be `NUMERIC(12,2)` in production PostgreSQL). Dates are ISO `'YYYY-MM-DD'` text.\n\n**Task.** Return `channel_name`, `order_date`, `daily_revenue`, `running_revenue` - one row per channel per day\nthat has at least one non-cancelled order. `running_revenue` is the sum of `daily_revenue` for that channel up to\nand including that day. Order by `channel_name`, `order_date`.",
+  "examples": [
+    {
+      "input": "Myntra: 03-01 orders 1000 + 500; 03-02 one cancelled (700) and one shipped (200); 03-03 only cancelled",
+      "output": "channel_name | order_date | daily_revenue | running_revenue\nMyntra       | 2024-03-01 | 1500          | 1500\nMyntra       | 2024-03-02 | 200           | 1700\nMyntra       | 2024-03-04 | 1200          | 2900"
+    }
+  ],
+  "hints": [
+    "Two steps: aggregate to one row per (channel, day), then compute a running sum over those rows.",
+    "`SUM(daily_revenue) OVER (PARTITION BY channel_name ORDER BY order_date)` restarts per channel and accumulates by date.",
+    "You can even nest it: `SUM(SUM(o.total_amount)) OVER (PARTITION BY c.name ORDER BY o.order_date)` in a grouped query."
+  ],
+  "starter_code": "-- Write your query here\nSELECT c.name AS channel_name, o.order_date\nFROM orders o\nJOIN channels c ON c.channel_id = o.channel_id\n",
+  "solution_code": "WITH daily AS (\n  SELECT c.name AS channel_name,\n         o.order_date,\n         SUM(o.total_amount) AS daily_revenue\n  FROM orders o\n  JOIN channels c ON c.channel_id = o.channel_id\n  WHERE o.status <> 'CANCELLED'\n  GROUP BY c.name, o.order_date\n)\nSELECT channel_name,\n       order_date,\n       daily_revenue,\n       SUM(daily_revenue) OVER (PARTITION BY channel_name\n                                ORDER BY order_date\n                                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_revenue\nFROM daily\nORDER BY channel_name, order_date;",
+  "solution_md": "**Running totals = `SUM() OVER (... ORDER BY ...)`.** With an `ORDER BY` inside `OVER`, the aggregate is computed\nover a *frame* that grows from the partition's first row to the current row.\n\n**Frames, RANGE vs ROWS.** The default frame when `ORDER BY` is present is\n`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which includes **peers** (rows with the same `order_date`). If\nyou skipped the daily aggregation and ran the window directly over orders, both 03-01 Myntra orders would show\n`1500` as the running value (peers are included together), which surprises people. With `ROWS` they'd show 1000\nthen 1500. Aggregating per day first makes dates unique per channel, so both frames agree - stating\n`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` explicitly documents intent (and is slightly cheaper in\nPostgreSQL).\n\n- The cancelled-only day (Myntra 03-03) has no row: the `WHERE` removed all its orders before grouping. If finance\n  needs a row for *every* calendar day, generate a date spine and `LEFT JOIN` it (in PostgreSQL:\n  `generate_series('2024-03-01'::date, '2024-03-31', interval '1 day')`; portable SQL: a recursive CTE).\n- Nykaa's `RETURNED` order still counts because only `CANCELLED` was excluded - make sure that's the business rule.\n\n**Compact form** (aggregate inside a window in one SELECT):\n\n```sql\nSELECT c.name AS channel_name, o.order_date,\n       SUM(o.total_amount) AS daily_revenue,\n       SUM(SUM(o.total_amount)) OVER (PARTITION BY c.name ORDER BY o.order_date) AS running_revenue\nFROM orders o JOIN channels c ON c.channel_id = o.channel_id\nWHERE o.status <> 'CANCELLED'\nGROUP BY c.name, o.order_date\nORDER BY 1, 2;\n```\n\n**Index.** `orders (channel_id, order_date)` supports date-range filters on large tables.",
+  "tests": {
+    "schema_sql": "CREATE TABLE channels (\n  channel_id INTEGER PRIMARY KEY,\n  name       TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  channel_id   INTEGER NOT NULL,\n  order_date   TEXT NOT NULL,\n  status       TEXT NOT NULL,\n  total_amount REAL NOT NULL\n);\n\nINSERT INTO channels VALUES (1,'Myntra'),(2,'Nykaa');\n\nINSERT INTO orders VALUES\n (1,1,'2024-03-01','DELIVERED',1000.00),\n (2,1,'2024-03-01','DELIVERED', 500.00),\n (3,1,'2024-03-02','CANCELLED', 700.00),\n (4,1,'2024-03-02','SHIPPED',   200.00),\n (5,1,'2024-03-03','CANCELLED', 999.00),\n (6,1,'2024-03-04','DELIVERED',1200.00),\n (7,2,'2024-03-01','DELIVERED', 300.00),\n (8,2,'2024-03-03','DELIVERED', 450.00),\n (9,2,'2024-03-03','RETURNED',   50.00);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "channel_name",
+        "order_date",
+        "daily_revenue",
+        "running_revenue"
+      ],
+      "rows": [
+        [
+          "Myntra",
+          "2024-03-01",
+          1500,
+          1500
+        ],
+        [
+          "Myntra",
+          "2024-03-02",
+          200,
+          1700
+        ],
+        [
+          "Myntra",
+          "2024-03-04",
+          1200,
+          2900
+        ],
+        [
+          "Nykaa",
+          "2024-03-01",
+          300,
+          300
+        ],
+        [
+          "Nykaa",
+          "2024-03-03",
+          500,
+          800
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

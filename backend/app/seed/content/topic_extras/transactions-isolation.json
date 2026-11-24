@@ -1,0 +1,65 @@
+{
+  "slug": "transactions-isolation",
+  "why_md": "- Concurrency bugs (lost updates, double-claimed jobs, overselling) come from misunderstanding transactions and isolation.\n- Job queues on PostgreSQL rely on row locks (`FOR UPDATE SKIP LOCKED`); bulk upserts must handle deadlocks.\n- Long transactions block VACUUM and hold locks — a common production incident in ETL systems.\n- Isolation levels, MVCC and deadlocks are standard senior backend interview topics.",
+  "revision_notes_md": "- ACID: atomic, consistent, isolated, durable; PostgreSQL default isolation = READ COMMITTED.\n- READ COMMITTED: each statement sees a fresh snapshot; REPEATABLE READ: one snapshot per transaction; SERIALIZABLE: adds SSI to prevent write skew.\n- RR/SERIALIZABLE can fail with serialization errors (SQLSTATE 40001) — the app must retry the whole transaction.\n- `UPDATE ... SET qty = qty - 1` is safe under READ COMMITTED (re-checks the latest row version); read-modify-write in Python is not.\n- `SELECT ... FOR UPDATE` locks rows; `SKIP LOCKED` lets parallel workers claim different rows; `NOWAIT` fails fast.\n- Deadlock = cycle of lock waits; PostgreSQL aborts one (40P01). Prevent by locking in a consistent order.\n- MVCC: readers don't block writers; old row versions remain until VACUUM — long transactions prevent cleanup.\n- Keep transactions short; never wait on network calls while holding locks.",
+  "exercises_md": "1. Open two psql sessions and reproduce: a lost update with read-modify-write, then fix it with `FOR UPDATE` and with an atomic `UPDATE ... SET x = x - 1`.\n2. Write a pytest that starts 5 threads claiming jobs with `FOR UPDATE SKIP LOCKED` from a 100-row jobs table and asserts every job was claimed exactly once.",
+  "my_context_md": "`ForcesightJobSchedulerAndRunner` claims jobs with `SELECT ... FOR UPDATE SKIP LOCKED` (src/lock.py, job_repo.py, with a ThreadPoolExecutor in runner.py) and has tests for locking; `DebitNotes` uses `SELECT ... FOR UPDATE` row locks; and `ECSMarketplaceDataUpload` retries on deadlocks. `AmazonVendorBankRecon/db.py`'s `db_transaction()` context manager defines the transaction boundary — keeping everything inside it short is what keeps those locks cheap.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "Parallel workers can each claim different pending jobs without blocking each other using `SELECT ... FOR UPDATE ____ LOCKED`.",
+      "answers": [
+        "skip"
+      ],
+      "explanation": "SKIP LOCKED ignores rows already locked by other transactions."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "PostgreSQL's default transaction isolation level is READ ____.",
+      "answers": [
+        "committed"
+      ],
+      "explanation": "READ COMMITTED: each statement sees data committed before it began."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.execute(\"CREATE TABLE acct(id INT, bal INT)\")\ndb.execute(\"INSERT INTO acct VALUES (1, 100), (2, 0)\")\ndb.commit()\ntry:\n    with db:\n        db.execute(\"UPDATE acct SET bal = bal - 30 WHERE id = 1\")\n        raise RuntimeError(\"payment API timeout\")\n        db.execute(\"UPDATE acct SET bal = bal + 30 WHERE id = 2\")\nexcept RuntimeError as e:\n    print(\"error:\", e)\nprint(db.execute(\"SELECT bal FROM acct ORDER BY id\").fetchall())",
+      "answers": [
+        "error: payment API timeout\n[(100,), (0,)]"
+      ],
+      "explanation": "`with conn:` commits on success and rolls back on exception, so the half-done transfer is undone (atomicity)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\", isolation_level=None)\ndb.execute(\"CREATE TABLE t(v INT)\")\ndb.execute(\"BEGIN\")\ndb.execute(\"INSERT INTO t VALUES (1)\")\ndb.execute(\"SAVEPOINT sp\")\ndb.execute(\"INSERT INTO t VALUES (2)\")\ndb.execute(\"ROLLBACK TO sp\")\ndb.execute(\"INSERT INTO t VALUES (3)\")\ndb.execute(\"COMMIT\")\nprint([r[0] for r in db.execute(\"SELECT v FROM t ORDER BY v\")])",
+      "answers": [
+        "[1, 3]"
+      ],
+      "explanation": "ROLLBACK TO a savepoint undoes only the work after the savepoint; the outer transaction continues and commits 1 and 3."
+    },
+    {
+      "type": "debug",
+      "prompt": "Two workers sometimes ship the same order twice. What's the race and how do you fix it?",
+      "code": "def claim_next_order(conn):\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT id FROM orders WHERE status = 'ready' ORDER BY id LIMIT 1\")\n        row = cur.fetchone()\n        if row:\n            cur.execute(\"UPDATE orders SET status = 'shipping' WHERE id = %s\", row)\n    conn.commit()\n    return row",
+      "answer": "Both workers can SELECT the same `ready` row before either UPDATE commits (check-then-act race), so both claim it.\n\nLock the row during the claim and let other workers skip it — or do it in one atomic statement:\n```python\ncur.execute('''\n    UPDATE orders SET status = 'shipping'\n    WHERE id = (\n        SELECT id FROM orders WHERE status = 'ready'\n        ORDER BY id LIMIT 1\n        FOR UPDATE SKIP LOCKED)\n    RETURNING id''')\nrow = cur.fetchone()\nconn.commit()\n```\nAlternatively add `AND status = 'ready'` to the UPDATE and check `cur.rowcount`.",
+      "rubric": [
+        "Check-then-act race between SELECT and UPDATE",
+        "Use FOR UPDATE (SKIP LOCKED) or a single atomic UPDATE ... RETURNING",
+        "Guard the UPDATE with the expected status / check rowcount"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain what a deadlock is in PostgreSQL, how it's detected, and how you prevent it in concurrent bulk upserts.",
+      "answer": "A deadlock is a cycle of lock waits: transaction A holds a lock on row 1 and waits for row 2, while B holds row 2 and waits for row 1. Neither can proceed.\n\nPostgreSQL checks for cycles after `deadlock_timeout` (1 s default), aborts one transaction with `deadlock detected` (SQLSTATE 40P01), and the other proceeds.\n\nPrevention in bulk upserts:\n- Lock/write rows in a **consistent order**: sort each batch by the conflict key before `execute_values`.\n- De-duplicate keys within a batch.\n- Keep transactions short and batches smaller.\n- Avoid overlapping work: partition batches by org/key so workers don't touch the same rows.\n\nStill keep a **retry** for 40P01/40001: roll back and re-run the whole transaction with a small backoff — it must be safe to retry (idempotent upserts are).",
+      "rubric": [
+        "Cycle of lock waits between transactions",
+        "Detected after deadlock_timeout; one transaction aborted (40P01)",
+        "Consistent lock ordering (sort keys), short transactions",
+        "Retry the whole transaction as a safety net"
+      ]
+    }
+  ]
+}

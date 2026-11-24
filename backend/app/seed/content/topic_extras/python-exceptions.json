@@ -1,0 +1,55 @@
+{
+  "slug": "python-exceptions",
+  "why_md": "Error handling decides whether a failed marketplace upload produces a clear status and a stack trace in the logs, or a silent half-written state nobody notices. Interviewers probe specific vs broad catching, exception chaining, custom hierarchies and where to log - and in AI systems, distinguishing retryable (rate limit, timeout) from permanent errors (bad request) is central.",
+  "revision_notes_md": "- Catch the narrowest exception you can handle; let the rest propagate.\n- `except Exception` at a boundary only (job runner, request handler) - log with `logger.exception` and re-raise or record status.\n- Bare `except:` also catches `KeyboardInterrupt`/`SystemExit` - avoid.\n- `raise NewError(...) from e` keeps the cause (`__cause__`); `from None` hides it.\n- Custom hierarchy: `class AppError(Exception)`, then `ValidationError(AppError)`, `RetryableError(AppError)`.\n- `else` runs if no exception; `finally` always runs.\n- `except* ` / `ExceptionGroup` (3.11+) for multiple concurrent errors (TaskGroup).\n- Use `raise` (bare) to re-raise preserving the traceback.",
+  "exercises_md": "1. Design an exception hierarchy for an ingestion pipeline (`MissingColumnsError` carrying the missing columns, `RetryableDbError`), and make the job runner map each to a status and log message.\n2. Take one function containing `except: pass` from your repo, list what could actually fail, and rewrite it with specific handlers plus logging.",
+  "my_context_md": "The repo scan found 88% of except blocks are broad and 432 `except: pass` - the single biggest habit this topic targets. `DebitNotes` already defines custom exception classes, a good model to extend, and ECSMarketplaceDataUpload's upload status tracking is the natural boundary where specific exceptions should become recorded error states.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To raise a new exception while keeping the original as its cause, write `raise ConfigError('missing') ____ e`.",
+      "answers": [
+        "from"
+      ],
+      "explanation": "Sets __cause__ for the traceback."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A bare `except:` also catches KeyboardInterrupt and SystemExit because it catches ____.",
+      "answers": [
+        "BaseException"
+      ],
+      "explanation": "except Exception does not catch those."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def load(x):\n    try:\n        n = int(x)\n    except ValueError:\n        print(\"bad\", x)\n        return None\n    else:\n        print(\"ok\", n)\n        return n\n    finally:\n        print(\"done\", x)\n\nload(\"5\")\nload(\"x\")",
+      "answers": [
+        "ok 5\ndone 5\nbad x\ndone x"
+      ],
+      "explanation": "else runs only when no exception; finally runs in both cases, before the return completes."
+    },
+    {
+      "type": "debug",
+      "prompt": "Uploads sometimes stay 'Processing' forever with nothing in the logs. What's wrong?",
+      "code": "def process(upload_id):\n    try:\n        df = read_report(upload_id)\n        write_rows(df)\n        set_status(upload_id, \"Completed\")\n    except:\n        pass",
+      "answer": "The bare `except: pass` swallows everything - including bugs and KeyboardInterrupt - so failures leave no log and the status is never updated.\n\n```python\nimport logging\nlogger = logging.getLogger(__name__)\n\ndef process(upload_id):\n    try:\n        df = read_report(upload_id)\n        write_rows(df)\n    except MissingColumnsError as e:\n        set_status(upload_id, \"Error\", str(e))\n    except Exception:\n        logger.exception(\"upload %s failed\", upload_id)\n        set_status(upload_id, \"Error\", \"internal error\")\n        raise\n    else:\n        set_status(upload_id, \"Completed\")\n```",
+      "rubric": [
+        "Bare except: pass hides all errors and leaves no trace",
+        "Catch specific expected errors and record status",
+        "Log unexpected errors with logger.exception and re-raise"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you decide where to catch an exception in a multi-layer service.",
+      "answer": "Catch where you can do something meaningful: retry a transient error, translate to a domain error (`raise UploadError(...) from e`), or convert to a status/HTTP response. Low-level code should mostly let exceptions propagate. One top-level boundary (job runner, request handler) catches `Exception`, logs it once with traceback and records the failure. Avoid logging-and-re-raising at every layer (duplicate logs) and never swallow silently.",
+      "rubric": [
+        "Catch only where you can handle/translate/retry",
+        "One boundary handler logs with traceback",
+        "Don't log at every layer or swallow errors"
+      ]
+    }
+  ]
+}

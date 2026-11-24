@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, kv, stat %}
+{% block title %}{{ s.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><div class="small faint"><a href="/skills">Skills</a> · {{ s.category }} · {{ track_labels.get(s.track, s.track) }}</div>
+    <h1>{{ s.name }}</h1>
+    <div class="row">{{ badge(s.classification, kind="classification") }}{{ badge(s.status) }}{{ dots(s.proficiency, s.target_proficiency) }}<span class="small muted">{{ levels.get(s.proficiency, "not self-assessed") }}{% if s.target_proficiency %} → target {{ levels[s.target_proficiency] }}{% endif %}</span></div>
+  </div>
+  <div class="actions"><a class="btn {{ 'primary' if not edit }}" href="/skills/{{ s.id }}{{ '' if edit else '?edit=1' }}">{{ "Close editor" if edit else "Edit" }}</a></div>
+</div>
+
+{% if edit %}
+<form method="post" action="/skills/{{ s.id }}/edit" class="card mb"><div class="body form-grid">
+  <div class="grid g4">
+    <label class="field" style="grid-column:span 2">Name<input name="name" value="{{ s.name }}" required></label>
+    <label class="field">Category<input name="category" value="{{ s.category }}"></label>
+    <label class="field">Track<select name="track">{% for k, v in track_labels.items() %}<option value="{{ k }}" {{ 'selected' if k == s.track }}>{{ v }}</option>{% endfor %}</select></label>
+  </div>
+  <div class="grid g5">
+    <label class="field">Evidence<select name="classification">{% for k, v in classifications.items() %}<option value="{{ k }}" {{ 'selected' if k == s.classification }}>{{ v }}</option>{% endfor %}</select></label>
+    <label class="field">Status<select name="status">{% for k in statuses %}<option value="{{ k }}" {{ 'selected' if k == s.status }}>{{ k|label }}</option>{% endfor %}</select></label>
+    <label class="field">Proficiency<select name="proficiency"><option value="">—</option>{% for n, t in levels.items() %}<option value="{{ n }}" {{ 'selected' if n == s.proficiency }}>{{ n }} · {{ t }}</option>{% endfor %}</select></label>
+    <label class="field">Target<select name="target_proficiency"><option value="">—</option>{% for n, t in levels.items() %}<option value="{{ n }}" {{ 'selected' if n == s.target_proficiency }}>{{ n }} · {{ t }}</option>{% endfor %}</select></label>
+    <label class="field">Confidence<select name="confidence"><option value="">—</option>{% for n in range(1, 6) %}<option value="{{ n }}" {{ 'selected' if n == s.confidence }}>{{ n }}/5</option>{% endfor %}</select></label>
+  </div>
+  <label class="field">Description<textarea name="description" rows="2">{{ s.description }}</textarea></label>
+  <label class="field">Next action<textarea name="next_action" rows="2">{{ s.next_action }}</textarea></label>
+  <label class="field">Evidence notes<textarea name="evidence_notes" rows="3">{{ s.evidence_notes }}</textarea></label>
+  <label class="field">Practical experience<textarea name="practical_experience" rows="3">{{ s.practical_experience }}</textarea></label>
+  <label class="field">Notes<textarea name="notes" rows="3">{{ s.notes }}</textarea></label>
+  <label class="row small"><input type="hidden" name="is_archived" value="0"><input type="checkbox" name="is_archived" value="1" {{ 'checked' if s.is_archived }}> Archived</label>
+  <div><button class="btn primary">Save</button></div>
+</div></form>
+{% endif %}
+
+<div class="grid g4 mb">
+  {{ stat("Topics demonstrated", s.stats.topics_done ~ " / " ~ s.stats.topics_total, (s.stats.topics_attention ~ " need attention") if s.stats.topics_attention else None) }}
+  {{ stat("Exercises solved", s.stats.exercises_solved ~ " / " ~ s.stats.exercises_total, s.detail.attempts_total ~ " attempts") }}
+  {{ stat("Time", s.stats.hours|hours, ("last " ~ s.stats.last_studied_at|rel) if s.stats.last_studied_at else None) }}
+  {{ stat("Recall", ((100 * s.detail.reviews_remembered / s.detail.reviews_total)|round|int ~ "%") if s.detail.reviews_total else "—", s.detail.reviews_total ~ " reviews" ~ (" · quiz avg " ~ s.detail.quiz_avg_pct ~ "%" if s.detail.quiz_avg_pct is not none else "")) }}
+</div>
+
+<div class="grid g-side">
+  <div class="stack">
+    {% if s.description or s.next_action or s.evidence_notes or s.practical_experience or s.notes %}
+      {% call card() %}
+        {% if s.description %}<p class="muted" style="margin-top:0">{{ s.description }}</p>{% endif %}
+        {% for key, heading in [("next_action", "Next action"), ("evidence_notes", "Evidence"), ("practical_experience", "Practical experience"), ("notes", "Notes")] %}
+          {% if s[key] %}<div class="topic-section mt"><h3>{{ heading }}</h3><div class="md">{{ s[key]|md }}</div></div>{% endif %}
+        {% endfor %}
+      {% endcall %}
+    {% endif %}
+    {% if s.topics %}
+      {% call card("Topics (" ~ s.topics|length ~ ")", flush=True) %}
+        <table class="table">{% for t in s.topics %}<tr><td><a href="/topics/{{ t.id }}">{{ t.title }}</a>{% if not t.primary %} <span class="tiny faint">related</span>{% endif %}</td><td>{{ badge(t.status) }}</td><td>{{ badge(t.difficulty) }}</td></tr>{% endfor %}</table>
+      {% endcall %}
+    {% endif %}
+    {% if s.exercises %}
+      {% call card("Exercises", flush=True) %}
+        <table class="table">{% for e in s.exercises %}<tr><td><a href="/practice/{{ e.id }}">{{ e.title }}</a></td><td>{{ badge(e.difficulty) }}</td><td>{{ badge(e.status) }}</td></tr>{% endfor %}</table>
+      {% endcall %}
+    {% endif %}
+  </div>
+  <div class="stack">
+    {% if s.detail.time_by_month %}{% call card("Hours per month") %}{{ charts.bars(s.detail.time_by_month, "month", [("hours", "Hours")], height=140, fmt_x=charts.month_label) }}{% endcall %}{% endif %}
+    {% call card("Proficiency history", flush=True) %}
+      {% if s.detail.proficiency_history %}<ul class="list">{% for h in s.detail.proficiency_history|reverse %}<li class="small between"><span>{{ h.old or "—" }} → <strong>{{ h.new }}</strong></span><span class="faint">{{ h.at|date }}</span></li>{% endfor %}</ul>
+      {% else %}<div class="body small faint">No ratings yet — <a href="/skills/assess">self-assess</a>.</div>{% endif %}
+    {% endcall %}
+    {% if s.projects %}{% call card("Projects") %}<ul class="list compact">{% for p in s.projects %}<li><a href="/projects/{{ p.id }}">{{ p.name }}</a> {{ badge(p.status) }}</li>{% endfor %}</ul>{% endcall %}{% endif %}
+    {% if s.history %}
+      {% call card("History", flush=True) %}<ul class="list">{% for h in s.history[:15] %}<li class="small"><span class="faint">{{ h.at|rel }}</span> · {{ h.summary }}</li>{% endfor %}</ul>{% endcall %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

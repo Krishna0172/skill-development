@@ -1,0 +1,118 @@
+{
+  "slug": "python-decorators",
+  "title": "Decorators",
+  "skill": "python",
+  "extra_skills": [],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "python",
+    "functions",
+    "decorators",
+    "closures",
+    "functools"
+  ],
+  "summary": "A decorator is a function that takes a function and returns a new function that wraps it. `@timer` above `def f` is just shorthand for `f = timer(f)`. Decorators let you add behaviour like logging, timing, retries, caching or auth checks without editing the function body. Always use `functools.wraps` so the wrapped function keeps its name and docstring.",
+  "details_md": "### What `@` actually does\n```python\n@decorator\ndef f(): ...\n```\nis exactly `f = decorator(f)`, executed once when the module is imported. The decorator usually defines an inner `wrapper(*args, **kwargs)` that runs extra code before/after calling the original. Because `wrapper` closes over `func`, it is a **closure**.\n\n### functools.wraps\nWithout `@functools.wraps(func)`, the wrapper replaces the original's `__name__`, `__doc__`, `__module__`, `__qualname__` and annotations, which breaks logging, debugging and introspection-heavy frameworks. `wraps` copies these and sets `wrapper.__wrapped__ = func`, so `inspect.signature` can see the real parameters. This matters for FastAPI: it inspects the endpoint signature to build request parsing, so a decorator without `wraps` on a route handler can break parameter detection.\n\n### Decorators with arguments\n`@retry(attempts=3)` is a **decorator factory**: `retry(attempts=3)` runs first and returns the actual decorator. That gives three levels of nesting: factory -> decorator -> wrapper.\n\n### Stacking order\n```python\n@a\n@b\ndef f(): ...\n```\nequals `f = a(b(f))`. The decorator closest to the function is applied first, but at call time the outermost wrapper (`a`) runs first.\n\n### Async functions\nA sync wrapper around an `async def` function returns the coroutine without awaiting it, so timing/try-except inside it measures nothing. For coroutines write `async def wrapper(...)` and `await func(...)`. You can detect with `inspect.iscoroutinefunction(func)` and return the right wrapper.\n\n### Class-based decorators and decorating classes\nAny callable works as a decorator. A class with `__call__` is useful when the decorator needs state. Decorators can also be applied to classes (`@dataclass` is one: it receives the class, generates methods and returns it).\n\n### Built-in decorators you use daily\n- `@property`, `@staticmethod`, `@classmethod` - descriptors for methods.\n- `@functools.cache` / `@functools.lru_cache(maxsize=...)` - memoisation keyed on hashable arguments.\n- `@contextlib.contextmanager` - turns a generator into a context manager.\n- `@dataclass` - generates `__init__`, `__repr__`, `__eq__`.\n- Framework decorators like `@app.get(\"/path\")` - these **register** the function in a routing table and return it unchanged. Registration decorators are a clean way to build a plugin registry.\n\n### Typing decorators\nUse `ParamSpec` (3.10+) so type checkers preserve the decorated function's signature. In 3.12+ the generic syntax is `def deco[**P, R](func: Callable[P, R]) -> Callable[P, R]`.\n\n### Costs\nEach layer adds a function call (small but non-zero overhead), and deep stacks make tracebacks noisier. Keep wrappers thin and push logic into normal functions.",
+  "code_md": "```python\n# A timing decorator that preserves metadata\nimport functools, time, logging\n\nlogging.basicConfig(level=logging.INFO)\nlog = logging.getLogger(__name__)\n\ndef timed(func):\n    @functools.wraps(func)\n    def wrapper(*args, **kwargs):\n        start = time.perf_counter()\n        try:\n            return func(*args, **kwargs)\n        finally:\n            log.info(\"%s took %.3fs\", func.__name__, time.perf_counter() - start)\n    return wrapper\n\n@timed\ndef process_report(rows):\n    \"Process a report.\"\n    return sum(rows)\n\nprocess_report([1, 2, 3])\nprint(process_report.__name__, process_report.__doc__)  # process_report Process a report.\n```\n\n```python\n# Decorator factory with arguments: retry with exponential backoff\nimport functools, random, time\n\ndef retry(attempts=3, exceptions=(ConnectionError,), base_delay=0.5):\n    def decorator(func):\n        @functools.wraps(func)\n        def wrapper(*args, **kwargs):\n            for attempt in range(1, attempts + 1):\n                try:\n                    return func(*args, **kwargs)\n                except exceptions:\n                    if attempt == attempts:\n                        raise\n                    time.sleep(base_delay * 2 ** (attempt - 1) + random.uniform(0, 0.1))\n        return wrapper\n    return decorator\n\n@retry(attempts=4, exceptions=(ConnectionError, TimeoutError))\ndef fetch_page(page):\n    ...\n```\n\n```python\n# Registration decorator: build a handler registry\nHANDLERS = {}\n\ndef register(report_type):\n    def decorator(func):\n        HANDLERS[report_type] = func   # side effect at import time\n        return func                    # return the original unchanged\n    return decorator\n\n@register(\"amazon_orders\")\ndef handle_amazon_orders(df):\n    return f\"amazon: {len(df)} rows\"\n\nprint(HANDLERS[\"amazon_orders\"]([1, 2]))\n```\n\n```python\n# Async-aware decorator with typed signature (Python 3.12 generics)\nimport asyncio, functools, time\nfrom collections.abc import Awaitable, Callable\n\ndef atimed[**P, R](func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:\n    @functools.wraps(func)\n    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:\n        start = time.perf_counter()\n        try:\n            return await func(*args, **kwargs)\n        finally:\n            print(f\"{func.__name__}: {time.perf_counter() - start:.3f}s\")\n    return wrapper\n\n@atimed\nasync def download(url: str) -> int:\n    await asyncio.sleep(0.1)\n    return 200\n\nasyncio.run(download(\"https://example.com\"))\n```",
+  "use_cases_md": "- **Cross-cutting concerns**: logging, timing, metrics, tracing around many functions.\n- **Retries** with backoff around flaky network calls.\n- **Caching** with `functools.cache`/`lru_cache` for pure, expensive functions.\n- **Access control**: checking a user/role before running a handler.\n- **Registration**: `@app.get`, `@register(\"type\")` plugin/handler registries.\n- **Validation / input normalisation** before the core logic runs.",
+  "mistakes_md": "- **Forgetting `functools.wraps`** - name/docstring/signature are lost; logs say `wrapper` and frameworks like FastAPI can misread parameters. Fix: always decorate the wrapper with `@functools.wraps(func)`.\n- **Forgetting to `return func(...)`** in the wrapper - decorated function returns `None`. Fix: return the result.\n- **Calling the factory wrong** - `@retry` vs `@retry()` for a factory: `@retry` passes the function as `attempts`. Fix: be consistent, or support both forms explicitly.\n- **Sync wrapper on async functions** - the coroutine is returned un-awaited, so timing/exception handling is meaningless. Fix: `async def wrapper` with `await`.\n- **`lru_cache` on methods or with unhashable args** - caches `self` (memory leak) or raises `TypeError`. Fix: cache module-level functions with hashable args, or use `functools.cached_property`.\n- **Heavy work at decoration time** - runs on import. Fix: do work in the wrapper or lazily.",
+  "best_practices_md": "- Keep decorators small, generic and side-effect free (except deliberate registration).\n- Always use `functools.wraps`; type them with `ParamSpec` so IDEs keep the real signature.\n- Make retry decorators configurable (attempts, which exceptions, delay) and only retry idempotent operations.\n- Prefer explicit composition when a decorator would hide important control flow (e.g. transactions).\n- Document stacking order when multiple decorators interact (auth before caching, etc.).",
+  "my_context_md": "- Your FastAPI downloader apps use route decorators like `@app.get(...)`/`@app.post(...)` - these are registration decorators that add the function to the router.\n- The deadlock-retry loop around your Citus order upserts in ECSMarketplaceDataUpload is a natural candidate for a `@retry(exceptions=(psycopg2.errors.DeadlockDetected,))` decorator so the retry policy is reusable rather than hand-coded.\n- Your `_MODULE_SPECS`/`MODULE_DISPATCH` registry is built explicitly; a `@register(\"report_type\")` decorator is the alternative pattern (with the trade-off that registration happens on import, which conflicts with your lazy-import design).",
+  "related": [
+    "python-functions-args",
+    "python-context-managers",
+    "retries-backoff-idempotency",
+    "registry-dispatcher-pattern",
+    "python-typing"
+  ],
+  "flashcards": [
+    {
+      "front": "What is `@deco` above `def f` equivalent to?",
+      "back": "`f = deco(f)` - run once at definition (import) time."
+    },
+    {
+      "front": "Why use `functools.wraps`?",
+      "back": "Copies `__name__`, `__doc__`, `__qualname__`, annotations and sets `__wrapped__`, so logs, debuggers and `inspect.signature` see the original function."
+    },
+    {
+      "front": "Order of `@a @b def f`?",
+      "back": "`f = a(b(f))`: b wraps first; at call time a's wrapper runs first."
+    },
+    {
+      "front": "How many nesting levels does a decorator with arguments need?",
+      "back": "Three: factory(args) -> decorator(func) -> wrapper(*args, **kwargs)."
+    },
+    {
+      "front": "What breaks if you wrap an async function with a sync wrapper?",
+      "back": "The wrapper returns an un-awaited coroutine, so timing/try-except inside it doesn't cover the actual execution."
+    },
+    {
+      "front": "Typing tool for preserving a decorated function's parameters?",
+      "back": "`ParamSpec` (e.g. `def deco[**P, R](f: Callable[P, R]) -> Callable[P, R]`)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "What does a registration decorator like `@app.get('/x')` typically return?",
+      "options": [
+        "A new wrapper function",
+        "None",
+        "The original function, after storing it in a registry",
+        "A class instance"
+      ],
+      "answer_index": 2,
+      "explanation": "Registration decorators record the function (route table, plugin dict) and usually return it unchanged."
+    },
+    {
+      "question": "You write `@retry` (without parentheses) for a decorator factory `def retry(attempts=3)`. What happens?",
+      "options": [
+        "The decorated function is passed as `attempts`, so the name now points to the inner decorator",
+        "It works with default arguments",
+        "SyntaxError",
+        "The function runs three times at import"
+      ],
+      "answer_index": 0,
+      "explanation": "`@retry` calls `retry(func)`, binding the function to `attempts` and replacing it with the inner decorator - calls then misbehave."
+    },
+    {
+      "question": "Which is NOT a common decorator use case?",
+      "options": [
+        "Caching",
+        "Retry logic",
+        "Timing/metrics",
+        "Changing a local variable inside the decorated function"
+      ],
+      "answer_index": 3,
+      "explanation": "Decorators wrap calls; they cannot reach into the decorated function's local variables."
+    },
+    {
+      "question": "Why can `@functools.lru_cache` on an instance method be a problem?",
+      "options": [
+        "It is a syntax error",
+        "It caches `self` in the key, keeping instances alive and sharing one cache across instances",
+        "It only works on async methods",
+        "It disables `__repr__`"
+      ],
+      "answer_index": 1,
+      "explanation": "The cache holds strong references to `self`, which can leak memory; use `cached_property` or a module-level function."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Write a decorator that retries a function on specific exceptions. What design issues should you consider?",
+      "difficulty": "medium",
+      "answer_md": "```python\nimport functools, random, time\n\ndef retry(*, attempts=3, on=(Exception,), base=0.5, cap=10.0):\n    def decorator(func):\n        @functools.wraps(func)\n        def wrapper(*args, **kwargs):\n            for i in range(attempts):\n                try:\n                    return func(*args, **kwargs)\n                except on:\n                    if i == attempts - 1:\n                        raise                     # re-raise the last error\n                    delay = min(cap, base * 2 ** i)\n                    time.sleep(random.uniform(0, delay))  # full jitter\n        return wrapper\n    return decorator\n```\nDesign issues:\n- **Only retry idempotent operations** - retrying a non-idempotent POST can duplicate orders.\n- **Narrow exceptions** - retry `ConnectionError`/`TimeoutError`/deadlocks, never `ValueError` from bad input.\n- **Backoff with jitter** to avoid thundering herds, plus a cap on delay and total attempts.\n- **Preserve the original exception** (bare `raise`) and log each attempt.\n- Use `functools.wraps`; provide an async variant (`asyncio.sleep`) for coroutines.\n- Libraries like `tenacity` already implement this well for production code."
+    },
+    {
+      "question": "How do decorators work under the hood, and why do they matter for frameworks like FastAPI?",
+      "difficulty": "medium",
+      "answer_md": "A decorator is any callable that receives an object (usually a function) and returns a replacement. `@d` is syntactic sugar for `f = d(f)` evaluated when the `def` executes. The returned wrapper is a closure that keeps a reference to the original function.\n\nFrameworks use two flavours:\n1. **Registration**: `@app.get(\"/items/{id}\")` stores the endpoint in the router and returns it. FastAPI then calls `inspect.signature` on the function to decide which parameters are path params, query params, bodies (Pydantic models) or dependencies (`Depends`).\n2. **Wrapping**: middleware-like behaviour (auth, caching).\n\nThat's why `functools.wraps` matters: it sets `__wrapped__`, and `inspect.signature` follows `__wrapped__` to report the original parameters. A custom decorator on a FastAPI route *without* `wraps` exposes `(*args, **kwargs)`, so FastAPI can't see the real parameters and request parsing breaks. Also, if the endpoint is `async def`, the wrapper must be `async def` and `await` the call, otherwise FastAPI may treat it as a sync function."
+    },
+    {
+      "question": "What is the difference between functools.cache, lru_cache and cached_property?",
+      "difficulty": "hard",
+      "answer_md": "- `@functools.lru_cache(maxsize=128)` memoises a function keyed by its (hashable) arguments, evicting the least recently used entries once `maxsize` is reached. It exposes `cache_info()` and `cache_clear()`. It's thread-safe in the sense that the cache won't be corrupted, though the function may run more than once for the same key under concurrency.\n- `@functools.cache` (3.9+) is `lru_cache(maxsize=None)`: unbounded, slightly faster, but can grow forever.\n- `@functools.cached_property` computes an attribute once per **instance** and stores it in the instance `__dict__`, so it dies with the instance.\n\nPitfalls: arguments must be hashable (no lists/dicts/DataFrames); caching a function with side effects or time-dependent results returns stale data; using `lru_cache` on methods keys on `self` and keeps instances alive. Example of a good fit:\n```python\n@functools.lru_cache(maxsize=256)\ndef column_map_for(report_type: str) -> tuple[tuple[str, str], ...]:\n    return load_mapping_from_disk(report_type)   # pure, hashable key\n```\nFor data shared across processes or hosts you need an external cache (Redis), not these."
+    }
+  ]
+}

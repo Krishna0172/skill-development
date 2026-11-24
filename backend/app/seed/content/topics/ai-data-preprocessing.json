@@ -1,0 +1,147 @@
+{
+  "slug": "ai-data-preprocessing",
+  "title": "Data preprocessing for ML",
+  "skill": "ml-fundamentals",
+  "extra_skills": [
+    "etl-data-processing"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "missing-values",
+    "scaling",
+    "one-hot",
+    "outliers",
+    "data-leakage",
+    "pipelines"
+  ],
+  "summary": "Turning raw tabular data into model-ready features: handling missing values, scaling numerics, encoding categoricals, treating outliers, and — most importantly — doing all of it without leaking test information. Wrapping preprocessing in a scikit-learn Pipeline makes it reproducible at training and serving time.",
+  "why_md": "- Real models fail far more often from data problems than from algorithm choice.\n- Leakage gives great offline metrics and terrible production results — the most expensive ML bug.\n- Your existing pandas ETL skills transfer directly; the new part is the fit/transform discipline.\n- Interviewers ask \"how do you handle missing values?\" and \"what is data leakage?\" in almost every ML loop.",
+  "details_md": "### Missing values\nFirst ask **why** a value is missing. A missing `discount` probably means 0; a missing `rating` for a new SKU means \"no reviews\", which is information. Options: drop rows (only if few and random), impute with median (numeric) or most-frequent / an explicit `\"missing\"` category (categorical), and add a `was_missing` indicator so the model can learn from missingness. Tree-based gradient boosting (e.g. `HistGradientBoostingRegressor`) handles NaN natively.\n\n### Scaling\nDistance- and gradient-based models (k-means, KNN, SVM, linear/logistic regression with regularisation, neural nets) are sensitive to feature scale: price in rupees (0-100,000) would dominate rating (1-5). **StandardScaler** → mean 0, sd 1. **MinMaxScaler** → [0, 1]. **RobustScaler** uses median/IQR, good with outliers. Trees don't need scaling.\n\n### Encoding categoricals\n- **One-hot** for low-cardinality nominal columns (marketplace, fulfilment channel). Use `handle_unknown=\"ignore\"` so a new marketplace at serving time doesn't crash.\n- **Ordinal** encoding only when order is real (S < M < L).\n- High-cardinality columns (SKU, seller id) need frequency/target encoding or embeddings — see feature engineering.\n\n### Outliers\nDecide whether an outlier is an error (negative quantity, ₹0 price from a bad parse) — fix or drop — or a real extreme (bulk B2B order) — keep, cap (winsorise), or log-transform. Never silently drop real extremes you'll see in production.\n\n### Train/test leakage\nAny statistic learned from data — means for imputation, scaler parameters, category lists, target encodings — must be **fit on the training split only** and then applied to validation/test. Fitting a scaler on the full dataset before splitting lets test information leak in. For time-series (sales), split by time, never randomly.\n\n### Pipelines\n`ColumnTransformer` applies different preprocessing per column group; `Pipeline` chains it with the model. Calling `pipe.fit(X_train, y_train)` fits everything on train only; `pipe.predict(X_new)` replays the exact same transforms at serving time. It's the ML equivalent of a well-structured ETL job.",
+  "code_md": "```python\nimport pandas as pd\nfrom sklearn.compose import ColumnTransformer\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.impute import SimpleImputer\nfrom sklearn.preprocessing import StandardScaler, OneHotEncoder\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import train_test_split\n\ndf = pd.read_parquet(\"orders.parquet\")\nnum_cols = [\"price\", \"qty\", \"rating\"]\ncat_cols = [\"marketplace\", \"fulfilment_channel\"]\nX, y = df[num_cols + cat_cols], df[\"returned\"]\n\nX_train, X_test, y_train, y_test = train_test_split(\n    X, y, test_size=0.2, stratify=y, random_state=42)\n\npre = ColumnTransformer([\n    (\"num\", Pipeline([\n        (\"impute\", SimpleImputer(strategy=\"median\", add_indicator=True)),\n        (\"scale\", StandardScaler()),\n    ]), num_cols),\n    (\"cat\", Pipeline([\n        (\"impute\", SimpleImputer(strategy=\"constant\", fill_value=\"missing\")),\n        (\"onehot\", OneHotEncoder(handle_unknown=\"ignore\")),\n    ]), cat_cols),\n])\n\nmodel = Pipeline([(\"pre\", pre), (\"clf\", LogisticRegression(max_iter=1000))])\nmodel.fit(X_train, y_train)          # all statistics learned from train only\nprint(model.score(X_test, y_test))\n```\n\n```python\n# Outliers: fix errors, cap/log real extremes (pandas)\nimport numpy as np\ndf = df[df[\"qty\"] > 0]                               # data errors\ncap = df[\"order_value\"].quantile(0.99)\ndf[\"order_value_capped\"] = df[\"order_value\"].clip(upper=cap)\ndf[\"log_order_value\"] = np.log1p(df[\"order_value\"])  # tame the long tail\n```",
+  "use_cases_md": "- Preparing return-prediction features from order + product data across marketplaces.\n- Cleaning marketplace reports with inconsistent nulls/blank strings before modelling.\n- One-hot encoding marketplace/channel for a demand model.\n- Log-transforming sales and prices before a linear model.\n- Shipping a fitted Pipeline as one artefact so the API applies identical preprocessing.",
+  "mistakes_md": "- **Fitting scalers/imputers on the full dataset before splitting** — leakage. Split first, fit on train.\n- **Random split on time-series** — future rows train the model that predicts the past. Split by date.\n- **Dropping all rows with any NaN** — can throw away most data and bias the sample.\n- **Label/ordinal encoding nominal categories** for linear models — invents a fake order.\n- **OneHotEncoder without `handle_unknown=\"ignore\"`** — crashes in production on a new category.\n- **Preprocessing in ad-hoc notebook code** not reproduced at serving time — train/serve skew.",
+  "best_practices_md": "- Split first (by time if temporal), then fit every transform inside a Pipeline.\n- Add missing-indicators when missingness may be informative.\n- Scale for linear/distance/NN models; skip for trees.\n- Log-transform long-tailed money and count columns.\n- Persist the whole Pipeline (joblib) — never re-implement preprocessing in the API.\n- Keep the pandas ETL (cleaning types, parsing dates, fixing errors) separate from learned transforms.",
+  "my_context_md": "`ECSMarketplaceDataUpload` already does the first half of preprocessing: `read_csv/read_excel`, `rename`, `merge`, `groupby` across 150+ marketplace report formats. That deterministic cleaning stays in his ETL. What's new for ML is the **learned** part — imputation values, scaler parameters, category vocabularies — which must be fit on training data only and saved with the model, rather than recomputed per upload.",
+  "revision_notes_md": "- Ask why data is missing; missingness can be a feature.\n- Impute: median (num), constant/most_frequent (cat); `add_indicator=True`.\n- Scale for linear/KNN/k-means/NN; trees don't care.\n- One-hot nominal, `handle_unknown=\"ignore\"`.\n- Outliers: error → fix/drop; real → cap or log1p.\n- Split FIRST; fit transforms on train only.\n- Time data → time-based split.\n- `ColumnTransformer` + `Pipeline` = reproducible, leak-free.\n- Ship the fitted pipeline, not re-written code.",
+  "exercises_md": "1. Take an orders export and list each column's missing %, then decide drop / impute / indicator for each with a one-line justification.\n2. Build a `ColumnTransformer` for 3 numeric + 2 categorical columns and print `get_feature_names_out()`.\n3. Demonstrate leakage: fit a `StandardScaler` before vs after `train_test_split` on a small dataset and compare test scores.\n4. Write a pytest test asserting a fitted pipeline can predict on a row containing an unseen marketplace name.",
+  "related": [
+    "ai-feature-engineering",
+    "ai-scikit-learn",
+    "pandas-cleaning-performance",
+    "ai-ml-fundamentals",
+    "ai-numpy-for-ml"
+  ],
+  "flashcards": [
+    {
+      "front": "What is data leakage in preprocessing?",
+      "back": "Using information from validation/test data (e.g. fitting a scaler or imputer on the full dataset) during training, inflating offline metrics."
+    },
+    {
+      "front": "Which models need feature scaling?",
+      "back": "Distance/gradient-based ones: linear & logistic regression (with regularisation), KNN, k-means, SVM, neural nets. Trees don't."
+    },
+    {
+      "front": "Why `handle_unknown='ignore'` on OneHotEncoder?",
+      "back": "A category unseen in training (new marketplace) is encoded as all zeros instead of raising an error at serving time."
+    },
+    {
+      "front": "What does SimpleImputer(add_indicator=True) add?",
+      "back": "Binary columns flagging which values were missing, letting the model learn from missingness."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which model is LEAST affected by unscaled features (price in rupees vs rating 1-5)?",
+      "options": [
+        "K-nearest neighbours",
+        "Random forest",
+        "Logistic regression with L2 regularisation",
+        "K-means clustering"
+      ],
+      "answer_index": 1,
+      "explanation": "Trees split on thresholds per feature, so monotonic scaling doesn't change them. The others rely on distances or penalised weights."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You're predicting next week's sales per SKU from 2 years of daily data. How should you split train/test?",
+      "options": [
+        "Random 80/20 split",
+        "Stratified split on SKU",
+        "Shuffle then K-fold",
+        "Train on earlier dates, test on the latest dates"
+      ],
+      "answer_index": 3,
+      "explanation": "Time-ordered data must be split by time, otherwise future information leaks into training."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To avoid leakage, a StandardScaler should be fit on the ____ set only and then used to transform validation and test data.",
+      "answers": [
+        "training",
+        "train"
+      ],
+      "explanation": "Means and standard deviations are learned parameters; learning them from test data leaks information."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "For a long-tailed column like order value, np.____(x) is a common transform that also handles zeros safely.",
+      "answers": [
+        "log1p"
+      ],
+      "explanation": "log1p(x) = log(1 + x), defined at 0."
+    },
+    {
+      "type": "output",
+      "prompt": "Min-max scaling fit on train, applied to a test value. What does this print?",
+      "code": "train = [100, 200, 300, 500]\nlo, hi = min(train), max(train)\nscale = lambda v: (v - lo) / (hi - lo)\nprint([scale(v) for v in train])\nprint(scale(700))",
+      "answers": [
+        "[0.0, 0.25, 0.5, 1.0]\n1.5"
+      ],
+      "explanation": "lo=100, hi=500, range 400. A test value outside the training range maps outside [0, 1] — expected, and not a reason to refit on test data."
+    },
+    {
+      "type": "output",
+      "prompt": "Median imputation with a missing indicator. What does this print?",
+      "code": "import statistics\nrating = [4.0, None, 3.5, None, 5.0]\nobserved = [r for r in rating if r is not None]\nfill = statistics.median(observed)\nimputed = [r if r is not None else fill for r in rating]\nflag = [int(r is None) for r in rating]\nprint(imputed)\nprint(flag)",
+      "answers": [
+        "[4.0, 4.0, 3.5, 4.0, 5.0]\n[0, 1, 0, 1, 0]"
+      ],
+      "explanation": "Median of [4.0, 3.5, 5.0] is 4.0; the indicator preserves the fact that the value was missing."
+    },
+    {
+      "type": "debug",
+      "prompt": "Validation accuracy is 0.97 offline but production accuracy is 0.81. What's wrong in this code, and how do you fix it?",
+      "code": "from sklearn.preprocessing import StandardScaler\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.linear_model import LogisticRegression\n\nX_scaled = StandardScaler().fit_transform(X)\nX_tr, X_te, y_tr, y_te = train_test_split(X_scaled, y, test_size=0.2)\nclf = LogisticRegression().fit(X_tr, y_tr)\nprint(clf.score(X_te, y_te))",
+      "answer": "The scaler is fit on the **whole** dataset before splitting, so test-set statistics leak into training and the evaluation is optimistic. (Also no `random_state`/`stratify`.) Split first and put the scaler in a Pipeline:\n\n```python\nfrom sklearn.pipeline import make_pipeline\nX_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)\nclf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))\nclf.fit(X_tr, y_tr)\nprint(clf.score(X_te, y_te))\n```\nIf the data is temporal, also switch to a time-based split. Persist the pipeline so serving uses the same scaler.",
+      "rubric": [
+        "Identifies fitting the scaler before the split as leakage",
+        "Splits first and fits preprocessing on train only (Pipeline)",
+        "Mentions train/serve consistency or time-based split"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior why we wrap preprocessing and the model in a single scikit-learn Pipeline.",
+      "answer": "A Pipeline makes preprocessing part of the model: `fit` learns imputation values, scaler parameters and category vocabularies from the training data only, and `predict` replays exactly those transforms on new data. Benefits: (1) **no leakage** — inside cross-validation each fold refits the preprocessing on its own training part; (2) **no train/serve skew** — the API loads one joblib artefact instead of re-implementing pandas logic that can drift; (3) **tunable** — GridSearchCV can search preprocessing options (`pre__num__impute__strategy`) along with model hyperparameters; (4) one object to version and test.",
+      "rubric": [
+        "Fit on train only / prevents leakage in CV",
+        "Same transforms at serving time — avoids train/serve skew",
+        "Single artefact that can be tuned and versioned"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you handle missing values in a tabular ML problem?",
+      "difficulty": "easy",
+      "answer_md": "1. **Understand the cause.** Missing `discount` likely means 0 (fill with 0). Missing `rating` on new SKUs means \"no reviews\" — informative.\n2. **Quantify**: % missing per column, and whether missingness correlates with the target.\n3. **Choose a strategy per column**: drop column if mostly empty and uninformative; median impute numeric; constant `\"missing\"` category for categoricals; add a missing-indicator flag; or use a model that handles NaN natively (HistGradientBoosting, XGBoost, LightGBM).\n4. **Fit imputers on training data only**, inside a Pipeline, so the same fill values apply at serving time.\n\nAvoid blanket `dropna()`, which can discard most rows and bias the sample toward \"complete\" (often older, popular) products."
+    },
+    {
+      "question": "What is data leakage? Give two examples you might hit with e-commerce data.",
+      "difficulty": "medium",
+      "answer_md": "Leakage is when the training process sees information that won't be available at prediction time, so offline metrics overstate real performance.\n\nExamples:\n- **Preprocessing leakage**: fitting a scaler, imputer or target encoder on the full dataset before splitting.\n- **Temporal leakage**: randomly splitting daily sales so the model trains on next week's data to predict this week; or a feature like `total_units_sold_this_month` computed over the whole month when predicting mid-month.\n- **Target leakage**: predicting returns using `refund_amount` or `return_reason` — they only exist after the return happens.\n\nPrevention: split first (by time for temporal data), keep transforms in a Pipeline, and for every feature ask \"would I know this value at the moment of prediction?\""
+    }
+  ]
+}

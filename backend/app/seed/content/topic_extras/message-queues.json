@@ -1,0 +1,67 @@
+{
+  "slug": "message-queues",
+  "why_md": "- Queues decouple slow work (report processing, scraping, LLM calls) from request handling and absorb spikes.\n- At-least-once delivery means duplicates are normal; consumers must be idempotent.\n- DLQs, visibility timeouts and retries are how production pipelines survive bad messages.\n- Queue design (SQS vs SNS vs Kafka, ordering, idempotency) is a frequent system-design interview topic.",
+  "revision_notes_md": "- SQS standard: at-least-once, best-effort ordering; FIFO: ordering per MessageGroupId + deduplication (5-minute window).\n- Visibility timeout must exceed max processing time; extend it for long jobs.\n- Delete the message only after processing succeeds.\n- DLQ via redrive policy (`maxReceiveCount`) catches poison messages — alarm on it.\n- Idempotent consumer: dedupe by message/business key (unique constraint, conditional write) or make writes upserts.\n- Fan-out: SNS topic → multiple SQS queues.\n- Transactional outbox avoids 'DB committed but message not sent'.\n- Long polling (`WaitTimeSeconds=20`) cuts empty receives and cost.",
+  "exercises_md": "1. Sketch (and then build locally with a PostgreSQL table as the queue or LocalStack SQS) a pipeline: upload event → queue → worker → status table, including retries, a DLQ and an idempotency key.\n2. Write a consumer test that delivers the same message three times and asserts the side effect happens once.",
+  "my_context_md": "Your `ForcesightJobSchedulerAndRunner` is effectively a PostgreSQL-backed queue: workers claim jobs with `SELECT ... FOR UPDATE SKIP LOCKED` and run them in a ThreadPoolExecutor. Celery/Redis aren't used in `python-postgres`; comparing that job runner with SQS (visibility timeout ≈ lock held by the claiming transaction, DLQ ≈ max-attempts status) is a good way to learn the concepts.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "If a consumer crashes without deleting an SQS message, it becomes visible again after the visibility ____ expires.",
+      "answers": [
+        "timeout"
+      ],
+      "explanation": "The visibility timeout hides a received message; if not deleted in time it's redelivered."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Messages that fail more than `maxReceiveCount` times are moved to a ____ queue (abbreviated DLQ).",
+      "answers": [
+        "dead-letter",
+        "dead letter",
+        "deadletter"
+      ],
+      "explanation": "A dead-letter queue isolates poison messages for inspection."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "processed = set()\nbalance = {\"org7\": 0}\ndef handle(msg):\n    if msg[\"id\"] in processed:\n        return \"dup\"\n    balance[msg[\"org\"]] += msg[\"amount\"]\n    processed.add(msg[\"id\"])\n    return \"ok\"\ndeliveries = [{\"id\": \"m1\", \"org\": \"org7\", \"amount\": 100},\n              {\"id\": \"m2\", \"org\": \"org7\", \"amount\": 50},\n              {\"id\": \"m1\", \"org\": \"org7\", \"amount\": 100}]\nprint([handle(m) for m in deliveries], balance[\"org7\"])",
+      "answers": [
+        "['ok', 'ok', 'dup'] 150"
+      ],
+      "explanation": "At-least-once delivery redelivered m1; the idempotency check by message id stops it being applied twice."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from collections import deque\nq = deque([(\"a\", 0), (\"poison\", 0), (\"b\", 0)])\ndlq, done, MAX = [], [], 3\nwhile q:\n    body, receives = q.popleft()\n    receives += 1\n    if body == \"poison\":\n        if receives >= MAX:\n            dlq.append(body)\n        else:\n            q.append((body, receives))\n        continue\n    done.append(body)\nprint(done, dlq)",
+      "answers": [
+        "['a', 'b'] ['poison']"
+      ],
+      "explanation": "Good messages are processed; the poison message is retried until it reaches maxReceiveCount (3) and then moved to the DLQ instead of blocking the queue forever."
+    },
+    {
+      "type": "debug",
+      "prompt": "Some orders are charged twice and some messages are lost after deploys. What's wrong with this consumer?",
+      "code": "while True:\n    resp = sqs.receive_message(QueueUrl=URL, MaxNumberOfMessages=10)\n    for m in resp.get(\"Messages\", []):\n        sqs.delete_message(QueueUrl=URL, ReceiptHandle=m[\"ReceiptHandle\"])\n        body = json.loads(m[\"Body\"])\n        charge_customer(body[\"order_id\"], body[\"amount\"])",
+      "answer": "- The message is **deleted before processing**: if the worker crashes or is stopped during `charge_customer`, the message is gone (lost work).\n- `charge_customer` isn't idempotent: SQS is at-least-once, so a redelivered message charges again.\n- No long polling → many empty receives.\n\n```python\nresp = sqs.receive_message(QueueUrl=URL, MaxNumberOfMessages=10, WaitTimeSeconds=20)\nfor m in resp.get(\"Messages\", []):\n    body = json.loads(m[\"Body\"])\n    charge_once(body[\"order_id\"], body[\"amount\"])   # e.g. INSERT ... ON CONFLICT on order_id first\n    sqs.delete_message(QueueUrl=URL, ReceiptHandle=m[\"ReceiptHandle\"])\n```\nConfigure a DLQ with a redrive policy and a visibility timeout longer than processing time.",
+      "rubric": [
+        "Delete only after successful processing",
+        "Make the handler idempotent (dedupe key / unique constraint)",
+        "Long polling, visibility timeout, DLQ"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain at-least-once delivery and how you design an idempotent consumer.",
+      "answer": "Most queues (SQS standard, SNS, Kafka consumers after a crash) guarantee every message is delivered **at least once**: a message can arrive twice when a consumer times out, crashes before deleting/committing, or the broker retries. Exactly-once delivery isn't something you can rely on end-to-end, so you make processing idempotent: applying a message twice has the same effect as once.\n\nTechniques:\n- **Dedupe table**: `INSERT INTO processed_messages(id) ... ON CONFLICT DO NOTHING` in the same transaction as the side effect; if 0 rows inserted, skip.\n- **Natural idempotency**: upserts keyed on business keys, `SET status = 'shipped'` instead of increments.\n- **Conditional writes**: DynamoDB `ConditionExpression`, or `UPDATE ... WHERE version = n`.\n- For external calls (payments), pass an idempotency key to the provider.\nDelete/ack only after the transaction commits.",
+      "rubric": [
+        "Duplicates are expected with at-least-once delivery",
+        "Dedupe by message/business key in the same transaction",
+        "Prefer upserts / absolute updates / conditional writes",
+        "Ack after commit; idempotency keys for external APIs"
+      ]
+    }
+  ]
+}

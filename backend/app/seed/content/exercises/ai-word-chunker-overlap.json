@@ -1,0 +1,110 @@
+{
+  "slug": "ai-word-chunker-overlap",
+  "title": "Fixed-size word chunker with overlap",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "rag",
+  "concepts": [
+    "chunking",
+    "sliding window",
+    "overlap",
+    "off-by-one"
+  ],
+  "related_topics": [
+    "ai-chunking",
+    "ai-retrieval-pipelines",
+    "ai-context-tokens-cost"
+  ],
+  "problem_md": "RAG over product manuals / seller policies needs documents split into overlapping chunks so an answer spanning a boundary still lands in one chunk. Implement:\n\n```python\ndef chunk_words(text: str, size: int, overlap: int) -> list[str]\n```\n\n- Words = `text.split()`. Chunks are `size` words joined by single spaces.\n- Consecutive chunks share `overlap` words: chunk *i* starts at word `i * (size - overlap)`.\n- Stop after the chunk that reaches the last word - **no trailing chunk made only of overlap**.\n- Empty / whitespace text -> `[]`.\n- `size < 1`, `overlap < 0` or `overlap >= size` -> `ValueError`.",
+  "examples": [
+    {
+      "input": "chunk_words('a b c d e f g', 3, 1)",
+      "output": "['a b c', 'c d e', 'e f g']"
+    },
+    {
+      "input": "chunk_words('a b c d e', 3, 1)",
+      "output": "['a b c', 'c d e']",
+      "explanation": "No extra ['e'] chunk."
+    }
+  ],
+  "hints": [
+    "`step = size - overlap`; iterate `start` over `range(0, len(words), step)`.",
+    "Append `words[start:start + size]`, then `break` when `start + size >= len(words)` - that chunk already reached the end."
+  ],
+  "starter_code": "def chunk_words(text, size, overlap):\n    words = text.split()\n    step = size - overlap\n    return [' '.join(words[i:i + size]) for i in range(0, len(words), step)]\n",
+  "solution_code": "def chunk_words(text, size, overlap):\n    if size < 1 or overlap < 0 or overlap >= size:\n        raise ValueError('need size >= 1 and 0 <= overlap < size')\n    words = text.split()\n    step = size - overlap\n    chunks = []\n    for start in range(0, len(words), step):\n        chunks.append(' '.join(words[start:start + size]))\n        if start + size >= len(words):\n            break\n    return chunks\n",
+  "solution_md": "A sliding window with stride `size - overlap`. The naive `range(0, len, step)` comprehension emits tail chunks that are pure overlap (already fully contained in the previous chunk) - wasted embeddings and duplicate retrieval hits. Breaking once a window reaches the end fixes it. `overlap >= size` would give stride <= 0 (infinite loop / `range` error), so validate up front. O(n) words.\n\nReal chunkers count **tokens** (the model's tokenizer, e.g. tiktoken) not words, and prefer semantic boundaries (headings, paragraphs, sentences) before falling back to fixed windows - e.g. LangChain's `RecursiveCharacterTextSplitter`. Typical settings: 200-800 tokens, 10-20% overlap; tune with retrieval evals.",
+  "tests": {
+    "function": "chunk_words",
+    "cases": [
+      {
+        "args": [
+          "a b c d e f g",
+          3,
+          1
+        ],
+        "kwargs": {},
+        "expected": [
+          "a b c",
+          "c d e",
+          "e f g"
+        ]
+      },
+      {
+        "args": [
+          "a b c d e",
+          3,
+          1
+        ],
+        "kwargs": {},
+        "expected": [
+          "a b c",
+          "c d e"
+        ]
+      },
+      {
+        "args": [
+          "  refund   window is 30 days for most items  ",
+          4,
+          2
+        ],
+        "kwargs": {},
+        "expected": [
+          "refund window is 30",
+          "is 30 days for",
+          "days for most items"
+        ]
+      },
+      {
+        "args": [
+          "one two",
+          5,
+          0
+        ],
+        "kwargs": {},
+        "expected": [
+          "one two"
+        ]
+      },
+      {
+        "args": [
+          "   ",
+          3,
+          1
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          "a b c",
+          3,
+          3
+        ],
+        "raises": "ValueError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

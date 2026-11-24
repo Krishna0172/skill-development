@@ -1,0 +1,65 @@
+{
+  "slug": "caching-strategies",
+  "why_md": "- Caching is the cheapest way to cut latency and database load for read-heavy endpoints and expensive reports.\n- It's also a classic source of bugs: stale data, stampedes, unbounded memory, cross-tenant leaks.\n- LLM applications rely on caching (prompt/response caching, embedding caches) to control cost and latency.\n- System-design interviews almost always include 'where would you add a cache and how do you invalidate it?'.",
+  "revision_notes_md": "- Cache-aside: read cache → on miss load DB → set with TTL; on write update DB then delete the key.\n- Write-through: write cache and DB together; write-behind: write cache, flush to DB later (risk of loss).\n- Always set a TTL; add jitter to avoid synchronized expiry.\n- Stampede protection: single-flight lock, request coalescing, or early refresh.\n- Include tenant/user and version in keys: `org:7:report:v2:2024-05`.\n- In-process caches (`functools.lru_cache`, dicts) are per process — they diverge across ECS tasks/Lambda containers.\n- Cache negative results briefly to protect against repeated misses.\n- Don't cache permission-sensitive data without the auth context in the key.",
+  "exercises_md": "1. Add a cache-aside layer (an in-process dict with TTL, or Redis locally) to one slow read query; measure hit ratio and latency, and write the invalidation on the corresponding write path.\n2. Simulate a stampede: 50 threads requesting an expired key; add a per-key lock so only one recomputes, and prove it with a counter.",
+  "my_context_md": "`AmazonVendorBankRecon/db.py` caches the DB secret from AWS Secrets Manager with a TTL — a small cache-aside with expiry. Redis isn't used anywhere in `python-postgres`, so a shared cache across ECS tasks is a new area for you.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "In the cache-____ pattern, the application reads the cache first and, on a miss, loads from the database and populates the cache.",
+      "answers": [
+        "aside"
+      ],
+      "explanation": "Cache-aside (lazy loading) keeps the application in charge of loading and populating."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Adding random ____ to TTLs prevents many keys from expiring at the same moment.",
+      "answers": [
+        "jitter"
+      ],
+      "explanation": "Jitter spreads expiries so the database isn't hit by a synchronized wave of misses."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from functools import lru_cache\ncalls = 0\n@lru_cache(maxsize=2)\ndef fx_rate(cur):\n    global calls\n    calls += 1\n    return {\"USD\": 83, \"EUR\": 90, \"GBP\": 105}[cur]\nfor c in [\"USD\", \"EUR\", \"USD\", \"GBP\", \"EUR\"]:\n    fx_rate(c)\ninfo = fx_rate.cache_info()\nprint(calls, info.hits, info.misses, info.currsize)",
+      "answers": [
+        "4 1 4 2"
+      ],
+      "explanation": "USD, EUR miss; USD hits; GBP misses and evicts the least recently used (EUR); EUR misses again. 4 loads, 1 hit, cache holds 2."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class TTLCache:\n    def __init__(self, ttl, clock):\n        self.ttl, self.clock, self.d = ttl, clock, {}\n    def get(self, k, loader):\n        v = self.d.get(k)\n        if v and self.clock() - v[1] < self.ttl:\n            return v[0], \"hit\"\n        val = loader(k)\n        self.d[k] = (val, self.clock())\n        return val, \"miss\"\nnow = [0]\nc = TTLCache(60, lambda: now[0])\nfor t in [0, 30, 59, 60, 61]:\n    now[0] = t\n    print(t, c.get(\"secret\", lambda k: \"pw\")[1])",
+      "answers": [
+        "0 miss\n30 hit\n59 hit\n60 miss\n61 hit"
+      ],
+      "explanation": "Entries are valid while age < 60 s. At t=60 the entry expires and reloads (stamped 60), so t=61 hits again."
+    },
+    {
+      "type": "debug",
+      "prompt": "Users occasionally see another organisation's dashboard numbers. What's wrong?",
+      "code": "from functools import lru_cache\n\n@lru_cache(maxsize=1024)\ndef dashboard_summary(report_date: str):\n    org = get_current_org()          # reads from request context\n    return run_summary_query(org, report_date)",
+      "answer": "The cache key is only `report_date`, but the result also depends on the org read from request context. The first org to request a date fills the cache, and every other org gets that org's numbers (a cross-tenant data leak). There's also no TTL, so even same-org data goes stale forever.\n\n```python\n@ttl_cache(ttl=300)                      # or Redis with expiry\ndef dashboard_summary(org_id: int, report_date: str):\n    return run_summary_query(org_id, report_date)\n\ndashboard_summary(get_current_org(), report_date)\n```\nRule: every input that changes the result — tenant, user permissions, version — must be in the key.",
+      "rubric": [
+        "Cache key omits the org → cross-tenant leak",
+        "Pass all result-affecting inputs as arguments/key parts",
+        "lru_cache has no TTL → stale data"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain cache stampede (thundering herd) and three ways to prevent it.",
+      "answer": "A stampede happens when a hot key expires (or the cache restarts) and many concurrent requests miss at once, all recomputing the same expensive value and hammering the database.\n\nPrevention:\n1. **Single-flight / lock**: the first miss takes a per-key lock (`SET key:lock NX EX 10` in Redis, or a threading lock in-process); others wait briefly or serve the stale value.\n2. **Early / background refresh**: refresh before expiry (probabilistic early expiration or a scheduled refresher), so the key never goes cold.\n3. **TTL jitter**: randomize TTLs so many keys don't expire together.\nAlso: serve stale-while-revalidate, and keep DB-side protection (connection pool limits).",
+      "rubric": [
+        "Hot key expiry → many concurrent misses recompute",
+        "Per-key lock / single-flight",
+        "Early or background refresh / stale-while-revalidate",
+        "TTL jitter"
+      ]
+    }
+  ]
+}

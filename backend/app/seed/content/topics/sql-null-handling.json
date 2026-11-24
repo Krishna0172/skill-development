@@ -1,0 +1,122 @@
+{
+  "slug": "sql-null-handling",
+  "title": "NULL Handling in SQL: Three-Valued Logic, COALESCE and IS DISTINCT FROM",
+  "skill": "sql",
+  "extra_skills": [
+    "postgresql",
+    "sql-aggregations"
+  ],
+  "category": "Database",
+  "difficulty": "beginner",
+  "tags": [
+    "sql",
+    "null",
+    "coalesce",
+    "nullif",
+    "three-valued-logic",
+    "is-distinct-from"
+  ],
+  "summary": "NULL means \"unknown or missing\", not zero or empty string. Any comparison with NULL (even NULL = NULL) gives NULL, which WHERE treats as false, so you must use IS NULL / IS NOT NULL. COALESCE picks the first non-NULL value, NULLIF turns a value into NULL, and IS DISTINCT FROM compares values treating NULLs as equal.",
+  "details_md": "### Three-valued logic\nSQL booleans can be TRUE, FALSE or UNKNOWN (NULL).\n- `NULL = NULL` gives NULL; `NULL <> 5` gives NULL; `NULL + 1` gives NULL; `'a' || NULL` gives NULL (use `concat()` to treat NULL as empty).\n- `WHERE`, `HAVING`, `JOIN ... ON` and `CASE WHEN` keep only **TRUE** rows. UNKNOWN behaves like false there.\n- `CHECK` constraints are the opposite: they pass unless the result is FALSE, so NULL passes a CHECK.\n- `TRUE OR NULL` is TRUE; `FALSE AND NULL` is FALSE; `NOT NULL` is NULL.\n\n### Testing for NULL\n- `col IS NULL` / `col IS NOT NULL`, never `= NULL`.\n- `a IS DISTINCT FROM b`: like `<>` but NULL-aware (`NULL IS DISTINCT FROM NULL` is false; `1 IS DISTINCT FROM NULL` is true). `IS NOT DISTINCT FROM` is the NULL-safe equality. Ideal in upserts and change detection.\n- For row values, `(a, b) IS NULL` is true only if *all* fields are NULL.\n\n### Functions\n- `COALESCE(a, b, c)`: first non-NULL argument (evaluated lazily, left to right).\n- `NULLIF(a, b)`: NULL if a = b, else a. Classic use: `x / NULLIF(y, 0)` avoids division by zero, and `NULLIF(trim(col), '')` turns empty strings into NULL.\n- `GREATEST` / `LEAST` ignore NULLs in PostgreSQL (unless all are NULL).\n\n### NULLs in aggregates, sorting, grouping, constraints\n- Aggregates skip NULLs (`SUM`, `AVG`, `COUNT(col)`); `COUNT(*)` counts rows. `AVG` over (10, NULL) is 10, not 5.\n- `SUM` of no rows (or only NULLs) is NULL; wrap it in `COALESCE(..., 0)`.\n- `GROUP BY` and `DISTINCT` treat all NULLs as **one group**.\n- Sorting: NULLs sort **last** in ascending order and **first** in descending order in PostgreSQL; override with `NULLS FIRST/LAST`.\n- **UNIQUE constraints allow multiple NULLs** by default. PostgreSQL 15+ supports `UNIQUE NULLS NOT DISTINCT` to treat them as equal. This matters for `ON CONFLICT`: a key column containing NULL never conflicts, so duplicates slip in.\n- `NOT IN (subquery)` returns nothing if the subquery contains NULL; use `NOT EXISTS`.\n\n### Outer joins create NULLs\nLEFT/FULL JOIN fills missing columns with NULL. Checking `right.id IS NULL` is how you find unmatched rows (an anti-join), and `COUNT(right.id)` counts real matches.\n\n### NULL vs empty string vs zero\nThey mean different things: unknown, known-empty and known-zero. PostgreSQL keeps `''` and NULL distinct (unlike Oracle). Decide on one representation for \"missing\" in ETL and normalise to it.\n\n### Python / pandas boundary\npsycopg2 maps `None` to NULL and NULL to `None`. pandas uses `NaN`/`NaT`/`pd.NA` for missing values; `NaN` is a float and will be sent as the float NaN (PostgreSQL `numeric` and `float` accept 'NaN') rather than NULL unless you convert it, e.g. `df.astype(object).where(df.notna(), None)`.",
+  "code_md": "```sql\n-- 1) Comparisons with NULL\nSELECT NULL = NULL          AS eq,          -- NULL\n       NULL IS NULL         AS is_null,     -- true\n       NULL IS DISTINCT FROM NULL AS dist,  -- false\n       1 IS DISTINCT FROM NULL   AS dist2,  -- true\n       'SKU-' || NULL       AS concat_op,   -- NULL\n       concat('SKU-', NULL) AS concat_fn;   -- 'SKU-'\n\n-- Finding orders with no courier assigned\nSELECT id FROM orders WHERE courier IS NULL;   -- NOT: WHERE courier = NULL\n```\n\n```sql\n-- 2) COALESCE and NULLIF in reports\nSELECT channel,\n       COALESCE(SUM(total), 0) AS revenue,                         -- 0 instead of NULL\n       ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'RTO')\n             / NULLIF(COUNT(*), 0), 2) AS rto_pct                  -- no division by zero\nFROM orders\nGROUP BY channel;\n\n-- Clean empty strings from imported data\nUPDATE customers SET phone = NULLIF(trim(phone), '');\n```\n\n```sql\n-- 3) NULL-safe merge in an upsert + change detection\nINSERT INTO orders AS o (id, orgid, status, awb)\nVALUES (5001, 7, NULL, 'AWB123')\nON CONFLICT (id, orgid) DO UPDATE\nSET status = COALESCE(EXCLUDED.status, o.status),   -- keep old status when new is NULL\n    awb    = COALESCE(EXCLUDED.awb, o.awb)\nWHERE o.awb IS DISTINCT FROM COALESCE(EXCLUDED.awb, o.awb)        -- only if something changed\n   OR o.status IS DISTINCT FROM COALESCE(EXCLUDED.status, o.status);\n\n-- PG 15+: treat NULLs as equal in a unique constraint\nALTER TABLE settlements ADD CONSTRAINT uq_settlement\n    UNIQUE NULLS NOT DISTINCT (orgid, utr_number);\n```\n\n```python\n# 4) pandas NaN -> SQL NULL before writing with psycopg2\nimport pandas as pd\n\ndf = pd.DataFrame({\"id\": [1, 2], \"total\": [100.5, float(\"nan\")]})\nclean = df.astype(object).where(df.notna(), None)      # NaN -> None\nrows = list(clean.itertuples(index=False, name=None))  # [(1, 100.5), (2, None)]\n```",
+  "use_cases_md": "- Merging partial records from multiple sources with `COALESCE(new, old)`.\n- Safe ratios and percentages with `NULLIF(denominator, 0)`.\n- Detecting real changes before updates with `IS DISTINCT FROM`.\n- Finding unmatched rows after outer joins (`right.id IS NULL`).\n- Normalising messy imports: empty strings, 'NA', '-' to NULL.",
+  "mistakes_md": "- **`WHERE col = NULL`**: always unknown, returns nothing. Use `IS NULL`.\n- **`WHERE col <> 'X'` expecting NULL rows too**: NULL rows are excluded. Use `col IS DISTINCT FROM 'X'`.\n- **`NOT IN` with NULLs in the list or subquery**: zero rows. Use `NOT EXISTS`.\n- **Assuming a unique key with a NULL column prevents duplicates**: NULLs are distinct by default, so `ON CONFLICT` never fires. Make the columns NOT NULL or use `NULLS NOT DISTINCT`.\n- **Treating NULL as 0 in averages**: AVG ignores NULLs, which may or may not be what the business wants. Decide explicitly with `COALESCE(x, 0)`.\n- **String concatenation with `||`** silently producing NULL. Use `concat()` / `concat_ws()`.\n- **Sending pandas NaN to the database**: stored as float NaN or causes type errors instead of NULL. Convert to None.",
+  "best_practices_md": "- Declare `NOT NULL` wherever a value is required; it is the cheapest data-quality rule.\n- Pick one \"missing\" representation in ETL (NULL) and normalise to it at ingestion.\n- Use `IS DISTINCT FROM` for change detection and NULL-safe comparisons.\n- Always wrap aggregates shown to users in `COALESCE` when \"no data\" should display 0.\n- Specify `NULLS FIRST/LAST` explicitly in ordered reports.\n- Keep key columns used in `ON CONFLICT` NOT NULL.",
+  "my_context_md": "Your orders upsert, `SET col = COALESCE(EXCLUDED.col, table.col)`, is NULL handling in practice: when a marketplace report leaves a column empty, the incoming NULL should not erase a value an earlier report already stored. Because `read_and_validate()` parses CSV/XLSX files with pandas, missing cells become `NaN`/`NaT`, and these have to be converted to `None` before `execute_batch`, or PostgreSQL receives a float NaN or a type error instead of NULL. Your conflict key `(id, orgid)` must also never contain NULLs; otherwise `ON CONFLICT` can't detect duplicates.",
+  "related": [
+    "postgres-upsert",
+    "sql-group-by",
+    "sql-joins",
+    "sql-subqueries",
+    "pandas-cleaning-performance"
+  ],
+  "flashcards": [
+    {
+      "front": "Result of NULL = NULL?",
+      "back": "NULL (unknown), so WHERE treats it as false. Use IS NULL."
+    },
+    {
+      "front": "COALESCE vs NULLIF?",
+      "back": "COALESCE(a,b,...) returns the first non-NULL; NULLIF(a,b) returns NULL when a = b, otherwise a."
+    },
+    {
+      "front": "NULL-safe 'not equal' in PostgreSQL?",
+      "back": "`a IS DISTINCT FROM b`"
+    },
+    {
+      "front": "Do UNIQUE constraints allow multiple NULLs?",
+      "back": "Yes by default; PG 15+ offers UNIQUE NULLS NOT DISTINCT."
+    },
+    {
+      "front": "Where do NULLs sort in ORDER BY x ASC in PostgreSQL?",
+      "back": "Last (and first for DESC), unless NULLS FIRST/LAST is given."
+    },
+    {
+      "front": "AVG of values (10, NULL, 20)?",
+      "back": "15; NULLs are ignored, so the divisor is 2."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which query returns orders whose status is not 'RTO', INCLUDING those with NULL status?",
+      "options": [
+        "WHERE status <> 'RTO'",
+        "WHERE status != 'RTO'",
+        "WHERE NOT status = 'RTO'",
+        "WHERE status IS DISTINCT FROM 'RTO'"
+      ],
+      "answer_index": 3,
+      "explanation": "Only IS DISTINCT FROM treats NULL as a comparable value."
+    },
+    {
+      "question": "`SELECT 'ORD-' || NULL;` returns...",
+      "options": [
+        "NULL",
+        "'ORD-'",
+        "'ORD-NULL'",
+        "An error"
+      ],
+      "answer_index": 0,
+      "explanation": "The || operator propagates NULL; concat() would return 'ORD-'."
+    },
+    {
+      "question": "A NULL inside a CHECK (qty >= 0) constraint...",
+      "options": [
+        "Fails the check",
+        "Passes the check",
+        "Raises a type error",
+        "Is converted to 0"
+      ],
+      "answer_index": 1,
+      "explanation": "CHECK fails only on FALSE; NULL >= 0 is UNKNOWN, so it passes. Add NOT NULL if needed."
+    },
+    {
+      "question": "Safest way to compute total/count without division-by-zero errors?",
+      "options": [
+        "total / count",
+        "total / COALESCE(count, 0)",
+        "total / NULLIF(count, 0)",
+        "total / GREATEST(count, NULL)"
+      ],
+      "answer_index": 2,
+      "explanation": "NULLIF(count, 0) turns 0 into NULL, so the result is NULL instead of an error."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain SQL's three-valued logic and give a bug it commonly causes.",
+      "difficulty": "easy",
+      "answer_md": "SQL predicates evaluate to TRUE, FALSE or **UNKNOWN**. Any comparison involving NULL (including `NULL = NULL`) is UNKNOWN. `WHERE` and `JOIN ON` keep only TRUE rows, so UNKNOWN rows are silently dropped.\n\nCommon bugs:\n1. **Inequality filters drop NULLs**:\n```sql\nSELECT * FROM orders WHERE status <> 'CANCELLED';  -- rows with NULL status vanish\nSELECT * FROM orders WHERE status IS DISTINCT FROM 'CANCELLED';  -- keeps them\n```\n2. **NOT IN with NULL** returns zero rows, because `x NOT IN (1, NULL)` means `x <> 1 AND x <> NULL`, which is never TRUE.\n3. **Equality join on nullable keys**: rows with NULL keys never match each other.\n\nLogic tables to remember: `TRUE OR UNKNOWN = TRUE`, `FALSE AND UNKNOWN = FALSE`, everything else involving UNKNOWN stays UNKNOWN. In CHECK constraints UNKNOWN passes, which is why \"required\" columns need `NOT NULL` explicitly."
+    },
+    {
+      "question": "Why might ON CONFLICT fail to prevent duplicates, and what does NULL have to do with it?",
+      "difficulty": "medium",
+      "answer_md": "`ON CONFLICT` only fires when the unique index reports a conflict. By default, unique indexes treat **NULLs as distinct from each other**, so `(orgid=7, utr=NULL)` never conflicts with another `(7, NULL)`. Every re-run inserts a new duplicate row.\n\n```sql\nCREATE TABLE settlements (orgid int, utr text, amount numeric, UNIQUE (orgid, utr));\nINSERT INTO settlements VALUES (7, NULL, 100) ON CONFLICT (orgid, utr) DO NOTHING;\nINSERT INTO settlements VALUES (7, NULL, 100) ON CONFLICT (orgid, utr) DO NOTHING;\n-- two rows!\n```\n\nFixes:\n- Make key columns `NOT NULL` and reject or quarantine rows missing a key during ETL validation (best).\n- PostgreSQL 15+: `UNIQUE NULLS NOT DISTINCT (orgid, utr)`, so NULLs compare equal for uniqueness.\n- Or substitute a sentinel in a generated column (with care, since sentinels have their own problems).\n\nThe same applies to pandas: `NaN` keys should be caught before the write, not left to the database."
+    },
+    {
+      "question": "How would you merge partial updates from several data sources into one row without losing data?",
+      "difficulty": "medium",
+      "answer_md": "Use an upsert where each column takes the incoming value only when it's present:\n\n```sql\nINSERT INTO orders AS o (id, orgid, status, awb, settled_amount)\nVALUES (%s, %s, %s, %s, %s)\nON CONFLICT (id, orgid) DO UPDATE SET\n  status         = COALESCE(EXCLUDED.status, o.status),\n  awb            = COALESCE(EXCLUDED.awb, o.awb),\n  settled_amount = COALESCE(EXCLUDED.settled_amount, o.settled_amount)\nWHERE (o.status, o.awb, o.settled_amount) IS DISTINCT FROM\n      (COALESCE(EXCLUDED.status, o.status), COALESCE(EXCLUDED.awb, o.awb),\n       COALESCE(EXCLUDED.settled_amount, o.settled_amount));\n```\n\n- `COALESCE(new, old)`: a source that doesn't know the AWB sends NULL and keeps the existing value.\n- The `WHERE ... IS DISTINCT FROM` skips no-op updates (less WAL, fewer dead tuples).\n\nTrade-off: with this pattern you can never intentionally *clear* a value to NULL via the upsert. If that's needed, use an explicit sentinel/flag or a separate update path. Also make sure the ETL turns empty strings and NaN into real NULLs; otherwise `''` would overwrite good data because `COALESCE('', old)` returns `''`."
+    }
+  ]
+}

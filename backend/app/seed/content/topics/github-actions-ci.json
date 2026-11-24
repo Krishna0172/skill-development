@@ -1,0 +1,126 @@
+{
+  "slug": "github-actions-ci",
+  "title": "CI/CD with GitHub Actions: Tests, Docker Builds and AWS Deploys",
+  "skill": "ci-cd",
+  "extra_skills": [
+    "github",
+    "docker",
+    "testing",
+    "pulumi"
+  ],
+  "category": "Tools",
+  "difficulty": "intermediate",
+  "tags": [
+    "ci-cd",
+    "github-actions",
+    "yaml",
+    "oidc",
+    "docker",
+    "pulumi",
+    "pytest"
+  ],
+  "summary": "CI (continuous integration) automatically lints, tests and builds every push or pull request, so broken code is caught before it merges. CD (continuous delivery/deployment) automatically ships a verified build to an environment. In GitHub Actions you describe this as YAML workflows in .github/workflows: triggers, jobs that run on fresh virtual machines, and steps that run commands or reusable actions.",
+  "details_md": "### Building blocks\n- **Workflow**: a YAML file in `.github/workflows/`. A repo can have many.\n- **Triggers (`on:`)**: `push`, `pull_request`, `workflow_dispatch` (manual button), `schedule` (cron, UTC), `release`, `workflow_call` (reusable workflows), with filters for branches and paths.\n- **Jobs**: run **in parallel by default** on separate **runners** (fresh VMs such as `ubuntu-latest`, or self-hosted). `needs:` creates dependencies (test, then build, then deploy). Jobs share nothing unless you pass **artifacts** or **outputs**.\n- **Steps**: either `run:` shell commands or `uses:` an action (`actions/checkout`, `actions/setup-python`). Steps in a job share the filesystem.\n- **Matrix**: run a job across combinations (Python 3.11/3.12, OS variants).\n- **Service containers**: `services: postgres:` starts a real PostgreSQL next to the job for integration tests.\n- **Caching**: `setup-python` with `cache: pip`, `actions/cache`, or Docker layer cache (`cache-from: type=gha`).\n- **Concurrency**: `concurrency: group: deploy-prod` prevents two deploys from overlapping; `cancel-in-progress` cancels stale PR runs.\n\n### Secrets and permissions\n- **Secrets** (`${{ secrets.NAME }}`) are encrypted, masked in logs, and not passed to workflows triggered from forks.\n- **Environments** (`environment: production`) add environment-scoped secrets and **protection rules** (required reviewers, wait timers, branch restrictions), which is how you put a manual approval in front of production.\n- The automatic `GITHUB_TOKEN` gets the permissions you declare in `permissions:`; default to least privilege (`contents: read`).\n\n### Deploying to AWS without stored keys: OIDC\nInstead of long-lived `AWS_ACCESS_KEY_ID` secrets, GitHub issues a short-lived **OIDC token** per run. You create an IAM OIDC identity provider for `token.actions.githubusercontent.com` and a role whose **trust policy** only allows your repo/branch/environment (`sub` claim like `repo:org/repo:environment:production`). The workflow needs `permissions: id-token: write` and uses `aws-actions/configure-aws-credentials` with `role-to-assume`. No secrets to leak or rotate.\n\n### A typical Python backend pipeline\n1. **On pull request**: checkout, set up Python, install dependencies, lint (`ruff`), type-check (`mypy`), run `pytest` (unit + integration against a Postgres service), maybe build the Docker image without pushing. Make these **required status checks** via branch protection.\n2. **On merge to main**: build the image tagged with the **git SHA**, push it to ECR, run `pulumi preview`/`pulumi up` (or update the ECS service / Lambda), run DB migrations, smoke test.\n3. **Production**: same artifact (no rebuild), promoted through a protected environment.\n\n### Principles\n- **Build once, deploy many**: the image tested in staging is byte-for-byte the one in production.\n- **Fast feedback**: keep PR checks under about 10 minutes (caching, parallel jobs, path filters).\n- **Reproducible**: pinned dependency versions and action versions (major tags or, for stricter supply-chain security, full commit SHAs).\n- **Rollback**: redeploy the previous image tag or task definition revision.\n- **Infrastructure as code in the pipeline**: `pulumi preview` on PRs (posted as a comment) and `pulumi up` on merge make infra changes reviewable like code.\n\n### Security pitfalls\n`pull_request_target` runs with secrets in the context of the base repo; never check out and execute untrusted PR code with it. Avoid interpolating untrusted input (`${{ github.event.pull_request.title }}`) directly into `run:` scripts (script injection); pass it through `env:` instead. Third-party actions run with your token, so pin and review them.",
+  "code_md": "```yaml\n# 1) .github/workflows/ci.yml: lint + tests with a real PostgreSQL service\nname: CI\non:\n  pull_request:\n  push:\n    branches: [main]\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true          # cancel superseded runs on the same branch/PR\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        python-version: [\"3.11\", \"3.12\"]\n    services:\n      postgres:\n        image: postgres:16\n        env:\n          POSTGRES_USER: test\n          POSTGRES_PASSWORD: test\n          POSTGRES_DB: shop_test\n        ports: [\"5432:5432\"]\n        options: >-\n          --health-cmd \"pg_isready -U test\" --health-interval 5s --health-retries 10\n    env:\n      DATABASE_URL: postgresql://test:test@localhost:5432/shop_test\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: ${{ matrix.python-version }}\n          cache: pip                      # caches downloads keyed on requirements files\n      - run: pip install -r requirements.txt -r requirements-dev.txt\n      - run: ruff check .\n      - run: pytest -q --maxfail=1 --cov=src\n```\n\n```yaml\n# 2) .github/workflows/deploy.yml: build image, push to ECR via OIDC (no stored AWS keys)\nname: Deploy\non:\n  push:\n    branches: [main]\n  workflow_dispatch:\n\npermissions:\n  contents: read\n  id-token: write                       # required to request the OIDC token\n\njobs:\n  build-push:\n    runs-on: ubuntu-latest\n    outputs:\n      image: ${{ steps.meta.outputs.image }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: aws-actions/configure-aws-credentials@v4\n        with:\n          role-to-assume: arn:aws:iam::123456789012:role/gha-deploy\n          aws-region: ap-south-1\n      - id: ecr\n        uses: aws-actions/amazon-ecr-login@v2\n      - id: meta\n        run: echo \"image=${{ steps.ecr.outputs.registry }}/upload-job:${{ github.sha }}\" >> \"$GITHUB_OUTPUT\"\n      - uses: docker/setup-buildx-action@v3\n      - uses: docker/build-push-action@v6\n        with:\n          context: .\n          platforms: linux/amd64\n          push: true\n          tags: ${{ steps.meta.outputs.image }}     # immutable tag = commit SHA\n          cache-from: type=gha\n          cache-to: type=gha,mode=max\n```\n\n```yaml\n# 3) Second job in deploy.yml: pulumi up behind a protected environment.\n#    (In ci.yml, a similar job without `environment` runs the action with command: preview on PRs.)\n  infra:\n    needs: build-push\n    runs-on: ubuntu-latest\n    environment: production               # required reviewers configured in repo settings\n    concurrency: deploy-production        # never two deploys at once\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with: { python-version: \"3.12\" }\n      - run: pip install -r infra/requirements.txt\n      - uses: aws-actions/configure-aws-credentials@v4\n        with:\n          role-to-assume: arn:aws:iam::123456789012:role/gha-deploy\n          aws-region: ap-south-1\n      - uses: pulumi/actions@v6\n        with:\n          command: up\n          stack-name: org/etl/prod\n          work-dir: infra\n        env:\n          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}\n          IMAGE_URI: ${{ needs.build-push.outputs.image }}\n```\n\n**4) IAM role trust policy for GitHub OIDC** (restricted to one repo + environment):\n\n```json\n{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\n    \"Effect\": \"Allow\",\n    \"Principal\": {\"Federated\": \"arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com\"},\n    \"Action\": \"sts:AssumeRoleWithWebIdentity\",\n    \"Condition\": {\n      \"StringEquals\": {\n        \"token.actions.githubusercontent.com:aud\": \"sts.amazonaws.com\",\n        \"token.actions.githubusercontent.com:sub\": \"repo:my-org/etl-service:environment:production\"\n      }\n    }\n  }]\n}\n```",
+  "use_cases_md": "- Running lint, type checks and pytest on every pull request as required checks.\n- Integration tests against a disposable PostgreSQL service container.\n- Building and pushing Docker images to ECR tagged with the commit SHA.\n- Deploying Lambda functions/layers and ECS task definitions through Pulumi.\n- Scheduled jobs (nightly dependency audits, data-quality checks).\n- Manual, approved production deploys with `workflow_dispatch` and environments.",
+  "mistakes_md": "- **Long-lived AWS access keys in secrets**: leak and rotation risk. Use OIDC with a tightly scoped trust policy.\n- **Deploying `latest` or rebuilding per environment**: what you tested isn't what you ship. Build once, tag with the SHA, promote.\n- **No concurrency control on deploys**: two runs race and leave infra half-updated. Use `concurrency` groups.\n- **Broad `GITHUB_TOKEN` permissions**: a compromised step can push code. Declare minimal `permissions`.\n- **Script injection** via `${{ github.event.* }}` in `run:`: attacker-controlled PR titles execute as shell. Pass through `env:` and quote.\n- **Slow pipelines** (no caching, everything serial): developers stop waiting for CI. Cache dependencies, parallelise, use path filters.\n- **Tests depending on shared or real databases**: flaky and dangerous. Use service containers with fresh data.\n- **Skipping CI for \"small\" changes** via admin merges: the one time it matters, it breaks prod. Enforce branch protection.",
+  "best_practices_md": "- Make CI required for merging (branch protection + required status checks).\n- Keep workflows small and readable; extract shared logic into reusable workflows or composite actions.\n- Pin action versions (major tags at minimum; commit SHAs for third-party actions).\n- Use environments with required reviewers for production.\n- Cache wisely (pip, Docker layers) and fail fast (`--maxfail`, `cancel-in-progress`).\n- Run infra previews (`pulumi preview`) on PRs so infrastructure changes are reviewed.\n- Emit useful artifacts: coverage reports, test results, built image URI as job outputs.",
+  "my_context_md": "You haven't set up CI/CD yet; it's a listed gap, along with automated tests. You already have the pieces a pipeline would automate: a Dockerfile for the ECSMarketplaceDataUpload container, Lambda Layers for shared dependencies, Pulumi for infrastructure in ap-south-1, and Git. A realistic first pipeline for that project would be: on pull request, run `ruff` and a few `pytest` tests against a Postgres service container (for example, testing that the upsert SQL is idempotent) plus `pulumi preview`; on merge, build the image tagged with the commit SHA, push to ECR using OIDC (no stored AWS keys), and run `pulumi up` behind a protected environment. Building this yourself would close two listed gaps at once.",
+  "related": [
+    "docker-essentials",
+    "pytest-essentials",
+    "git-workflow",
+    "ecs-fargate",
+    "aws-lambda-essentials",
+    "web-security-owasp"
+  ],
+  "flashcards": [
+    {
+      "front": "Where do GitHub Actions workflows live?",
+      "back": "YAML files in `.github/workflows/` in the repository."
+    },
+    {
+      "front": "Do jobs in a workflow run sequentially by default?",
+      "back": "No, in parallel on separate runners; use `needs:` for ordering and artifacts/outputs to share data."
+    },
+    {
+      "front": "How do you deploy to AWS from Actions without access keys?",
+      "back": "OIDC: `permissions: id-token: write` + `aws-actions/configure-aws-credentials` with `role-to-assume`; the IAM role trusts token.actions.githubusercontent.com with sub/aud conditions."
+    },
+    {
+      "front": "How do you add a manual approval before production deploys?",
+      "back": "Use `environment: production` with required reviewers configured as a protection rule."
+    },
+    {
+      "front": "How do you run integration tests against PostgreSQL in CI?",
+      "back": "A `services: postgres:` container with health-check options, connecting via localhost:5432."
+    },
+    {
+      "front": "What does 'build once, deploy many' mean?",
+      "back": "Build one immutable artifact (e.g. image tagged with the git SHA), test it, and promote that same artifact through environments."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which permission is required for a workflow to obtain an OIDC token for AWS?",
+      "options": [
+        "id-token: write",
+        "contents: write",
+        "actions: write",
+        "packages: read"
+      ],
+      "answer_index": 0,
+      "explanation": "id-token: write allows requesting the OIDC JWT used for AssumeRoleWithWebIdentity."
+    },
+    {
+      "question": "Two pushes to main trigger overlapping deploys. Simplest prevention?",
+      "options": [
+        "A matrix strategy",
+        "Caching",
+        "A concurrency group on the deploy job",
+        "workflow_dispatch"
+      ],
+      "answer_index": 2,
+      "explanation": "Concurrency groups serialise or cancel runs sharing the same group key."
+    },
+    {
+      "question": "Which is the safest image tag strategy for deployments?",
+      "options": [
+        "latest",
+        "The git commit SHA",
+        "The branch name",
+        "The date"
+      ],
+      "answer_index": 1,
+      "explanation": "SHA tags are immutable and traceable to exact code, so rollbacks are precise."
+    },
+    {
+      "question": "Why is `run: echo \"${{ github.event.pull_request.title }}\"` risky?",
+      "options": [
+        "It's slow",
+        "It leaks GITHUB_TOKEN by itself",
+        "Titles aren't available in Actions",
+        "Untrusted input is interpolated into the shell script (script injection)"
+      ],
+      "answer_index": 3,
+      "explanation": "Expressions are substituted before the shell runs; pass untrusted values via env: instead."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Describe a CI/CD pipeline you would set up for a containerised Python service on AWS.",
+      "difficulty": "medium",
+      "answer_md": "**On every pull request (CI):**\n1. Checkout, set up Python with pip caching.\n2. `ruff check`, `mypy` (or pyright).\n3. `pytest`: unit tests plus integration tests against a `postgres:16` service container, with migrations applied first.\n4. `docker build` (no push) to catch Dockerfile errors; optionally an image vulnerability scan (Trivy).\n5. `pulumi preview` posted to the PR for infra changes.\nAll of these are required status checks under branch protection.\n\n**On merge to main (CD):**\n1. Build the image once, tagged with the **commit SHA**; push to ECR using **OIDC** credentials.\n2. Deploy to staging: `pulumi up` with the new image URI (new ECS task definition revision / Lambda version), run DB migrations, run smoke tests.\n3. Promote the **same image** to production through a protected `production` environment (required reviewers), with a `concurrency` group so deploys don't overlap.\n4. Rollback = redeploy the previous SHA tag or task definition revision.\n\nSupporting pieces: least-privilege `permissions`, pinned action versions, notifications on failure, and keeping PR feedback under about 10 minutes."
+    },
+    {
+      "question": "Why use OIDC instead of AWS access keys in GitHub Actions? How does it work?",
+      "difficulty": "hard",
+      "answer_md": "**Problems with stored keys:** long-lived credentials that can leak (logs, forks, compromised actions), must be rotated manually, and are often over-privileged and shared across workflows.\n\n**OIDC flow:**\n1. In AWS, create an IAM **OIDC identity provider** for `https://token.actions.githubusercontent.com` with audience `sts.amazonaws.com`.\n2. Create an IAM **role** whose trust policy allows `sts:AssumeRoleWithWebIdentity` from that provider **only** when claims match: `aud = sts.amazonaws.com` and `sub = repo:my-org/my-repo:environment:production` (or `:ref:refs/heads/main`).\n3. The workflow declares `permissions: id-token: write`. At runtime, GitHub mints a signed, short-lived JWT describing the run (repo, ref, environment, workflow).\n4. `aws-actions/configure-aws-credentials` with `role-to-assume` exchanges the JWT with STS for **temporary credentials** (about an hour), exported to later steps.\n\nBenefits: nothing secret is stored in GitHub, credentials expire automatically, access is scoped per repo/branch/environment, and CloudTrail shows which workflow assumed the role. The key risk is an overly broad `sub` condition (e.g. `repo:my-org/*`), which would let any repo or branch deploy, so scope it tightly."
+    },
+    {
+      "question": "Your CI takes 25 minutes and developers bypass it. How do you speed it up?",
+      "difficulty": "medium",
+      "answer_md": "Measure first: look at step timings in the Actions UI to see where time goes.\n\nCommon wins:\n- **Dependency caching**: `setup-python` with `cache: pip`, or cache the virtualenv keyed on the lock file hash. Docker builds: BuildKit with `cache-from/cache-to: type=gha` and a cache-friendly Dockerfile order.\n- **Parallelism**: split lint, unit tests and integration tests into separate jobs; shard tests with `pytest-xdist` (`-n auto`) or a matrix of test groups.\n- **Do less**: `paths:` filters (don't run backend tests for docs-only changes); run the full matrix only on main, a single Python version on PRs.\n- **Fail fast**: run quick checks (ruff) first; `--maxfail=1`; `concurrency` with `cancel-in-progress` to kill superseded runs.\n- **Faster tests**: replace sleeps, reuse one database per session with transactions rolled back per test, mock slow external calls, and move slow end-to-end tests to a nightly schedule.\n- **Bigger runners** for CPU-bound jobs if the cost is justified.\n\nThen make the fast pipeline a required check so bypassing it isn't an option. A pipeline that's fast enough removes the reason to bypass it."
+    }
+  ]
+}

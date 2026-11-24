@@ -1,0 +1,120 @@
+{
+  "slug": "python-context-managers",
+  "title": "Context Managers",
+  "skill": "python",
+  "extra_skills": [
+    "error-handling"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "python",
+    "with",
+    "contextlib",
+    "resources",
+    "transactions"
+  ],
+  "summary": "A context manager is an object used with `with` that sets something up on entry and is guaranteed to clean it up on exit - even if an exception happens. Files, locks, database connections and transactions are the classic examples. You can write one as a class with `__enter__`/`__exit__` or as a generator decorated with `@contextlib.contextmanager`.",
+  "details_md": "### The protocol\n```python\nwith EXPR as x:\n    BODY\n```\nroughly does:\n1. `mgr = EXPR`; `x = mgr.__enter__()`\n2. run `BODY`\n3. call `mgr.__exit__(exc_type, exc_value, traceback)` - with `None`s if no exception.\n4. If `__exit__` returns a **truthy** value the exception is suppressed; otherwise it propagates.\n\nSo `with` is a structured `try/finally` that you can package and reuse.\n\n### @contextmanager\n`contextlib.contextmanager` turns a generator into a context manager: code before `yield` is `__enter__`, the yielded value is bound by `as`, and code after `yield` is `__exit__`. Put the cleanup in a `finally` - otherwise an exception in the body is re-raised **at the `yield`** and your cleanup is skipped. To handle (and optionally suppress) errors, wrap the `yield` in `try/except`.\n\n### psycopg2 specifics (important!)\n- `with conn:` wraps a **transaction**: commit on success, rollback on exception. It does **not** close the connection.\n- `with conn.cursor() as cur:` closes the cursor on exit.\n- To close the connection, call `conn.close()` or return it to the pool yourself (e.g. via a custom context manager around `pool.getconn()`/`putconn()`).\n\n(psycopg 3 changed this: `with psycopg.connect()` closes the connection at the end.)\n\n### Useful contextlib tools\n- `suppress(FileNotFoundError)` - ignore specific exceptions.\n- `ExitStack` - manage a dynamic number of context managers (e.g. open N files), and register callbacks with `stack.callback(fn)`.\n- `closing(obj)` - call `.close()` on exit for objects without CM support.\n- `nullcontext()` - a no-op placeholder when a CM is optional.\n- `redirect_stdout`, `chdir` (3.11+).\n- `asynccontextmanager` and `AsyncExitStack` for async resources (`async with`), used by FastAPI's `lifespan`.\n\n### Multiple managers\nSince 3.10 you can use parenthesised multiple managers:\n```python\nwith (open(a) as fa, open(b) as fb):\n    merge(fa, fb)\n```\nThey are entered left to right and exited in reverse order.\n\n### Context managers as decorators\n`ContextDecorator` (and anything built with `@contextmanager`) can also decorate a function, wrapping its whole body.\n\n### Why it matters\nLeaked resources fail slowly: connection pools run dry, file descriptors hit limits, locks stay held, transactions stay open (and in PostgreSQL an \"idle in transaction\" session holds locks and blocks vacuum). Context managers make the cleanup path impossible to forget and keep the happy path readable.",
+  "code_md": "```python\n# Class-based context manager: timing + logging any block\nimport time\n\nclass Timer:\n    def __init__(self, label):\n        self.label = label\n    def __enter__(self):\n        self.start = time.perf_counter()\n        return self                      # bound to `as t`\n    def __exit__(self, exc_type, exc, tb):\n        self.elapsed = time.perf_counter() - self.start\n        status = \"failed\" if exc_type else \"ok\"\n        print(f\"{self.label}: {status} in {self.elapsed:.3f}s\")\n        return False                     # don't suppress exceptions\n\nwith Timer(\"parse\") as t:\n    sum(range(1_000_000))\n```\n\n```python\n# Generator-based: borrow a pooled psycopg2 connection and run a transaction\nfrom contextlib import contextmanager\nfrom psycopg2.pool import ThreadedConnectionPool\n\npool = ThreadedConnectionPool(1, 5, dsn=\"postgresql://user:pw@localhost/db\")\n\n@contextmanager\ndef transaction():\n    conn = pool.getconn()\n    try:\n        with conn:                       # commit on success / rollback on error\n            with conn.cursor() as cur:   # cursor closed on exit\n                yield cur\n    finally:\n        pool.putconn(conn)               # always return to the pool\n\n# usage\n# with transaction() as cur:\n#     cur.execute(\"UPDATE fs_upload SET status = %s WHERE id = %s\", (\"Completed\", 42))\n```\n\n```python\n# contextlib helpers\nfrom contextlib import suppress, ExitStack\nimport os\n\nwith suppress(FileNotFoundError):\n    os.remove(\"/tmp/maybe-missing.csv\")      # no try/except boilerplate\n\npaths = [\"a.txt\", \"b.txt\"]\nfor p in paths:\n    open(p, \"w\").close()\nwith ExitStack() as stack:\n    files = [stack.enter_context(open(p)) for p in paths]   # all closed at the end\n    stack.callback(print, \"cleanup done\")\n```\n\n```python\n# Async context manager used for FastAPI lifespan\nfrom contextlib import asynccontextmanager\nfrom fastapi import FastAPI\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    app.state.jobs = {}          # startup\n    yield\n    app.state.jobs.clear()       # shutdown\n\napp = FastAPI(lifespan=lifespan)\n```",
+  "use_cases_md": "- Files, sockets, HTTP sessions (`with requests.Session() as s`).\n- Database transactions and cursors; borrowing/returning pooled connections.\n- Locks (`with threading.Lock()`), semaphores, `asyncio.Lock`.\n- Temporary state: `tempfile.TemporaryDirectory()`, env var overrides, `decimal.localcontext()`.\n- Timing/tracing blocks and status bookkeeping (mark a job Processing on enter, Completed/Error on exit).\n- App startup/shutdown via FastAPI `lifespan`.",
+  "mistakes_md": "- **Assuming `with psycopg2.connect() as conn` closes the connection** - it only ends the transaction. Fix: close explicitly or wrap with your own CM / `contextlib.closing`.\n- **No `try/finally` around `yield` in `@contextmanager`** - cleanup is skipped when the body raises. Fix: `try: yield ... finally: cleanup()`.\n- **Returning `True` from `__exit__` accidentally** - silently swallows all exceptions. Fix: return `False`/`None` unless suppression is intended.\n- **Yielding twice in a `@contextmanager` generator** - `RuntimeError: generator didn't stop`. Fix: exactly one `yield`.\n- **Using the resource after the block** - e.g. reading from a closed file. Fix: finish all work inside the block or copy data out.\n- **Opening a connection per row** inside a loop instead of one transaction around the batch.",
+  "best_practices_md": "- Wrap every acquire/release pair in a context manager; never rely on garbage collection for cleanup.\n- Keep `with` blocks as short as possible for locks and transactions.\n- Prefer `@contextmanager` for simple cases, a class when you need state/attributes or reuse.\n- Use `ExitStack` for a variable number of resources instead of nested `with` pyramids.\n- Make transaction boundaries explicit and visible at the call site.",
+  "my_context_md": "- Your `DatabaseManager` in helper.py (ECSMarketplaceDataUpload) uses psycopg2 with transactional writes and connection pooling - remember that psycopg2's `with conn:` commits/rolls back but does not close or return the connection, so a small `@contextmanager` that does `getconn()` ... `putconn()` makes pool usage leak-proof.\n- The `fs_upload` status flow (Processing -> Completed/Error) maps naturally onto a context manager: set Processing in `__enter__`, then Completed or Error in `__exit__` depending on whether an exception occurred.\n- Your FastAPI apps could use an `asynccontextmanager` `lifespan` to set up and tear down shared state such as the in-memory job dict.",
+  "related": [
+    "python-exceptions",
+    "python-decorators",
+    "psycopg2-essentials",
+    "transactions-isolation",
+    "fastapi-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "What methods make an object a context manager?",
+      "back": "`__enter__(self)` and `__exit__(self, exc_type, exc, tb)` (async: `__aenter__`/`__aexit__`)."
+    },
+    {
+      "front": "How does `__exit__` suppress an exception?",
+      "back": "By returning a truthy value."
+    },
+    {
+      "front": "What does psycopg2's `with conn:` do?",
+      "back": "Commits on success, rolls back on exception. It does NOT close the connection."
+    },
+    {
+      "front": "In `@contextmanager`, where must cleanup go?",
+      "back": "In a `finally` around the single `yield`, otherwise it's skipped when the body raises."
+    },
+    {
+      "front": "Tool for a dynamic number of context managers?",
+      "back": "`contextlib.ExitStack` (`enter_context`, `callback`)."
+    },
+    {
+      "front": "Order of exit with `with (A() as a, B() as b):`?",
+      "back": "Entered A then B; exited B then A (reverse)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "After `with psycopg2.connect(dsn) as conn: ...` finishes successfully, what is the connection state?",
+      "options": [
+        "Closed",
+        "Committed but still open",
+        "Rolled back and closed",
+        "Returned to the pool automatically"
+      ],
+      "answer_index": 1,
+      "explanation": "psycopg2 connection context managers handle the transaction only; you must close the connection yourself."
+    },
+    {
+      "question": "What happens if code in a `@contextmanager` body raises and there's no try/finally around `yield`?",
+      "options": [
+        "Cleanup after yield is skipped and the exception propagates",
+        "Cleanup still runs",
+        "The exception is suppressed",
+        "RuntimeError: generator didn't stop"
+      ],
+      "answer_index": 0,
+      "explanation": "The exception is thrown into the generator at the `yield`; without `finally` the code after it never runs."
+    },
+    {
+      "question": "Which contextlib tool ignores a specific exception type?",
+      "options": [
+        "nullcontext",
+        "closing",
+        "ExitStack",
+        "suppress"
+      ],
+      "answer_index": 3,
+      "explanation": "`with suppress(FileNotFoundError):` swallows only that exception type."
+    },
+    {
+      "question": "What is FastAPI's recommended way to run startup/shutdown code?",
+      "options": [
+        "`@app.on_event('startup')` only",
+        "Global code at import time",
+        "A `lifespan` async context manager passed to `FastAPI(lifespan=...)`",
+        "A `__del__` method on the app"
+      ],
+      "answer_index": 2,
+      "explanation": "`on_event` is deprecated in favour of the `lifespan` async context manager."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain how the `with` statement works and write a context manager for a database transaction.",
+      "difficulty": "medium",
+      "answer_md": "`with` calls `__enter__()` on the manager and binds its return value to the `as` target. When the block ends - normally, via `return`/`break`, or by exception - it calls `__exit__(exc_type, exc, tb)`. If `__exit__` returns truthy, the exception is suppressed. It's a reusable `try/finally`.\n\n```python\nfrom contextlib import contextmanager\n\n@contextmanager\ndef transaction(pool):\n    conn = pool.getconn()\n    try:\n        cur = conn.cursor()\n        try:\n            yield cur\n            conn.commit()\n        except Exception:\n            conn.rollback()\n            raise                 # never swallow the error\n        finally:\n            cur.close()\n    finally:\n        pool.putconn(conn)\n\nwith transaction(pool) as cur:\n    cur.execute(\"INSERT INTO orders (id, orgid) VALUES (%s, %s)\", (1, 7))\n```\nKey points: commit only after the body succeeds, roll back and re-raise on failure, and always return the connection to the pool. This guarantees no \"idle in transaction\" sessions and no pool exhaustion even when an exception occurs mid-batch."
+    },
+    {
+      "question": "When would you write a class-based context manager instead of using @contextmanager?",
+      "difficulty": "medium",
+      "answer_md": "`@contextmanager` is ideal for simple linear setup/teardown. Use a **class** when:\n- The manager needs **state or methods** accessible inside the block (e.g. `timer.elapsed`, `tracker.add_error(...)`).\n- It must be **reusable or re-entrant** - a generator-based CM can only be used once per call; a class can implement re-entrancy (like `threading.RLock`).\n- You need fine control over exception handling, e.g. suppressing only certain exceptions based on attributes.\n- You want it to also work as a decorator with custom logic (subclass `ContextDecorator`).\n- Performance in very hot paths (class CMs avoid generator overhead).\n\n```python\nclass UploadStatus:\n    def __init__(self, db, upload_id): self.db, self.id = db, upload_id\n    def __enter__(self):\n        self.db.set_status(self.id, \"Processing\"); return self\n    def __exit__(self, et, exc, tb):\n        self.db.set_status(self.id, \"Error\" if et else \"Completed\")\n        return False\n```"
+    },
+    {
+      "question": "What is ExitStack and when is it useful?",
+      "difficulty": "hard",
+      "answer_md": "`contextlib.ExitStack` is a context manager that collects other context managers and callbacks at runtime and unwinds them all (in LIFO order) when it exits - even if one of the cleanups itself raises.\n\nUse it when the number of resources isn't known statically or setup is conditional:\n```python\nfrom contextlib import ExitStack\n\ndef merge_files(paths, out_path):\n    with ExitStack() as stack:\n        files = [stack.enter_context(open(p)) for p in paths]\n        out = stack.enter_context(open(out_path, \"w\"))\n        for f in files:\n            out.writelines(f)\n```\nIf opening the 3rd file fails, the first two are still closed. Other uses: `stack.callback(cleanup_fn, arg)` for non-CM cleanups; `stack.pop_all()` to transfer ownership of acquired resources out of a constructor once setup succeeds (a pattern for \"acquire several resources atomically\"). `AsyncExitStack` does the same for `async with` resources and is used internally by FastAPI to manage `yield` dependencies."
+    }
+  ]
+}

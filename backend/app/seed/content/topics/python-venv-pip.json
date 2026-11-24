@@ -1,0 +1,122 @@
+{
+  "slug": "python-venv-pip",
+  "title": "Virtual Environments & Dependencies",
+  "skill": "python-venv",
+  "extra_skills": [
+    "python"
+  ],
+  "category": "Tools",
+  "difficulty": "beginner",
+  "tags": [
+    "python",
+    "venv",
+    "pip",
+    "dependencies",
+    "pyproject",
+    "uv",
+    "packaging"
+  ],
+  "summary": "A virtual environment is a project-private folder with its own Python packages, so projects don't break each other. Create one with `python -m venv .venv`, activate it, and install with `python -m pip install ...`. Record dependencies in `pyproject.toml` or `requirements.txt` with pinned versions (ideally a lock file) so every machine, container and Lambda gets the same versions.",
+  "details_md": "### Why environments exist\nWithout isolation, every project shares one site-packages: upgrading pandas for project A breaks project B, and `sudo pip install` can break OS tools. Modern Linux distros mark the system Python as **externally managed** (PEP 668) and refuse plain `pip install` outside a venv.\n\n### How venv works\n`python -m venv .venv` creates a directory with:\n- `pyvenv.cfg` pointing at the base interpreter,\n- a `bin/` (Linux/macOS) or `Scripts/` (Windows) folder with a `python` launcher and `pip`,\n- its own `site-packages`.\n\"Activating\" only prepends that `bin`/`Scripts` folder to `PATH` (and sets `VIRTUAL_ENV`). You can skip activation entirely by calling `.venv/bin/python` directly - handy in scripts, cron and Docker. Venvs are not relocatable: recreate rather than copy them, and never commit them to Git.\n\n### pip essentials\n- Always use `python -m pip` so you install into the interpreter you think you are.\n- `pip install \"pandas>=2.2,<3\"`, `pip install -e .` (editable install of your own project), `pip install -r requirements.txt`.\n- `pip list --outdated`, `pip show pkg`, `pip check` (broken dependency constraints), `pip freeze` (exact versions installed).\n- Version specifiers: `==` exact, `~=2.2` compatible release (`>=2.2,<3`), `>=`, `<`, and extras `pkg[extra]`.\n\n### Declaring vs locking\nTwo different things:\n1. **Declared (abstract) dependencies**: what your code needs, with ranges - `[project] dependencies = [\"fastapi>=0.115\", \"psycopg2-binary>=2.9\"]` in `pyproject.toml`.\n2. **Locked (concrete) dependencies**: every package, including transitive ones, pinned to exact versions (ideally with hashes) for reproducible builds. Produced by `pip freeze`, `pip-compile` (pip-tools), `uv lock` / `uv pip compile`, Poetry or PDM. PEP 751 defines a standard `pylock.toml` lock file format.\nApps and deployments should install from the lock; libraries publish only ranges.\n\n### pyproject.toml\nThe standard config file (PEP 517/518/621): project metadata, dependencies, optional groups (`[project.optional-dependencies] dev = [\"pytest\", \"mypy\"]` or `[dependency-groups]`), build backend, and tool configs (`[tool.pytest.ini_options]`, `[tool.ruff]`, `[tool.mypy]`).\n\n### uv\n`uv` (Astral, written in Rust) is a fast all-in-one replacement for pip/pip-tools/venv/pyenv: `uv venv`, `uv pip install`, and project mode `uv init`, `uv add fastapi`, `uv lock`, `uv sync`, `uv run pytest`. It can also install Python versions (`uv python install 3.13`). It is now widely used; plain venv + pip remains the universal baseline you should know.\n\n### Multiple Python versions\n`py -3.13` (Windows launcher), `pyenv`, or `uv python` manage interpreters. Create the venv with the version you deploy (e.g. the AWS Lambda runtime version).\n\n### Deployment specifics\n- **Docker**: install from the lock in a layer before copying source to use the build cache; `pip install --no-cache-dir`; often no venv needed in a single-purpose image, though a venv in a multi-stage build is a clean way to copy only dependencies.\n- **AWS Lambda**: dependencies must be built for Amazon Linux and the right architecture (x86_64/arm64) - `pip install --platform manylinux2014_x86_64 --only-binary=:all: -t package/` or build in Docker/use a container image; pandas/NumPy are large, so watch the 250 MB unzipped limit (or use layers/container images).\n- `psycopg2-binary` is convenient for development; the psycopg2 docs recommend building `psycopg2` from source for production (or using container images that include libpq).",
+  "code_md": "```bash\n# Create, activate, install (Linux/macOS)\npython3 -m venv .venv\nsource .venv/bin/activate\npython -m pip install --upgrade pip\npython -m pip install \"fastapi[standard]\" \"pandas>=2.2\"\npython -m pip freeze > requirements.txt     # exact versions of everything installed\ndeactivate\n```\n\n```bash\n# Windows (Git Bash / PowerShell / cmd)\npy -3.13 -m venv .venv\nsource .venv/Scripts/activate        # Git Bash\n# .venv\\Scripts\\Activate.ps1         # PowerShell\n# .venv\\Scripts\\activate.bat         # cmd\npython -m pip install -r requirements.txt\n\n# No activation needed if you call the venv's interpreter directly:\n.venv/Scripts/python -m pytest\n```\n\n```toml\n# pyproject.toml - declared dependencies with ranges + tool config\n[project]\nname = \"marketplace-upload\"\nversion = \"0.1.0\"\nrequires-python = \">=3.12\"\ndependencies = [\n  \"pandas>=2.2,<4\",\n  \"psycopg2-binary>=2.9\",\n  \"boto3>=1.34\",\n  \"requests>=2.32\",\n]\n\n[dependency-groups]\ndev = [\"pytest>=8\", \"mypy>=1.10\", \"ruff>=0.5\"]\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n```\n\n```bash\n# Locking with pip-tools or uv\npip install pip-tools\npip-compile pyproject.toml -o requirements.lock --generate-hashes\npip-sync requirements.lock                 # make the venv match the lock exactly\n\n# uv equivalents\nuv venv && uv pip compile pyproject.toml -o requirements.lock\nuv sync                                    # project mode: creates .venv and installs from uv.lock\nuv run pytest\n```\n\n```bash\n# Building Lambda-compatible dependencies on a non-Linux machine\npip install -r requirements.txt \\\n  --platform manylinux2014_x86_64 --only-binary=:all: \\\n  --python-version 3.12 --target package/\n```",
+  "use_cases_md": "- Isolating each project's dependencies (work service vs personal FastAPI apps vs CLI tools).\n- Reproducible installs in Docker images, CI runners and Lambda packages.\n- Testing against a new library version in a throwaway venv.\n- Separating dev tools (pytest, mypy, ruff) from runtime dependencies.",
+  "mistakes_md": "- **Running bare `pip` that belongs to a different Python** - packages land in the wrong place. Fix: `python -m pip`, and check `which python`/`where python`.\n- **Committing `.venv/`** - huge and machine-specific. Fix: `.gitignore` it; commit the dependency files.\n- **Unpinned requirements in deployments** - a new release breaks production silently. Fix: lock files with exact versions (and hashes).\n- **`pip freeze` from a polluted environment** - captures unrelated packages. Fix: fresh venv per project, or use pip-tools/uv to compile from declared deps.\n- **Building Lambda packages on Windows/macOS** without targeting Linux - native wheels (pandas, NumPy, psycopg2) fail at import. Fix: `--platform manylinux...` or build in Docker.\n- **`sudo pip install`** into system Python. Fix: venvs (or pipx for CLI tools).\n- **Copying/moving a venv** - scripts have absolute paths. Fix: recreate it.",
+  "best_practices_md": "- One venv per project, named `.venv` in the project root (editors auto-detect it).\n- Declare ranges in `pyproject.toml`, deploy from a lock file.\n- Separate dev dependencies from runtime ones.\n- Match the venv's Python version to production (Lambda runtime, Docker base image).\n- Upgrade dependencies deliberately and regularly (with tests), not by accident.\n- Use `pipx` or `uv tool` for globally installed CLI tools.",
+  "my_context_md": "- Your stack spans AWS Lambda and ECS with heavy dependencies (pandas, NumPy, psycopg2, boto3); Lambda packages must be built for Amazon Linux, which is why building in Docker or targeting `manylinux` wheels matters when developing on Windows.\n- Your two FastAPI apps and CLI tools (argparse, Pillow, tqdm) each deserve their own venv and pinned requirements so a Pillow or FastAPI upgrade in one doesn't break another.\n- Adding `pytest` as a dev dependency group is the first step towards the automated tests you don't have yet.",
+  "related": [
+    "git-workflow",
+    "docker-essentials",
+    "aws-lambda-essentials",
+    "pytest-essentials",
+    "github-actions-ci"
+  ],
+  "flashcards": [
+    {
+      "front": "Command to create a venv in `.venv`?",
+      "back": "`python -m venv .venv`"
+    },
+    {
+      "front": "What does activating a venv actually do?",
+      "back": "Prepends the venv's bin/Scripts dir to PATH and sets VIRTUAL_ENV - nothing more."
+    },
+    {
+      "front": "Why `python -m pip` instead of `pip`?",
+      "back": "Guarantees pip installs into the interpreter you're running, avoiding PATH mix-ups."
+    },
+    {
+      "front": "Declared vs locked dependencies?",
+      "back": "Declared: ranges your code needs (pyproject). Locked: exact versions of every transitive package for reproducible installs."
+    },
+    {
+      "front": "What does `~=2.2` mean?",
+      "back": "Compatible release: `>=2.2, <3.0`."
+    },
+    {
+      "front": "What is PEP 668?",
+      "back": "Marks system Pythons as externally managed - pip refuses to install outside a venv (use venv/pipx)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Your teammate's install works but production breaks after a dependency released a new version. Root cause?",
+      "options": [
+        "The venv was activated",
+        "Production installed from unpinned ranges instead of a lock file",
+        "pip is outdated",
+        "pyproject.toml is unsupported"
+      ],
+      "answer_index": 1,
+      "explanation": "Without exact pins, each install can resolve newer versions; deploy from a lock."
+    },
+    {
+      "question": "Which file should NOT be committed to Git?",
+      "options": [
+        "pyproject.toml",
+        "requirements.lock",
+        ".venv/",
+        "uv.lock"
+      ],
+      "answer_index": 2,
+      "explanation": "Virtual environments are machine-specific and large; commit the dependency declarations/locks."
+    },
+    {
+      "question": "On Windows, the venv's Python executable lives in:",
+      "options": [
+        ".venv\\Scripts\\python.exe",
+        ".venv/bin/python",
+        ".venv/lib/python",
+        "C:\\Python\\venv.exe"
+      ],
+      "answer_index": 0,
+      "explanation": "Windows venvs use Scripts\\; POSIX venvs use bin/."
+    },
+    {
+      "question": "You build a Lambda zip on Windows including pandas. Import fails on Lambda with a missing shared library. Fix?",
+      "options": [
+        "Upgrade pip",
+        "Rename the zip",
+        "Use psycopg2-binary",
+        "Install Linux wheels (--platform manylinux...) or build inside a Linux/Lambda Docker image"
+      ],
+      "answer_index": 3,
+      "explanation": "Compiled extensions must match Lambda's Linux OS and CPU architecture."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you manage Python dependencies for a service so builds are reproducible?",
+      "difficulty": "medium",
+      "answer_md": "1. **Isolation**: one virtual environment per project (`.venv`), never the system Python.\n2. **Declare** direct dependencies with sensible ranges in `pyproject.toml` (`pandas>=2.2,<4`), dev tools in a separate group.\n3. **Lock** the full transitive set with exact versions and hashes - `pip-compile --generate-hashes`, `uv lock`, or Poetry/PDM - and commit the lock file.\n4. **Install from the lock everywhere**: CI, Docker images (`pip install --require-hashes -r requirements.lock`, or `uv sync --frozen`), Lambda packages. The same bytes run in dev, CI and prod.\n5. **Match the runtime**: same Python minor version and platform as production; for Lambda build Linux wheels for the right architecture.\n6. **Upgrade deliberately**: scheduled bumps (Dependabot/Renovate PRs) with tests in CI, plus `pip-audit` for vulnerabilities.\n\n```bash\nuv lock && uv sync --frozen && uv run pytest\n```\nThe difference between \"works on my machine\" and reproducible builds is almost always step 3-4."
+    },
+    {
+      "question": "What's the difference between requirements.txt, pyproject.toml and a lock file?",
+      "difficulty": "easy",
+      "answer_md": "- **`pyproject.toml`** is the standard project configuration (PEP 621): name, version, `requires-python`, **declared** dependencies (usually ranges), optional/dev groups, build backend, and tool settings (pytest, ruff, mypy). It describes what the project needs.\n- **`requirements.txt`** is pip's simple input format - just a list of requirement specifiers. It can hold ranges (hand-written) or exact pins (`pip freeze`/`pip-compile` output). Historically used for both declaring and locking, which caused confusion.\n- **A lock file** (`uv.lock`, `poetry.lock`, `requirements.lock` from pip-tools, the standard `pylock.toml` from PEP 751) records the **resolved** exact version - and ideally hashes - of every direct and transitive dependency, so installs are byte-for-byte reproducible.\n\nTypical modern setup: ranges in `pyproject.toml`, generated lock committed, CI/Docker install from the lock. Libraries meant for others publish only ranges; applications deploy from locks."
+    },
+    {
+      "question": "What problems can happen when packaging Python for AWS Lambda, and how do you avoid them?",
+      "difficulty": "hard",
+      "answer_md": "- **Platform mismatch**: packages with C extensions (pandas, NumPy, psycopg2, Pillow, cryptography) ship platform-specific wheels. A zip built on Windows/macOS contains the wrong binaries -> `ImportError` on Lambda (Amazon Linux). Fix: `pip install --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12 -t package/`, or build inside the official Lambda base image with Docker, and match the architecture (x86_64 vs arm64).\n- **Size limits**: zip packages are limited to 250 MB unzipped (including layers); pandas + NumPy + pyarrow can approach that. Fix: Lambda layers for shared heavy deps, trimming unused packages, or container images (up to 10 GB).\n- **Cold start time**: big dependency trees slow init. Fix: lazy imports in the handler path, avoid importing unused heavy modules at top level, consider arm64 for price/performance.\n- **Version drift**: unpinned installs differ between deploys. Fix: install from a lock file in CI.\n- **libpq for psycopg2**: `psycopg2-binary` bundles libpq and is commonly used on Lambda; alternatively use a layer or container image with libpq.\n- **Python version mismatch** between local venv and Lambda runtime. Fix: develop and test on the same minor version."
+    }
+  ]
+}

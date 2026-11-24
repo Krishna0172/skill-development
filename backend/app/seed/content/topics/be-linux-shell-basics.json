@@ -1,0 +1,176 @@
+{
+  "slug": "be-linux-shell-basics",
+  "title": "Linux shell essentials for backend work",
+  "skill": "backend-architecture",
+  "extra_skills": [
+    "docker"
+  ],
+  "category": "Tools",
+  "difficulty": "beginner",
+  "tags": [
+    "bash",
+    "linux",
+    "grep",
+    "pipes",
+    "permissions",
+    "env"
+  ],
+  "summary": "The shell is a text interface where you run programs by typing commands. This topic covers navigation, pipes, grep/awk/sed, environment variables and file permissions - the small toolbox you need on every server and container.",
+  "why_md": "- Servers, containers and CI runners are Linux and are driven from a shell.\n- Searching logs with grep and pipes is faster than any GUI.\n- Environment variables and permissions explain a huge share of 'works on my machine' problems.\n- Docker, Kubernetes and deployment scripts all assume shell fluency.",
+  "details_md": "### What is the shell?\nA shell (usually `bash`) reads a line you type, runs the program it names and prints the output. A command looks like `command -options arguments`, e.g. `ls -l /var/log`.\n\n### Navigating and files\n- `pwd` where am I; `cd dir` change directory; `ls -la` list with details and hidden files.\n- `mkdir -p a/b`, `cp src dst`, `mv src dst`, `rm file` (`rm -r dir` removes a folder; there is no trash can).\n- `cat file`, `head -n 20 file`, `tail -n 50 file`, `tail -f app.log` (follow new lines live), `less file`.\n\n### Pipes and redirection\nEvery program has standard input (stdin), standard output (stdout) and standard error (stderr).\n- `|` connects stdout of one command to stdin of the next: `cat app.log | grep ERROR | wc -l`.\n- `>` writes output to a file (overwrite), `>>` appends, `2>` redirects errors, `2>&1` merges errors into output.\n\n### The text trio\n- **grep** filters lines: `grep -i \"timeout\" app.log`, `-v` inverts, `-c` counts, `-r` searches folders, `-E` for regex.\n- **awk** works with columns: `awk '{print $1, $9}' access.log` prints fields 1 and 9. `awk -F, '{sum+=$3} END {print sum}' sales.csv` sums a CSV column.\n- **sed** edits streams: `sed 's/old/new/g' file` replaces text.\nOften combined with `sort | uniq -c | sort -rn | head` to find the most frequent values.\n\n### Environment variables\nNamed values inherited by child processes. `export DB_URL=postgres://...` sets one for the session; `echo \"$DB_URL\"` prints it; `env` lists all. In a script, `${VAR:-default}` supplies a default. Config and secrets are passed this way (twelve-factor style); Python reads them with `os.environ`. `PATH` is the list of folders searched for commands.\n\n### Permissions\n`ls -l` shows e.g. `-rwxr-xr--`: type, then owner, group, others, each with read (4), write (2), execute (1). So `rwxr-xr--` is 754. `chmod +x deploy.sh` makes a script executable; `chmod 600 key.pem` makes a private key owner-only (SSH refuses looser keys). `chown user:group file` changes ownership.\n\n### Exit codes and chaining\nEvery command returns an exit code: 0 = success, non-zero = failure. `$?` holds the last code. `a && b` runs b only if a succeeded; `a || b` runs b if a failed; `a ; b` always runs both. In scripts `set -euo pipefail` makes bash stop on errors, unset variables and failed pipes.\n\n### Processes\n`ps aux | grep python`, `top`, `kill <pid>`, `kill -9 <pid>` (force), `command &` runs in the background. Quote variables (`\"$VAR\"`) so spaces do not split arguments.",
+  "code_md": "```bash\n# 1) Log investigation with pipes\ngrep \" 500 \" access.log | awk '{print $7}' | sort | uniq -c | sort -rn | head -5\n# top 5 URLs that returned 500\ntail -f app.log | grep --line-buffered ERROR      # live error stream\n```\n\n```bash\n# 2) Environment variables and a safe script header\n#!/usr/bin/env bash\nset -euo pipefail\nexport APP_ENV=\"${APP_ENV:-dev}\"\necho \"Running in $APP_ENV\"\npython -c \"import os; print(os.environ['APP_ENV'])\"\n```\n\n```bash\n# 3) Permissions\nchmod +x deploy.sh        # make executable\nchmod 600 ~/.ssh/id_rsa   # private key: owner read/write only\nls -l deploy.sh           # -rwxr-xr-x ...\nsed -i 's/localhost/db.internal/g' config.ini   # edit in place\n```",
+  "use_cases_md": "- Counting errors in a 2 GB log without opening an editor.\n- Passing database URLs and API keys into a container via environment variables.\n- A deploy script that stops at the first failure thanks to `set -e`.\n- Fixing 'Permission denied' when running `./start.sh` or SSH key errors.",
+  "mistakes_md": "- **`rm -rf` with a variable that may be empty** (`rm -rf $DIR/`): can wipe the wrong place. Quote and check.\n- **Unquoted variables**: `cp $file dest` breaks on spaces. Use `\"$file\"`.\n- **Overwriting with `>` by accident**: use `>>` to append.\n- **`chmod 777` as a fix**: grants everyone write access. Find the real owner/group issue.\n- **Forgetting `export`**: a plain `VAR=x` is not visible to child programs.\n- **Putting secrets in command history** or scripts committed to Git.",
+  "best_practices_md": "- Start scripts with `set -euo pipefail`.\n- Quote variables.\n- Test destructive commands with `ls` or `echo` first.\n- Use environment variables for config; never hardcode secrets.\n- Prefer least-privilege permissions (600 for secrets, 755 for scripts).\n- Learn `man <command>` and `--help`.",
+  "my_context_md": "",
+  "revision_notes_md": "- `pwd cd ls -la mkdir cp mv rm cat head tail -f less`.\n- `|` chains commands; `>` overwrite, `>>` append, `2>&1` merge stderr.\n- grep filters lines, awk picks columns, sed substitutes.\n- `sort | uniq -c | sort -rn | head` = top-N frequency.\n- `export VAR=value`; read with `$VAR`; Python `os.environ`.\n- Permissions r=4 w=2 x=1; `chmod 600` for keys, `+x` for scripts.\n- Exit code 0 = success; `&&`, `||`.\n- `set -euo pipefail` in scripts.",
+  "exercises_md": "1. Generate a fake `access.log` with 20 lines and use grep/awk/sort/uniq to find the most common status code.\n2. Write `report.sh` with `set -euo pipefail`, make it executable and make it fail on an unset variable.\n3. Export `GREETING=hello` and print it from a bash child (`bash -c 'echo $GREETING'`) with and without `export`.\n4. Create a file with mode 640 and explain each digit using `ls -l`.",
+  "related": [
+    "be-docker-basics",
+    "docker-essentials",
+    "be-git-basics"
+  ],
+  "flashcards": [
+    {
+      "front": "What does `|` do?",
+      "back": "Sends stdout of the left command into stdin of the right command."
+    },
+    {
+      "front": "`>` vs `>>`?",
+      "back": "`>` overwrites the file; `>>` appends."
+    },
+    {
+      "front": "What does `chmod 755` mean?",
+      "back": "Owner rwx (7), group r-x (5), others r-x (5)."
+    },
+    {
+      "front": "What does `set -euo pipefail` do?",
+      "back": "Exit on error (-e), error on unset variables (-u), fail a pipeline if any part fails (pipefail)."
+    },
+    {
+      "front": "Why use `export`?",
+      "back": "Without export, the variable is not passed to child processes."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which command follows a log file live as new lines arrive?",
+      "options": [
+        "cat app.log",
+        "tail -f app.log",
+        "head app.log",
+        "ls app.log"
+      ],
+      "answer_index": 1,
+      "explanation": "tail -f follows the file."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Permissions `rw-r-----` correspond to which number?",
+      "options": [
+        "640",
+        "755",
+        "600",
+        "644"
+      ],
+      "answer_index": 0,
+      "explanation": "6 = rw-, 4 = r--, 0 = ---."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does `grep -v ERROR app.log` do?",
+      "options": [
+        "Counts errors",
+        "Shows lines that do NOT contain ERROR",
+        "Replaces ERROR",
+        "Shows only ERROR"
+      ],
+      "answer_index": 1,
+      "explanation": "-v inverts the match."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To make a variable visible to child processes you must ____ it.",
+      "answers": [
+        "export"
+      ],
+      "explanation": "Use export."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The exit code that means success is ____.",
+      "answers": [
+        "0",
+        "zero"
+      ],
+      "explanation": "0 means success."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import stat\nprint(stat.filemode(0o100754))\nprint(oct(0o640))",
+      "answers": [
+        "-rwxr-xr--\n0o640"
+      ],
+      "explanation": "filemode renders type+permissions; oct() of a number."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import shlex\nprint(shlex.split('grep -i \"time out\" app.log'))",
+      "answers": [
+        "['grep', '-i', 'time out', 'app.log']"
+      ],
+      "explanation": "shlex splits like a shell: quoted text stays one argument."
+    },
+    {
+      "type": "debug",
+      "prompt": "This script deletes the wrong things when DIR is empty. Fix it.",
+      "code": "#!/bin/bash\nDIR=$1\nrm -rf $DIR/*",
+      "answer": "With no argument DIR is empty and `rm -rf /*` is attempted. Unquoted variable and no safety checks.\n\n```bash\n#!/usr/bin/env bash\nset -euo pipefail\nDIR=\"${1:?usage: clean.sh <dir>}\"\nrm -rf -- \"${DIR:?}\"/*\n```",
+      "rubric": [
+        "Empty variable expands dangerously",
+        "Quote the variable",
+        "Use `${1:?}`/set -u to fail fast"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain stdout, stderr and what `cmd > out.txt 2>&1` does.",
+      "answer": "stdout is normal output (fd 1), stderr is error output (fd 2). `> out.txt` sends stdout to the file; `2>&1` makes stderr go wherever stdout goes, so both end up in out.txt.",
+      "rubric": [
+        "Two separate streams",
+        "> redirects stdout",
+        "2>&1 merges stderr"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you find the 5 IP addresses with the most requests in an nginx access log?",
+      "answer": "Assuming the IP is column 1: `awk '{print $1}' access.log | sort | uniq -c | sort -rn | head -5`. awk extracts the column, sort groups identical IPs, `uniq -c` counts them, `sort -rn` orders by count descending and head keeps five.",
+      "rubric": [
+        "awk to extract column",
+        "sort before uniq -c",
+        "sort -rn and head"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What does 'Permission denied' usually mean and how do you debug it?",
+      "difficulty": "easy",
+      "answer_md": "The user running the command lacks r/w/x on the file or a parent directory. Check `ls -l`, the owner and group (`id`), and execute bits on directories. Fix with `chmod`/`chown` or run as the right user, rather than `chmod 777`."
+    },
+    {
+      "question": "How do environment variables reach a Python process?",
+      "difficulty": "easy",
+      "answer_md": "The parent shell exports them; at process start the OS copies the environment to the child. Python exposes it as `os.environ` (a dict-like). Changes inside Python affect only that process and its children, not the parent shell. Docker uses `-e` or `--env-file`, Kubernetes uses `env`."
+    },
+    {
+      "question": "Why `set -euo pipefail` in bash scripts?",
+      "difficulty": "medium",
+      "answer_md": "By default bash continues after errors. `-e` exits on a failing command, `-u` treats undefined variables as errors (catches typos), and `pipefail` makes a pipeline fail if any stage fails (otherwise only the last command's status counts). Caveat: `-e` has subtle exceptions in `if` conditions and `&&` lists, so test critical scripts."
+    }
+  ]
+}

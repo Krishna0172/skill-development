@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, stat %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Dashboard</h1><p>Computed from recorded activity since {{ d.tracking_started_on|date }}. No arbitrary percentages: progress = topics whose understanding you've demonstrated.</p></div></div>
+
+<div class="grid g5">
+  {% for a in areas %}
+    <div class="stat">
+      <div class="between"><span class="label">{{ a.label }}</span>{{ charts.ring(a.percent, size=46, label=a.label) }}</div>
+      <div class="sub">{{ a.passed }}/{{ a.topics }} topics demonstrated · {{ a.mastered }} mastered</div>
+      <div class="sub">best avg score {{ a.avg_best_score if a.avg_best_score is not none else "—" }}{% if a.avg_best_score is not none %}%{% endif %} · self-rated {{ a.self_rated_avg or "—" }}/6</div>
+      {% if a.attention %}<div class="sub warn">{{ a.attention }} need revision</div>{% endif %}
+    </div>
+  {% endfor %}
+</div>
+
+<div class="grid g5 mt">
+  {{ stat("Topics demonstrated", d.topics.learned ~ "/" ~ d.topics.total, d.topics.revised ~ " revised", "/topics") }}
+  {{ stat("Revision due", d.topics.pending_revision, (d.topics.overdue_revision ~ " overdue") if d.topics.overdue_revision else "none overdue", "/revision") }}
+  {{ stat("Problems solved", d.exercises.solved ~ "/" ~ d.exercises.attempted, "of " ~ d.exercises.total ~ " exercises", "/practice") }}
+  {{ stat("Learning hours", d.time.total_hours|hours, "🔥 " ~ d.streak.current ~ "-day streak", "/tracker") }}
+  {{ stat("Skills self-rated", (d.skills.total - d.skills.not_assessed) ~ "/" ~ d.skills.total, d.skills.needs_revision ~ " flagged needs-revision", "/skills") }}
+</div>
+
+<div class="grid g3 mt">
+  {% call card("Daily activity · last 7 days") %}{{ charts.bars(d.time.last7, "date", [("minutes", "Minutes")], height=170, fmt_x=charts.weekday) }}{% endcall %}
+  {% call card("Weekly learning hours · 12 weeks") %}{{ charts.bars(d.time.weekly, "week", [("hours", "Hours")], height=170, fmt_x=charts.short_date) }}{% endcall %}
+  {% call card("Monthly hours · 12 months") %}{{ charts.line(d.time.monthly, "month", [("hours", "Hours")], height=170, fmt_x=charts.month_label) }}{% endcall %}
+</div>
+
+<div class="grid g3 mt">
+  {% call card("Topic progress") %}
+    {% set st = d.topics.by_status %}
+    {{ charts.segments([("Not started", st.get("not_started", 0), "var(--seq-0)"), ("Learning", st.get("learning", 0), "var(--series-1)"),
+        ("Practised", st.get("practised", 0), "var(--series-7)"), ("Learned", st.get("learned", 0), "var(--series-3)"),
+        ("Mastered", st.get("mastered", 0), "var(--series-6)"), ("Needs revision", st.get("needs_revision", 0), "var(--series-4)"),
+        ("Difficult", st.get("difficult", 0), "var(--series-8)")]) }}
+    <div class="mt">
+      <div class="between small"><span>Roadmap steps done</span><span class="num">{{ d.roadmap.steps_done }}/{{ d.roadmap.steps_total }}</span></div>{{ progress(d.roadmap.percent) }}
+    </div>
+  {% endcall %}
+
+  {% call card("Pending · recently studied") %}
+    <div class="section-title">Pending revision (3 days)</div>
+    <ul class="list compact">{% for r in d.pending_reviews %}<li class="between small"><span>{{ r.title[:60] }}</span><span class="faint">{{ r.due_date|rel }}</span></li>{% else %}<li class="small muted">Nothing scheduled.</li>{% endfor %}</ul>
+    <div class="section-title mt">Recently studied</div>
+    <ul class="list compact">{% for r in d.recent_topics %}<li class="between small"><a href="/topics/{{ r.id }}">{{ r.title }}</a><span class="faint">{{ r.at|rel }}</span></li>{% else %}<li class="small muted">Nothing yet.</li>{% endfor %}</ul>
+  {% endcall %}
+
+  {% call card("Targets") %}
+    {% for tg in targets %}
+      <div class="between small"><span>{{ tg.period|label }} · {{ tg.label }}</span><span class="num">{{ tg.current|round|int }}/{{ tg.target|round|int }}</span></div>{{ progress(tg.percent, "good" if tg.percent >= 100 else "", thin=True) }}<div style="height:7px"></div>
+    {% endfor %}
+    <a class="small" href="/targets">Edit targets & goals →</a>
+  {% endcall %}
+</div>
+
+<div class="mt" id="readiness">{% call card("Interview readiness by role") %}
+  <p class="small muted">Weighted from demonstrated topic coverage per area + interview questions you've practised with confidence ≥ 4. Each component is shown so the number is never a black box.</p>
+  <div class="grid g5">
+    {% for r in roles %}
+      <div><div class="between"><strong class="small">{{ r.label }}</strong><span class="num">{{ r.score }}%</span></div>{{ progress(r.score) }}
+        <ul class="list compact tiny muted mt">{% for c in r.components %}<li class="between"><span>{{ c.component }} ×{{ c.weight }}</span><span class="num">{{ c.value }}%</span></li>{% endfor %}</ul>
+      </div>
+    {% endfor %}
+  </div>
+{% endcall %}</div>
+{% endblock %}

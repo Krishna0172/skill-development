@@ -1,0 +1,191 @@
+{
+  "slug": "be-docker-basics",
+  "title": "Docker from zero: images, containers, volumes",
+  "skill": "docker",
+  "extra_skills": [],
+  "category": "Cloud & DevOps",
+  "difficulty": "beginner",
+  "tags": [
+    "docker",
+    "image",
+    "container",
+    "dockerfile",
+    "volumes"
+  ],
+  "summary": "Docker packages your app and everything it needs into an image, and runs that image as an isolated container. This topic assumes no prior knowledge: what images and containers are, how to write a first Dockerfile, and the commands run, ps, logs, exec and volumes.",
+  "why_md": "- 'Works on my machine' disappears when the same image runs everywhere.\n- Almost every modern deployment (ECS, Kubernetes, Cloud Run) runs containers.\n- Databases and tools can be started locally in one command, without installing them.\n- Docker questions appear in nearly every backend interview. (This topic is the gentle starting point; `docker-essentials` goes further.)",
+  "details_md": "### The problem Docker solves\nYour app needs Python 3.12, certain libraries and system packages. A colleague has a different setup and the app breaks. Docker lets you ship the *whole environment* together with the code.\n\n### Image vs container\n- An **image** is a read-only template: operating-system files, Python, your libraries and your code, stored as stacked layers. Think of it as a recipe or a class.\n- A **container** is a running instance of an image: an isolated process with its own filesystem view, network and process list. Think of it as an object created from the class. You can start many containers from one image.\n\nA container is *not* a virtual machine. It shares the host's kernel and uses Linux features (namespaces for isolation, cgroups for CPU/memory limits), so it starts in milliseconds and is lightweight.\n\n### Registry\nImages are stored in a **registry** such as Docker Hub or AWS ECR. `docker pull python:3.12-slim` downloads an image; `docker push` uploads yours.\n\n### The Dockerfile\nA text file with build steps. Each instruction creates a layer:\n- `FROM` the base image.\n- `WORKDIR` the folder inside the image.\n- `COPY` files in.\n- `RUN` a command at build time (install packages).\n- `CMD` the default command when a container starts.\n- `EXPOSE` documents the port.\n`docker build -t shop-api:1.0 .` builds it. Layers are cached: if a step and everything before it is unchanged, Docker reuses it. So copy `requirements.txt` and install dependencies *before* copying your code, otherwise every code edit reinstalls packages.\n\n### Running containers\n- `docker run -d --name api -p 8000:8000 shop-api:1.0` starts it in the background (-d) and maps host port 8000 to container port 8000 (-p host:container).\n- `docker ps` lists running containers (`-a` includes stopped).\n- `docker logs -f api` follows output; apps should log to stdout so this works.\n- `docker exec -it api sh` opens a shell inside.\n- `docker stop api`, `docker rm api`, `docker rmi image`.\n- `-e KEY=value` or `--env-file .env` passes environment variables.\n\n### Data lives and dies with the container\nA container's own filesystem is thrown away when it is removed. To keep data (a database), use a **volume**: `-v pgdata:/var/lib/postgresql/data` stores data in a Docker-managed volume that survives container removal. A **bind mount** (`-v ./src:/app/src`) maps a host folder, handy for live code editing.\n\n### Networking basics\nContainers get their own network. `-p` publishes a port to the host. Containers on the same user-defined network can reach each other by container name (so the API connects to `db:5432`).\n\n### .dockerignore\nLike `.gitignore` for the build context: exclude `.git`, `.venv`, `__pycache__` and `.env` so images stay small and secrets stay out.",
+  "code_md": "```dockerfile\n# Dockerfile - a tiny FastAPI/Flask-style app\nFROM python:3.12-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt   # cached unless requirements change\nCOPY . .\nEXPOSE 8000\nCMD [\"python\", \"-m\", \"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]\n```\n\n```bash\n# Build and run\ndocker build -t shop-api:1.0 .\ndocker run -d --name api -p 8000:8000 --env-file .env shop-api:1.0\ndocker ps\ndocker logs -f api\ndocker exec -it api sh\ndocker stop api && docker rm api\n```\n\n```bash\n# A database with a persistent volume (no local install needed)\ndocker run -d --name pg -e POSTGRES_PASSWORD=dev -p 5432:5432 \\\n  -v pgdata:/var/lib/postgresql/data postgres:16\ndocker volume ls\n```",
+  "use_cases_md": "- Run PostgreSQL or Redis locally for development with one command.\n- Package an API so the exact same image goes from your laptop to CI to production.\n- Reproduce a customer's environment or a bug in a clean container.\n- Run one-off jobs (a data import script) in an isolated environment.",
+  "mistakes_md": "- **Using the `latest` tag**: builds are not reproducible. Pin versions (`python:3.12-slim`).\n- **Storing data inside the container**: lost on removal. Use volumes.\n- **Binding to 127.0.0.1 in the app**: the port mapping cannot reach it. Bind `0.0.0.0` inside containers.\n- **Copying code before installing dependencies**: kills layer caching.\n- **Baking secrets into the image** (`ENV PASSWORD=...`, copying `.env`): they live in the layers forever. Pass at runtime.\n- **Running as root**: add a non-root `USER` for real deployments.",
+  "best_practices_md": "- Small, pinned base images (`-slim`).\n- One process per container; log to stdout.\n- Order Dockerfile steps from least to most frequently changing.\n- Add a `.dockerignore`.\n- Use volumes for state and environment variables for config.\n- Tag images with a version or git SHA.",
+  "my_context_md": "",
+  "revision_notes_md": "- Image = read-only template of layers; container = running instance.\n- Container shares host kernel (not a VM): fast, light.\n- Dockerfile: FROM, WORKDIR, COPY, RUN, CMD.\n- Cache layers: dependencies first, code last.\n- `run -d -p host:container --name`, `ps`, `logs -f`, `exec -it`, `stop`, `rm`.\n- Container filesystem is ephemeral: use volumes for data.\n- Never bake secrets into images; use env vars.\n- `.dockerignore` keeps context small.",
+  "exercises_md": "1. Write a Dockerfile for a 5-line Python script that prints the environment variable `GREETING`, build it and run it with `-e GREETING=hi`.\n2. Start `postgres:16` with a named volume, create a table, remove the container, start a new one with the same volume and confirm the data survives.\n3. Edit one line of your app and rebuild; compare the build output before and after you reorder COPY/RUN to see layer caching.\n4. Use `docker exec` to open a shell in a running container and list its files.",
+  "related": [
+    "docker-essentials",
+    "be-docker-compose-multistage",
+    "be-linux-shell-basics",
+    "ecs-fargate"
+  ],
+  "flashcards": [
+    {
+      "front": "Image vs container?",
+      "back": "Image: read-only template. Container: a running, isolated instance of an image."
+    },
+    {
+      "front": "Is a container a VM?",
+      "back": "No. It shares the host kernel and is isolated with namespaces/cgroups."
+    },
+    {
+      "front": "What does `-p 8000:80` do?",
+      "back": "Maps host port 8000 to container port 80."
+    },
+    {
+      "front": "How do you persist database data?",
+      "back": "Mount a volume (or bind mount) outside the container's ephemeral filesystem."
+    },
+    {
+      "front": "Why copy requirements.txt before the code?",
+      "back": "So the dependency-install layer stays cached unless requirements change."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is a Docker image?",
+      "options": [
+        "A running process",
+        "A read-only template used to create containers",
+        "A virtual machine disk",
+        "A network"
+      ],
+      "answer_index": 1,
+      "explanation": "Images are templates; containers are instances."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which command shows logs of a container named api?",
+      "options": [
+        "docker ps api",
+        "docker logs api",
+        "docker exec api",
+        "docker inspect api -l"
+      ],
+      "answer_index": 1,
+      "explanation": "docker logs shows stdout/stderr."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your container removed its database rows when recreated. Best fix?",
+      "options": [
+        "Use the latest tag",
+        "Mount a volume for the data directory",
+        "Increase memory",
+        "Use EXPOSE"
+      ],
+      "answer_index": 1,
+      "explanation": "Container filesystems are ephemeral; volumes persist."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does an app inside a container that listens on 127.0.0.1 not respond to published ports?",
+      "options": [
+        "Docker blocks it",
+        "Loopback inside the container is not reachable from outside; bind 0.0.0.0",
+        "Port numbers must be above 8000",
+        "It needs a volume"
+      ],
+      "answer_index": 1,
+      "explanation": "Bind to 0.0.0.0."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The Dockerfile instruction that sets the default command is ____.",
+      "answers": [
+        "cmd"
+      ],
+      "explanation": "CMD."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To map host port 8080 to container port 80 use -p 8080:____.",
+      "answers": [
+        "80"
+      ],
+      "explanation": "host:container."
+    },
+    {
+      "type": "debug",
+      "prompt": "Every tiny code change reinstalls all pip packages and the build takes minutes. Why and fix?",
+      "code": "FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\nCMD [\"python\", \"main.py\"]",
+      "answer": "Copying all code before installing means any code change invalidates the cache for the pip layer.\n\n```dockerfile\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\n```",
+      "rubric": [
+        "Layer caching is invalidated by changed files",
+        "Copy requirements first",
+        "Install, then copy the rest"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between an image and a container to someone who has never used Docker.",
+      "answer": "An image is a frozen package containing an OS userland, Python, libraries and your code. A container is a live process started from that image, with its own isolated filesystem and network. Like a class and an object: one image, many containers.",
+      "rubric": [
+        "Image = template/read-only",
+        "Container = running instance",
+        "One image can start many containers"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How do containers differ from virtual machines?",
+      "answer": "VMs emulate hardware and run a full guest OS with its own kernel, so they are heavy and slow to boot. Containers share the host kernel and are isolated using namespaces and cgroups, so they start in milliseconds and use less memory, but they offer weaker isolation than a VM.",
+      "rubric": [
+        "VM has own kernel",
+        "Containers share host kernel",
+        "Trade-off: speed vs isolation"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the best way to give a container a database password?",
+      "options": [
+        "ENV in the Dockerfile",
+        "Copy .env into the image",
+        "Pass it at runtime via an environment variable or secret",
+        "Hardcode it in the code"
+      ],
+      "answer_index": 2,
+      "explanation": "Do not bake secrets into image layers."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which command lists stopped containers too?",
+      "options": [
+        "docker ps",
+        "docker ps -a",
+        "docker images",
+        "docker stats"
+      ],
+      "answer_index": 1,
+      "explanation": "-a shows all."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain Docker layers and caching.",
+      "difficulty": "easy",
+      "answer_md": "Each Dockerfile instruction creates a read-only layer; layers stack to form the image. Docker caches a layer when the instruction and all earlier layers are unchanged. Therefore order matters: put rarely changing steps (install dependencies) before frequently changing ones (copy code). Layers are also shared between images, saving disk and pull time."
+    },
+    {
+      "question": "What is the difference between a volume and a bind mount?",
+      "difficulty": "medium",
+      "answer_md": "A volume is created and managed by Docker (stored under Docker's area), portable and the preferred way to persist database data. A bind mount maps an existing host path into the container, useful in development to see code changes instantly. Bind mounts depend on host layout and permissions."
+    },
+    {
+      "question": "CMD vs ENTRYPOINT?",
+      "difficulty": "medium",
+      "answer_md": "ENTRYPOINT defines the executable that always runs; CMD supplies default arguments (or the default command if there is no ENTRYPOINT) and is easily replaced by `docker run image args`. A common pattern is ENTRYPOINT [\"python\", \"app.py\"] with CMD [\"--help\"]. Use the exec (JSON array) form so signals reach your process."
+    }
+  ]
+}

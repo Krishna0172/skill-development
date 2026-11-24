@@ -1,0 +1,146 @@
+{
+  "slug": "ai-ml-fundamentals",
+  "title": "Machine learning fundamentals",
+  "skill": "ml-fundamentals",
+  "extra_skills": [],
+  "category": "AI",
+  "difficulty": "beginner",
+  "tags": [
+    "features",
+    "labels",
+    "loss",
+    "bias-variance",
+    "overfitting",
+    "ml-workflow"
+  ],
+  "summary": "What it actually means for a program to 'learn': fitting parameters to minimise a loss on examples, then generalising to unseen data. Covers features and labels, loss functions, overfitting and the bias-variance trade-off, the main types of ML, and the end-to-end workflow from problem framing to monitoring.",
+  "why_md": "- Every later topic (LLMs included) builds on: data → model → loss → optimisation → evaluation.\n- Framing the problem correctly (classification vs regression, what's the label, what's available at prediction time) decides success more than algorithm choice.\n- Overfitting and bias-variance are guaranteed interview questions.\n- As an AI engineer you'll often decide *whether* ML is needed at all versus SQL rules or an LLM call.",
+  "details_md": "### What learning means\nTraditional code: you write rules, data goes in, answers come out. ML: you provide **examples** (inputs + correct answers) and an algorithm searches for parameters that map inputs to answers. \"Learning\" = adjusting parameters to minimise a **loss** on training data, hoping the pattern **generalises** to new data.\n\n### Features and labels\nA row is an example; **features** (X) are the inputs known at prediction time (price, category, days since launch); the **label** (y) is what you want to predict (returned yes/no, units sold next week). Choosing features that genuinely exist at prediction time is the core skill.\n\n### Loss\nA number measuring how wrong predictions are. Regression: mean squared error (MSE) or mean absolute error. Classification: log loss / cross-entropy, which punishes confident wrong answers heavily. Training = minimising average loss, usually by gradient descent.\n\n### Overfitting, underfitting, bias-variance\n- **Underfitting (high bias)**: model too simple, bad on train and test (a straight line for seasonal sales).\n- **Overfitting (high variance)**: model memorises noise, great on train, poor on test (a deep tree with one leaf per order).\n- The trade-off: more flexibility lowers bias but raises variance. Remedies for overfitting: more data, simpler model, regularisation, early stopping, better features. Diagnose by comparing train vs validation error.\n\n### Types of ML\n- **Supervised**: labelled examples — classification (return or not) and regression (units sold).\n- **Unsupervised**: no labels — clustering SKUs, anomaly detection, dimensionality reduction.\n- **Self-supervised**: labels come from the data itself — LLMs predict the next token of text. This is how foundation models are pretrained.\n- **Reinforcement learning**: learn from rewards; RLHF is used to tune LLMs.\n\n### The ML workflow\n1. Frame the problem and the business metric; establish a simple baseline (last week's sales, majority class, a SQL rule).\n2. Collect data and define labels.\n3. Clean, split (train/val/test, by time if temporal), engineer features.\n4. Train candidate models; tune on validation.\n5. Evaluate once on test; compare with baseline.\n6. Deploy (batch job or API), monitor data drift and performance, retrain.",
+  "code_md": "```python\n# Learning = minimising loss. Fit y = w*x by trying values of w (brute force).\nxs = [1, 2, 3, 4]          # e.g. ad spend (lakhs)\nys = [2.1, 3.9, 6.2, 7.8]   # units sold (thousands)\n\ndef mse(w):\n    return sum((w * x - y) ** 2 for x, y in zip(xs, ys)) / len(xs)\n\nbest_w = min((w / 100 for w in range(0, 400)), key=mse)\nprint(best_w, round(mse(best_w), 4))   # 1.99 — the 'learned' parameter\n```\n\n```python\n# Diagnosing over/underfitting: compare train vs validation error by model complexity\nfrom sklearn.tree import DecisionTreeRegressor\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import mean_absolute_error\n\nX_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.2, random_state=42)\nfor depth in [1, 3, 6, 12, None]:\n    m = DecisionTreeRegressor(max_depth=depth, random_state=42).fit(X_tr, y_tr)\n    print(depth,\n          round(mean_absolute_error(y_tr, m.predict(X_tr)), 2),     # train error\n          round(mean_absolute_error(y_val, m.predict(X_val)), 2))   # val error\n# depth=1: both high (underfit). depth=None: train ~0, val high (overfit).\n```",
+  "use_cases_md": "- **Classification**: will this order be returned? is this review spam?\n- **Regression**: units sold next week per SKU; delivery days.\n- **Clustering**: segment sellers or SKUs by behaviour.\n- **Anomaly detection**: unusual settlements or price drops.\n- **Self-supervised / LLMs**: text-to-SQL, summarising reviews, classifying support tickets.",
+  "mistakes_md": "- **Skipping the baseline** — a model at 82% accuracy is useless if \"always predict no-return\" gets 85%.\n- **Features unavailable at prediction time** (target leakage).\n- **Judging by training score** — always compare to a held-out set.\n- **Tuning on the test set** repeatedly — it becomes a validation set and the final number is optimistic.\n- **Using ML where a SQL rule suffices** — extra complexity and maintenance for no gain.\n- **Optimising a metric unrelated to the business goal.**",
+  "best_practices_md": "- Write down: label definition, prediction moment, features available then, success metric, baseline.\n- Start with the simplest model; add complexity only when validation error demands it.\n- Keep a final untouched test set.\n- Plot learning curves (train vs val error) to diagnose bias vs variance.\n- Plan monitoring and retraining before deploying.",
+  "my_context_md": "His repo has no scikit-learn yet, but it has ML-shaped problems: `ECSAmazonReviewRatingPostgres` stores review text and ratings (a supervised sentiment/rating problem), `AmazonVendorBankRecon` reconciles settlements (anomaly detection), and `GetLlmData`/`ECSLlmQueryProcess` is the backend of a self-supervised-model product (an LLM doing text-to-SQL). The user votes stored there are labels you could evaluate against.",
+  "revision_notes_md": "- ML = learn parameters from examples by minimising loss.\n- Features X (known at prediction time), label y.\n- Regression loss: MSE/MAE; classification: log loss.\n- Underfit = high bias (bad train & val).\n- Overfit = high variance (good train, bad val).\n- Fixes: more data, regularise, simplify, early stop.\n- Supervised / unsupervised / self-supervised (LLMs) / RL.\n- Workflow: frame → baseline → data → split → features → train → evaluate → deploy → monitor.\n- Test set = touched once.",
+  "exercises_md": "1. Write a one-page problem framing for \"predict which orders will be returned\": label, prediction moment, 10 candidate features, metric, baseline.\n2. Run the decision-tree depth loop on any tabular dataset and plot train vs validation error.\n3. Implement MSE and log loss in pure Python and compute both on a tiny example.\n4. For three problems in your services, decide: SQL rule, classic ML, or LLM — and justify.",
+  "related": [
+    "ai-supervised-learning",
+    "ai-unsupervised-learning",
+    "ai-model-training",
+    "ai-model-evaluation",
+    "ai-data-preprocessing"
+  ],
+  "flashcards": [
+    {
+      "front": "Overfitting signature?",
+      "back": "Low training error, much higher validation error — the model memorised noise (high variance)."
+    },
+    {
+      "front": "Underfitting signature?",
+      "back": "High error on both training and validation — model too simple (high bias)."
+    },
+    {
+      "front": "How are LLMs pretrained?",
+      "back": "Self-supervised: predict the next token in huge amounts of text; the labels come from the text itself."
+    },
+    {
+      "front": "Why a baseline first?",
+      "back": "It sets the bar a model must beat (e.g. majority class, last week's sales); without it a metric is meaningless."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A model has training MAE 2.1 and validation MAE 14.8. What is the most likely problem?",
+      "options": [
+        "Underfitting / high bias",
+        "Overfitting / high variance",
+        "The learning rate is too low",
+        "The labels are perfectly clean"
+      ],
+      "answer_index": 1,
+      "explanation": "Large gap between train and validation error is the classic overfitting signature."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Predicting next week's units sold per SKU is which kind of problem?",
+      "options": [
+        "Clustering",
+        "Binary classification",
+        "Regression",
+        "Dimensionality reduction"
+      ],
+      "answer_index": 2,
+      "explanation": "The target is a continuous/count quantity, so it's supervised regression."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The function a model minimises during training to measure how wrong its predictions are is called the ____ function.",
+      "answers": [
+        "loss",
+        "cost",
+        "objective"
+      ],
+      "explanation": "Loss (cost/objective) e.g. MSE or cross-entropy."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "LLMs are pretrained with ____-supervised learning: predicting the next token in raw text.",
+      "answers": [
+        "self"
+      ],
+      "explanation": "Labels come from the data itself."
+    },
+    {
+      "type": "output",
+      "prompt": "Loss calculation by hand: what does this print?",
+      "code": "y_true = [3, 5, 2, 8]\ny_pred = [2, 5, 4, 7]\nerrors = [p - t for t, p in zip(y_true, y_pred)]\nmae = sum(abs(e) for e in errors) / len(errors)\nmse = sum(e * e for e in errors) / len(errors)\nprint(errors, mae, mse)",
+      "answers": [
+        "[-1, 0, 2, -1] 1.0 1.5"
+      ],
+      "explanation": "|errors| sum 4/4 = 1.0; squared sum 1+0+4+1 = 6/4 = 1.5. MSE penalises the 2-unit miss more."
+    },
+    {
+      "type": "output",
+      "prompt": "A majority-class baseline: what does this print?",
+      "code": "from collections import Counter\nlabels = [\"kept\"] * 17 + [\"returned\"] * 3\nmajority, count = Counter(labels).most_common(1)[0]\nprint(majority, count / len(labels))",
+      "answers": [
+        "kept 0.85"
+      ],
+      "explanation": "Always predicting 'kept' already scores 85% accuracy — any model must beat this."
+    },
+    {
+      "type": "debug",
+      "prompt": "This return-prediction model scores 0.99 AUC offline but is useless in production. What's wrong?",
+      "code": "features = [\n    \"price\", \"category\", \"marketplace\", \"customer_past_returns\",\n    \"refund_amount\", \"return_reason_code\",\n]\nmodel.fit(orders[features], orders[\"returned\"])",
+      "answer": "`refund_amount` and `return_reason_code` only exist **after** a return happens — they are target leakage. At prediction time (when the order is placed/shipped) they are always empty, so the model learned a shortcut. Remove any feature not known at the prediction moment:\n\n```python\nfeatures = [\"price\", \"category\", \"marketplace\", \"customer_past_returns\"]\n```\nAlso ensure `customer_past_returns` is computed only from returns before the order date.",
+      "rubric": [
+        "Identifies refund_amount/return_reason_code as target leakage",
+        "States the rule: only features available at prediction time",
+        "Checks historical aggregates are computed point-in-time"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the bias-variance trade-off to a backend developer, with an example.",
+      "answer": "Prediction error on new data comes from **bias** (the model is too simple to capture the real pattern), **variance** (the model is so flexible it fits the noise of this particular sample) and irreducible noise. Example: forecasting weekly sales. A flat average of all history has high bias — it ignores seasonality and trends — and is wrong both on train and test. A deep tree that memorises each past week has high variance — perfect on train, erratic on new weeks. Increasing complexity trades bias for variance; we pick the complexity that minimises **validation** error, and reduce variance with more data, regularisation, ensembling (random forests average many high-variance trees) or early stopping.",
+      "rubric": [
+        "Defines bias (too simple) and variance (fits noise)",
+        "Concrete example of each",
+        "Choose complexity by validation error; remedies like regularisation/more data/ensembles"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Walk me through the end-to-end workflow of an ML project.",
+      "difficulty": "medium",
+      "answer_md": "1. **Framing**: business goal (reduce return costs), prediction target (P(return) per order), prediction moment (at dispatch), how it will be used (flag for extra QC), success metric (precision at top 5%).\n2. **Baseline**: a SQL rule (category + past returns) or majority class.\n3. **Data**: pull history, define labels carefully, check quality and leakage.\n4. **Split**: train/validation/test, by time for temporal data.\n5. **Features & preprocessing** in a Pipeline.\n6. **Modelling**: start simple (logistic regression), then gradient boosting; tune with cross-validation.\n7. **Evaluation**: final test once; compare with baseline; slice metrics by marketplace/category.\n8. **Deployment**: batch scoring job or FastAPI endpoint with the saved pipeline.\n9. **Monitoring**: input drift, prediction distribution, delayed-label performance; retrain schedule.\n\nThe emphasis: most effort goes into framing, data and evaluation, not the algorithm."
+    },
+    {
+      "question": "When would you NOT use machine learning?",
+      "difficulty": "easy",
+      "answer_md": "- When a deterministic rule is known and stable — e.g. GST calculation, settlement matching by order id. SQL is cheaper, explainable and exact.\n- When there's not enough labelled data and no way to get it.\n- When errors are unacceptable and can't be reviewed (some financial postings).\n- When a simple baseline already meets the business need.\n- When you can't maintain it: ML needs monitoring and retraining.\n\nOften the right answer is a hybrid: rules for the clear cases, a model (or LLM) for the ambiguous remainder, with human review where cost of error is high."
+    }
+  ]
+}

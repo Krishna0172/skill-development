@@ -1,0 +1,157 @@
+{
+  "slug": "py-logging",
+  "title": "Logging done properly",
+  "skill": "python-exceptions-logging",
+  "extra_skills": [
+    "aws-ecs",
+    "error-handling"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "logging",
+    "structured-logs",
+    "json",
+    "correlation-id",
+    "cloudwatch",
+    "logger.exception"
+  ],
+  "summary": "How the `logging` module is built (loggers, handlers, formatters, levels, propagation), the `getLogger(__name__)` convention, configuring once at the entry point, structured JSON logs with correlation/job IDs via `extra`, filters or `contextvars`, `logger.exception` for tracebacks, keeping secrets out of logs, and making logs CloudWatch-friendly — replacing `print()` in services.",
+  "why_md": "- In ECS/Lambda, logs are your only view into production; `print()` has no levels, no context and no tracebacks.\n- Structured logs with job/upload IDs let CloudWatch Logs Insights answer 'which uploads failed today and why' in one query.\n- Logging secrets or PII (DB passwords, tokens, customer emails) is a security incident.\n- Interviewers often probe logging design as a proxy for production experience.",
+  "details_md": "### Architecture\n- **Logger**: named, hierarchical (`app`, `app.upload`, `app.upload.amazon`). Code calls `logger.info(...)`. A logger without its own level uses its nearest ancestor's (*effective level*).\n- **Handler**: where records go (`StreamHandler` → stdout/stderr, `FileHandler`, `RotatingFileHandler`, `QueueHandler`). Handlers also have levels.\n- **Formatter**: how a record is rendered (text or JSON).\n- **Filter**: attach to logger/handler to drop or enrich records (e.g. add `request_id`).\n- **Propagation**: after a logger's own handlers, the record bubbles up to ancestors' handlers — usually only root has handlers. Adding handlers on child loggers *and* root causes duplicate lines.\n\nFlow: `logger.info()` → level check against effective level → LogRecord created → filters → each handler (handler level, formatter) → propagate to parent.\n\n### Conventions\n- `logger = logging.getLogger(__name__)` at module top; never configure logging in library modules.\n- Configure **once** at the entry point (`main()`, Lambda handler module, Flask app factory) with `logging.basicConfig(...)` or `dictConfig`. In Lambda, the runtime pre-installs a root handler — set the level / formatter on it (or use `basicConfig(force=True)`).\n- Use lazy %-formatting: `logger.info(\"rows=%d upload=%s\", n, uid)` — the string is only built if the level is enabled, and the template stays constant (groupable).\n- Levels: DEBUG (diagnostics), INFO (business events: job started/finished, counts), WARNING (recoverable/unexpected data), ERROR (operation failed), CRITICAL (service unusable).\n\n### Exceptions\n`logger.exception(\"msg\")` inside an `except` logs at ERROR **with the traceback**. Equivalent: `logger.error(..., exc_info=True)`. Log *or* re-raise at a given layer, not both at every layer (duplicated tracebacks). The usual pattern: log once at the job/request boundary.\n\n### Structured logs and correlation IDs\nOne JSON object per line (`{\"ts\":..., \"level\":..., \"logger\":..., \"msg\":..., \"upload_id\":..., \"marketplace\":...}`) is what CloudWatch Logs Insights parses automatically, enabling `filter level = \"ERROR\" | stats count() by marketplace`. Add per-call fields with `extra={...}`; add per-job/request context everywhere with a `contextvars.ContextVar` read by a Filter — this works across threads and asyncio tasks where each job sets its own value. `python-json-logger` or `structlog` save writing the formatter yourself.\n\n### Secrets and PII\nNever log connection strings, secrets from Secrets Manager, auth headers, LWA/OAuth tokens, or full request bodies. Log identifiers and counts, not payloads. A redaction Filter is a safety net, not a substitute.\n\n### CloudWatch specifics\nIn ECS (awslogs driver) and Lambda, write to **stdout/stderr** — the platform ships it; don't write log files inside containers. Multi-line tracebacks become multiple events unless the log is JSON (traceback in one field). Include durations and counts as numeric fields for metric filters/alarms.",
+  "code_md": "```python\n# logging_setup.py - configure ONCE at the entry point\nimport json, logging, sys, contextvars\n\njob_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(\"job_id\", default=None)\n\nclass ContextFilter(logging.Filter):\n    def filter(self, record):\n        record.job_id = job_id_var.get()           # attach correlation id\n        return True\n\nclass JsonFormatter(logging.Formatter):\n    RESERVED = set(vars(logging.makeLogRecord({})))  # standard LogRecord attributes\n    def format(self, r):\n        doc = {\"ts\": self.formatTime(r), \"level\": r.levelname, \"logger\": r.name,\n               \"msg\": r.getMessage()}\n        doc.update({k: v for k, v in vars(r).items() if k not in self.RESERVED})\n        if r.exc_info:\n            doc[\"exc\"] = self.formatException(r.exc_info)   # traceback in ONE event\n        return json.dumps(doc, default=str)\n\ndef setup_logging(level=\"INFO\"):\n    handler = logging.StreamHandler(sys.stdout)\n    handler.setFormatter(JsonFormatter())\n    handler.addFilter(ContextFilter())\n    logging.basicConfig(level=level, handlers=[handler], force=True)\n    logging.getLogger(\"botocore\").setLevel(logging.WARNING)   # quiet noisy libs\n```\n\n```python\n# app/upload.py - library code only gets a logger\nimport logging, time\nfrom logging_setup import job_id_var\nlogger = logging.getLogger(__name__)\n\ndef process_upload(upload_id: str, key: str):\n    job_id_var.set(upload_id)\n    t0 = time.perf_counter()\n    logger.info(\"upload started\", extra={\"s3_key\": key})\n    try:\n        rows = load(key)\n    except Exception:\n        logger.exception(\"upload failed\", extra={\"s3_key\": key})   # ERROR + traceback\n        raise\n    logger.info(\"upload finished\", extra={\"rows\": rows,\n                \"duration_ms\": round((time.perf_counter() - t0) * 1000)})\n\n# BAD: logger.info(f\"connecting with {dsn}\")  -> leaks password, eager formatting\n```\n\n```text\n# CloudWatch Logs Insights over JSON logs\nfields @timestamp, job_id, msg, exc\n| filter level = \"ERROR\"\n| stats count() by bin(1h)\n```",
+  "use_cases_md": "- Tracing one marketplace upload across parse → transform → load stages by `upload_id` in CloudWatch.\n- Alarming on `level = ERROR` count for the job runner via a metric filter.\n- Logging rejected rows as WARNING with row number and reason, plus a summary INFO with counts.\n- Silencing chatty `botocore`/`urllib3` DEBUG logs while keeping app DEBUG during an incident.\n- Measuring per-stage `duration_ms` to spot regressions without a profiler.",
+  "mistakes_md": "- **`print()` in services**: no level, timestamp, logger name or traceback. Fix: module logger.\n- **`logger.error(str(e))` in except**: traceback lost. Fix: `logger.exception(...)`.\n- **f-strings in log calls**: always formatted, and each message is unique (hard to group). Fix: `%s` args or `extra`.\n- **Calling `basicConfig` in library modules / multiple places**: first one wins, others silently ignored. Fix: configure once at entry point.\n- **Handlers on child loggers + root**: duplicate lines. Fix: handlers on root only (or `propagate=False` deliberately).\n- **Logging secrets/tokens/DSNs or full payloads**. Fix: log IDs and counts; redact.\n- **Log and re-raise at every layer**: same traceback 5 times. Fix: log once at the boundary.",
+  "best_practices_md": "- `logger = logging.getLogger(__name__)` everywhere; configure only in `main`/handler.\n- JSON to stdout in containers; one event per record, tracebacks in a field.\n- Correlation ID (job/upload/request) on every line via contextvars + Filter.\n- Use levels meaningfully; INFO for business events with counts and durations.\n- `logger.exception` at the boundary that handles the error.\n- Never log secrets or PII; review log statements in code review.\n- Tune third-party logger levels explicitly.",
+  "my_context_md": "The repo audit found **print() used 11x more than logging** and **432 `except: pass`** blocks — in ECS services whose only observability is CloudWatch, that means many failures leave no trace. Concrete targets: the `ECSMarketplaceDataUpload` dispatcher already tracks upload status, so its upload ID is a natural correlation ID to attach to every log line from the 150+ processors; `AmazonVendorBankRecon/db.py` fetches the DB secret from Secrets Manager — make sure no log line ever includes the secret or DSN; `ECSInventoryPriceTracking/app/fetchers/spapi.py` handles LWA tokens and rate-limit headers — log the rate-limit values and retry counts, never the tokens. `ForcesightJobSchedulerAndRunner` runs jobs in a `ThreadPoolExecutor`, where a contextvar-based job ID keeps concurrent jobs' lines distinguishable.",
+  "revision_notes_md": "- Logger (named, hierarchical) → Handler (destination) → Formatter (shape); Filters enrich/drop.\n- Effective level inherited from ancestors; records propagate to parent handlers.\n- `getLogger(__name__)` in modules; configure once at entry point (`basicConfig(force=True)`/dictConfig).\n- Lazy args: `logger.info(\"rows=%d\", n)`, not f-strings.\n- `logger.exception()` = ERROR + traceback, inside except.\n- JSON lines to stdout for ECS/Lambda → CloudWatch Insights fields.\n- Correlation ID via `contextvars` + Filter; extra fields via `extra=`.\n- Never log secrets, tokens, DSNs, PII; log once per error at the boundary.",
+  "exercises_md": "1. Write `setup_logging()` with a JSON formatter and a contextvar job-ID filter; use it in one ECS service's entry point and replace all `print()` calls in one module.\n2. Find five `except: pass` or `except Exception: print(e)` blocks and convert them to `logger.exception` with upload/job context (or narrower exceptions).\n3. Write a CloudWatch Logs Insights query that lists failed uploads in the last 24 h grouped by marketplace using your JSON fields.\n4. Add a redaction Filter that masks values for keys like `password`, `token`, `authorization` and write a test proving a secret never reaches the output.",
+  "related": [
+    "python-exceptions",
+    "py-profiling-debugging",
+    "be-api-error-handling",
+    "ecs-fargate",
+    "aws-lambda-essentials",
+    "ai-monitoring"
+  ],
+  "flashcards": [
+    {
+      "front": "What does `logger.exception('msg')` do?",
+      "back": "Logs `msg` at ERROR level with the current exception's traceback attached; call it inside an `except` block."
+    },
+    {
+      "front": "Why `logger.info('rows=%d', n)` rather than an f-string?",
+      "back": "Formatting is deferred until the record is actually emitted, and the constant template groups identical events in log tools."
+    },
+    {
+      "front": "Why do log lines appear twice?",
+      "back": "Handlers attached to both a child logger and the root: the record is handled by the child, then propagates to root. Keep handlers on root only."
+    },
+    {
+      "front": "How do you add a job ID to every log line, even with threads?",
+      "back": "Store it in a `contextvars.ContextVar` set at job start and attach it to records with a `logging.Filter` (or LoggerAdapter)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Where should `logging.basicConfig(...)` (or dictConfig) be called?",
+      "options": [
+        "At the top of every module",
+        "Once, at the application entry point (main / Lambda handler module)",
+        "Inside each function before logging",
+        "In `__init__.py` of every package"
+      ],
+      "answer_index": 1,
+      "explanation": "Configuration is application-level; libraries and modules should only call `getLogger(__name__)`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Inside `except Exception:`, which call records the full traceback?",
+      "options": [
+        "`logger.error(str(e))`",
+        "`print(traceback)`",
+        "`logger.warning(e)`",
+        "`logger.exception(\"upload failed\")`"
+      ],
+      "answer_index": 3,
+      "explanation": "`logger.exception` = `logger.error(..., exc_info=True)`."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To add per-call fields like `upload_id` to a log record, pass them as `logger.info(\"msg\", ____={\"upload_id\": uid})`.",
+      "answers": [
+        "extra"
+      ],
+      "explanation": "Keys in `extra` become attributes on the LogRecord (they must not clash with reserved names like `message`)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A component that decides where log records go (stdout, a file, a queue) is called a ____.",
+      "answers": [
+        "handler",
+        "log handler",
+        "logging handler"
+      ],
+      "explanation": "Loggers produce records, handlers emit them, formatters render them."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import logging, sys\n\nroot = logging.getLogger()\nh = logging.StreamHandler(sys.stdout)\nh.setFormatter(logging.Formatter(\"%(levelname)s %(name)s: %(message)s\"))\nroot.addHandler(h)\nroot.setLevel(logging.WARNING)\n\nlog = logging.getLogger(\"app.upload\")\nlog.info(\"skipped\")\nlog.warning(\"low stock sku=%s\", \"A1\")\nlogging.getLogger(\"app\").setLevel(logging.DEBUG)\nlog.info(\"now visible\")",
+      "answers": [
+        "WARNING app.upload: low stock sku=A1\nINFO app.upload: now visible"
+      ],
+      "explanation": "`app.upload` has no level, so its effective level comes from the nearest ancestor: root (WARNING) at first, then `app` (DEBUG). The record propagates to root's handler."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import json, logging, sys\n\nclass JsonFormatter(logging.Formatter):\n    def format(self, r):\n        return json.dumps({\"level\": r.levelname, \"msg\": r.getMessage(),\n                           \"upload_id\": getattr(r, \"upload_id\", None)})\n\nlog = logging.getLogger(\"etl\")\nlog.propagate = False\nh = logging.StreamHandler(sys.stdout)\nh.setFormatter(JsonFormatter())\nlog.addHandler(h)\nlog.setLevel(logging.INFO)\n\nlog.info(\"rows=%d\", 120, extra={\"upload_id\": 42})\nlog.debug(\"hidden\")\nlog.error(\"failed\")",
+      "answers": [
+        "{\"level\": \"INFO\", \"msg\": \"rows=120\", \"upload_id\": 42}\n{\"level\": \"ERROR\", \"msg\": \"failed\", \"upload_id\": null}"
+      ],
+      "explanation": "`extra` adds `upload_id` to the record; DEBUG is below the logger level; `None` serialises to `null`."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong with this logging and how do you fix it?",
+      "code": "import logging\nlogging.basicConfig(level=logging.DEBUG)   # in app/db.py\n\ndef connect(secret):\n    dsn = f\"postgresql://{secret['user']}:{secret['password']}@{secret['host']}/app\"\n    logging.info(f\"connecting to {dsn}\")\n    try:\n        return psycopg2.connect(dsn)\n    except Exception as e:\n        logging.error(f\"connect failed: {e}\")\n        return None",
+      "answer": "- The password is written to the logs (DSN contains it).\n- `basicConfig` inside a library module: config belongs at the entry point; whichever module is imported first wins.\n- Uses the root logger (`logging.info`) instead of a module logger, and eager f-strings.\n- `logging.error(str)` loses the traceback, and returning `None` hides the failure from callers.\n\n```python\nimport logging\nlogger = logging.getLogger(__name__)\n\ndef connect(secret):\n    logger.info(\"connecting to db host=%s user=%s\", secret[\"host\"], secret[\"user\"])\n    try:\n        return psycopg2.connect(host=secret[\"host\"], user=secret[\"user\"],\n                                password=secret[\"password\"], dbname=\"app\")\n    except psycopg2.OperationalError:\n        logger.exception(\"db connect failed host=%s\", secret[\"host\"])\n        raise\n```",
+      "rubric": [
+        "Secret/password leaked into logs",
+        "basicConfig in a module / root logger instead of getLogger(__name__)",
+        "Traceback lost (use logger.exception) and failure swallowed by returning None",
+        "Lazy %-style args instead of f-strings"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd make logs from a multi-threaded ECS job runner useful in CloudWatch.",
+      "answer": "Configure logging once at startup with a single handler on the root logger that writes one JSON object per line to stdout; the awslogs driver ships stdout to CloudWatch, and Logs Insights auto-discovers JSON fields. Every module uses `getLogger(__name__)`. Because many jobs run concurrently in a ThreadPoolExecutor, lines interleave, so each job sets a `contextvars.ContextVar` with its job ID at start and a Filter copies it onto every record — now `filter job_id = '123'` reconstructs one job's story. Log business events at INFO with numeric fields (rows, duration_ms) for metrics and alarms, use `logger.exception` at the job boundary so the traceback lands in one JSON field rather than many lines, quiet noisy libraries like botocore, and never log secrets or tokens.",
+      "rubric": [
+        "Configure once; JSON lines to stdout for CloudWatch",
+        "Correlation/job ID on every line (contextvars + Filter) to separate interleaved threads",
+        "logger.exception with traceback in a single event; numeric fields for metrics",
+        "No secrets/PII in logs"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain the architecture of Python's logging module.",
+      "difficulty": "medium",
+      "answer_md": "- **Loggers** form a dot-separated hierarchy under the root (`app` → `app.upload`). Code calls methods on a logger obtained via `getLogger(__name__)`. A logger's effective level is its own level or the nearest ancestor's.\n- A call creates a **LogRecord** (if the level passes), runs the logger's **filters**, then hands it to each of the logger's **handlers**; then, if `propagate` is true, to the parent's handlers, up to root.\n- **Handlers** decide the destination (stream, file, rotating file, queue, HTTP) and have their own level and filters.\n- **Formatters** turn the record into text/JSON.\n\nThe design separates *what happened* (library code logs) from *where and how it's shown* (application config). That's why libraries only call `getLogger(__name__)` (adding at most a `NullHandler`) and the app configures handlers once."
+    },
+    {
+      "question": "What are structured logs and why use them?",
+      "difficulty": "easy",
+      "answer_md": "Structured logs emit each event as machine-readable key/value data, typically one JSON object per line, instead of free text:\n\n```json\n{\"ts\": \"2024-05-01T10:00:00Z\", \"level\": \"ERROR\", \"logger\": \"app.upload\",\n \"msg\": \"upload failed\", \"upload_id\": \"u-91\", \"marketplace\": \"amazon\", \"rows\": 0}\n```\n\nBenefits: you can filter and aggregate by field (`stats count() by marketplace` in CloudWatch Logs Insights) without fragile regex; metric filters/alarms on numeric fields; tracebacks stay in one event; correlation IDs link all lines of a job or request. In Python, produce them with a custom `Formatter`, `python-json-logger`, or `structlog`, passing fields via `extra=` or context variables."
+    },
+    {
+      "question": "How do you avoid leaking secrets in logs?",
+      "difficulty": "medium",
+      "answer_md": "- **Don't log payloads by default**: log identifiers, counts, durations and status codes, not request bodies, headers, DSNs or secret values.\n- Build connection parameters as separate fields so a DSN string with the password never exists to be logged; log host/user only.\n- Be careful with `repr()` of config/dataclass objects — mark sensitive fields `field(repr=False)` or use a `SecretStr`-style wrapper.\n- Don't log `exc_info` of exceptions whose messages contain credentials without checking (some drivers include the DSN).\n- Add a **redaction Filter** as a safety net that masks keys like `password`, `token`, `authorization`, and test it.\n- Keep third-party DEBUG logs (botocore, urllib3, httpx) off in production — they can dump headers.\n- Restrict access to log groups and set retention; treat logs as sensitive data."
+    }
+  ]
+}

@@ -1,0 +1,189 @@
+{
+  "slug": "py-packaging-publishing",
+  "title": "Packaging and publishing Python projects",
+  "skill": "python-packaging",
+  "extra_skills": [
+    "python"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "pyproject.toml",
+    "wheel",
+    "sdist",
+    "entry points",
+    "semver",
+    "build",
+    "twine",
+    "PEP 440"
+  ],
+  "summary": "Modern Python packaging is driven by pyproject.toml: it names the build backend, project metadata, dependencies and command-line entry points. You build an sdist and a wheel, then publish them to an index. Includes versioning rules (SemVer and PEP 440).",
+  "why_md": "- Turning shared code into an installable package ends copy-pasting utilities between services.\n- `pyproject.toml`, wheels and entry points are the standard that pip, uv, Poetry, Hatch and CI all understand.\n- Versioning and dependency specifiers decide whether upgrades break your consumers; interviews probe this.",
+  "details_md": "### pyproject.toml: one file, three jobs\n```toml\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[project]\nname = \"fs-common\"\nversion = \"1.2.0\"\ndescription = \"Shared helpers\"\nrequires-python = \">=3.10\"\ndependencies = [\"httpx>=0.27,<1\"]\n\n[project.optional-dependencies]\ndev = [\"pytest\"]\n\n[project.scripts]\nfs-report = \"fs_common.cli:main\"\n```\n- **`[build-system]`** (PEP 517/518): which backend builds the project (setuptools, hatchling, flit-core, pdm-backend, maturin...). Frontends such as `pip` or `python -m build` install the backend in an isolated environment and call it.\n- **`[project]`** (PEP 621): standard metadata: name, version (or `dynamic`), `requires-python`, `dependencies`, extras via `optional-dependencies`, classifiers, URLs.\n- **`[tool.*]`**: tool-specific config (ruff, pytest, mypy, backend options).\n\n### Project layout\nThe **src layout** (`src/fs_common/...`) prevents accidentally importing the working copy instead of the installed package during tests. Add `__init__.py` (or rely on namespace packages deliberately). Include `py.typed` for typed libraries.\n\n### Artifacts: sdist and wheel\n`python -m build` produces two files in `dist/`:\n- **sdist** (`.tar.gz`): source distribution; installing it needs a build step.\n- **wheel** (`.whl`): a zip with a fixed layout, no build needed at install time (PEP 427). The filename encodes tags: `name-version-pythontag-abitag-platformtag.whl`, e.g. `fs_common-1.2.0-py3-none-any.whl` is pure Python for any platform, while `cp312-cp312-manylinux_2_28_x86_64` is a compiled build for one interpreter and platform. pip prefers wheels.\n\n### Entry points\n`[project.scripts]` makes the installer create a console command that imports and calls `module:function`. `[project.entry-points.\"group\"]` registers **plugins** discoverable at runtime with `importlib.metadata.entry_points(group=\"...\")`; this is how pytest plugins and many frameworks find extensions.\n\n### Local development\n`pip install -e .` (editable install) links the source tree so edits apply without reinstalling. Dependency *ranges* belong in `pyproject.toml` for libraries; applications pin exact versions in a lock/requirements file (pip-tools, uv, Poetry).\n\n### Versioning\n- **SemVer** `MAJOR.MINOR.PATCH`: MAJOR for breaking changes, MINOR for backward-compatible features, PATCH for fixes.\n- Python's own scheme, **PEP 440**, adds pre/post/dev releases: `1.0.0a1`, `1.0.0rc1`, `1.0.0.post1`, `1.0.0.dev3`. Compare versions with `packaging.version.Version`, never as strings (`\"1.10\" < \"1.9\"` is True lexically).\n- Specifiers: `>=1.2,<2`, compatible release `~=1.4` (means `>=1.4, ==1.*`), exclusion `!=1.5.0`.\n\n### Publishing\nUpload with `twine upload dist/*` (or `uv publish`) to PyPI or a private index (CodeArtifact, Artifactory, a GitHub Packages feed). Prefer **trusted publishing** (OIDC from CI) or scoped API tokens over passwords, test on TestPyPI first, and remember that **a published version is immutable**; fix mistakes by releasing a new version (you can *yank* a release to discourage use).",
+  "code_md": "```toml\n# 1. minimal pyproject.toml with a console script\n[build-system]\nrequires = [\"setuptools>=68\"]\nbuild-backend = \"setuptools.build_meta\"\n\n[project]\nname = \"fs-common\"\nversion = \"0.1.0\"\nrequires-python = \">=3.10\"\ndependencies = [\"httpx>=0.27\"]\n\n[project.scripts]\nfs-report = \"fs_common.cli:main\"\n```\n\n```bash\n# 2. build, inspect and publish\npython -m pip install build twine\npython -m build                      # creates dist/*.tar.gz and dist/*.whl\npython -m twine check dist/*\npython -m twine upload --repository testpypi dist/*\npip install -e \".[dev]\"              # editable install with extras\n```\n\n```python\n# 3. read metadata and entry points at runtime\nfrom importlib.metadata import version, entry_points\nprint(version(\"pip\"))\nfor ep in entry_points(group=\"console_scripts\"):\n    pass                              # ep.name, ep.value\n```\n\n```python\n# 4. compare versions properly\nfrom packaging.version import Version\nprint(Version(\"1.10.0\") > Version(\"1.9.0\"), \"1.10.0\" > \"1.9.0\")\nprint(Version(\"1.0.0rc1\") < Version(\"1.0.0\"))\n```",
+  "use_cases_md": "- Extracting shared code (DB pool helpers, SigV4 signing, logging setup) used by several services into one internal package on a private index.\n- Shipping a CLI (`fs-report`) from a service via `[project.scripts]`.\n- A plugin architecture where processors register through entry points instead of a hand-maintained dict.\n- Publishing an open-source library to PyPI with CI and trusted publishing.\n- Reproducible deployments: build a wheel in CI and install it into a Docker image.",
+  "mistakes_md": "- **Using `setup.py install` / `python setup.py ...`**: deprecated; use `python -m build` and pip.\n- **Flat layout without tests against the installed package**: tests pass locally but the wheel is missing files.\n- **Forgetting package data** (templates, `py.typed`) or including secrets in the sdist.\n- **Version strings compared as text**, or breaking changes in a MINOR release.\n- **Pinning exact dependency versions in a library**, causing resolver conflicts for consumers.\n- **Re-uploading the same version**: PyPI forbids it; bump the version.\n- **Publishing with a long-lived password** instead of a scoped token/trusted publishing.",
+  "best_practices_md": "- Use `pyproject.toml` only; pick one backend (hatchling, setuptools, flit) and keep it simple.\n- Use the `src` layout and build/test the wheel in CI in a clean environment.\n- Libraries: loose ranges (`>=1.2,<2`); applications: locked exact versions.\n- Follow SemVer and keep a changelog; deprecate before removing.\n- Declare `requires-python`, classifiers and `py.typed` for typed code.\n- Publish from CI using trusted publishing; test on TestPyPI first.",
+  "my_context_md": "- Across your services the same helpers recur (pooled DB access in `AmazonVendorBankRecon/db.py`, request signing in `ECSAmazonBankStatementPostgres/AwsSignature.py`). Look for helpers duplicated across services: those are candidates for one versioned internal package.",
+  "revision_notes_md": "- `pyproject.toml`: `[build-system]` (backend), `[project]` (metadata), `[tool.*]`.\n- Build with `python -m build`: sdist (`.tar.gz`) + wheel (`.whl`).\n- Wheel name: `name-version-pythontag-abitag-platformtag`; `py3-none-any` is pure Python.\n- `[project.scripts]` creates CLI commands; entry-point groups give plugins.\n- `pip install -e .` for editable dev installs; use `src` layout.\n- SemVer: MAJOR breaking, MINOR features, PATCH fixes; PEP 440 adds `aN`, `bN`, `rcN`, `.postN`, `.devN`.\n- Compare with `packaging.version.Version`, not strings.\n- `~=1.4` means `>=1.4,==1.*`.\n- Published versions are immutable; publish via twine or trusted publishing.",
+  "exercises_md": "1. Turn a folder with two helper modules into a src-layout package with a `pyproject.toml`; build it and inspect the wheel (`unzip -l` or `zipfile`).\n2. Add a `[project.scripts]` entry, install editable into a fresh venv and run the command.\n3. Define an entry-point group `fs.processors` in one package and load it from another with `importlib.metadata.entry_points`.\n4. Write a script that sorts a list of version strings with `packaging.version.Version` and shows why string sorting fails.",
+  "related": [
+    "py-modules-packages",
+    "python-venv-pip",
+    "github-actions-ci",
+    "docker-essentials",
+    "registry-dispatcher-pattern"
+  ],
+  "flashcards": [
+    {
+      "front": "What are the three main tables in pyproject.toml?",
+      "back": "`[build-system]` (backend), `[project]` (metadata/dependencies), `[tool.*]` (tool config)."
+    },
+    {
+      "front": "sdist vs wheel?",
+      "back": "sdist is source needing a build step; wheel is a prebuilt zip installed without building."
+    },
+    {
+      "front": "What does `py3-none-any` mean in a wheel name?",
+      "back": "Pure Python, no ABI dependence, any platform."
+    },
+    {
+      "front": "What does `[project.scripts]` do?",
+      "back": "Installs a console command mapped to `module:function`."
+    },
+    {
+      "front": "What does `~=1.4` mean?",
+      "back": "Compatible release: `>=1.4, ==1.*`."
+    },
+    {
+      "front": "Can you re-upload the same version to PyPI?",
+      "back": "No. Versions are immutable; publish a new version (or yank the bad one)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which command builds an sdist and a wheel?",
+      "options": [
+        "pip install .",
+        "python -m build",
+        "python setup.py install",
+        "twine build"
+      ],
+      "answer_index": 1,
+      "explanation": "`python -m build` (PEP 517 frontend) creates both artifacts in `dist/`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Under SemVer, a backward-incompatible API change requires bumping which part?",
+      "options": [
+        "PATCH",
+        "MINOR",
+        "MAJOR",
+        "BUILD"
+      ],
+      "answer_index": 2,
+      "explanation": "MAJOR signals breaking changes."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does the wheel tag `py3-none-any` indicate?",
+      "options": [
+        "Only CPython 3.12",
+        "Pure Python usable on any platform",
+        "Compiled for Linux",
+        "Source distribution"
+      ],
+      "answer_index": 1,
+      "explanation": "No ABI or platform restriction means pure Python."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The table in pyproject.toml that declares console commands is `[project.____]`.",
+      "answers": [
+        "scripts"
+      ],
+      "explanation": "`[project.scripts]` creates console scripts."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The standard-library module used to read installed package metadata and entry points is `importlib.____`.",
+      "answers": [
+        "metadata"
+      ],
+      "explanation": "`importlib.metadata.version(...)` and `entry_points(...)`."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import tomllib\ndoc = tomllib.loads('''\n[project]\nname = \"demo\"\nversion = \"1.2.3\"\ndependencies = [\"httpx>=0.27\", \"rich\"]\n\n[project.scripts]\ndemo = \"demo.cli:main\"\n''')\np = doc[\"project\"]\nprint(p[\"name\"], p[\"scripts\"][\"demo\"], len(p[\"dependencies\"]))\nmodule, func = p[\"scripts\"][\"demo\"].split(\":\")\nprint(module, func)\n",
+      "answers": [
+        "demo demo.cli:main 2\ndemo.cli main"
+      ],
+      "explanation": "tomllib parses the TOML text; the entry point string splits into module and function."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def key(v):\n    return tuple(int(x) for x in v.split(\".\"))\n\nversions = [\"1.10.0\", \"1.9.0\", \"1.2.10\", \"1.2.9\"]\nprint(sorted(versions))\nprint(sorted(versions, key=key))\nprint(key(\"1.10.0\") > key(\"1.9.0\"), \"1.10.0\" > \"1.9.0\")\n",
+      "answers": [
+        "['1.10.0', '1.2.10', '1.2.9', '1.9.0']\n['1.2.9', '1.2.10', '1.9.0', '1.10.0']\nTrue False"
+      ],
+      "explanation": "String sorting is lexical and puts 1.10.0 before 1.2.10 and 1.9.0; tuple-of-int keys sort numerically."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "# pyproject.toml\n[project]\nname = \"fs-common\"\nversion = \"1.4\"\ndependencies = [\"requests==2.31.0\", \"httpx==0.27.0\"]\n\n[project.scripts]\nfs-report = \"fs_common/cli.py:main\"\n",
+      "answer": "(1) The entry point must be `module:function` using dotted module path: `fs_common.cli:main`, not a file path. (2) There is no `[build-system]` table, so builders fall back to legacy defaults; declare one (`requires = [\"hatchling\"]`, `build-backend = \"hatchling.build\"`). (3) A library should not pin exact dependency versions (`==`); use ranges like `requests>=2.31,<3` so consumers can resolve conflicts, and pin in the application's lock file. (4) Also add `requires-python`.",
+      "rubric": [
+        "Fixes entry point to dotted module:function",
+        "Adds [build-system] backend",
+        "Uses ranges for library dependencies"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between an sdist and a wheel, and why pip prefers wheels.",
+      "answer": "An sdist is a source archive (`.tar.gz`) with metadata and the build instructions; installing it runs the build backend on the user's machine, which may require compilers for extensions. A wheel is a prebuilt zip with a defined layout that installation simply unpacks into site-packages, so installs are fast, deterministic and need no build tools. The wheel's filename tags say which Python, ABI and platform it supports. pip prefers a compatible wheel and falls back to the sdist if none exists.",
+      "rubric": [
+        "sdist = source requiring build",
+        "wheel = prebuilt, just unpack",
+        "Filename tags describe compatibility",
+        "pip prefers compatible wheels"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How do entry points enable a plugin system?",
+      "answer": "A distribution declares objects under a named group in `[project.entry-points.\"mytool.plugins\"]`, e.g. `csv = \"mypkg_csv:Plugin\"`. At runtime the host calls `importlib.metadata.entry_points(group=\"mytool.plugins\")`, iterates the results and calls `.load()` to import each object. Third parties can add plugins by installing a package, without the host maintaining a registry or being edited.",
+      "rubric": [
+        "Declared in pyproject under a group",
+        "Discovered via importlib.metadata.entry_points",
+        "Loaded lazily with .load()"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the purpose of pyproject.toml and how does it differ from setup.py?",
+      "difficulty": "medium",
+      "answer_md": "`pyproject.toml` is a declarative, standard config file. `[build-system]` tells build frontends which backend to use (PEP 517/518) so builds are reproducible in isolated environments, and `[project]` holds standard metadata (PEP 621). `setup.py` was executable code that ran at install time, hard to analyse and dependent on setuptools being present. Today you can still use setuptools as a backend, but configuration lives in `pyproject.toml` and you build via `python -m build`, not `python setup.py`."
+    },
+    {
+      "question": "Explain SemVer and how it differs from PEP 440.",
+      "difficulty": "easy",
+      "answer_md": "SemVer is a convention: MAJOR.MINOR.PATCH, with MAJOR for breaking changes, MINOR for compatible features, PATCH for fixes, and pre-release tags like `-rc.1`. PEP 440 is Python's formal version scheme and is what pip enforces. It accepts SemVer-like numbers but spells pre-releases `1.0.0rc1`, adds post releases (`1.0.0.post1`) and dev releases (`1.0.0.dev1`), and defines ordering. Compare with `packaging.version.Version`."
+    },
+    {
+      "question": "How should a library and an application differ in dependency specification?",
+      "difficulty": "medium",
+      "answer_md": "A library should declare *compatible ranges* (`httpx>=0.27,<1`) so that applications can combine it with other libraries without resolver conflicts. An application should pin *exact* versions via a lock file (`pip-tools`, `uv.lock`, Poetry lock, hashed requirements) to get reproducible builds. Test the library across the lower and upper bounds in CI (matrix) and add an upper bound only when a known break exists."
+    },
+    {
+      "question": "What happens during `pip install .`?",
+      "difficulty": "hard",
+      "answer_md": "pip reads `pyproject.toml`, creates an isolated build environment, installs the `build-system.requires` packages, calls the backend's PEP 517 hooks (`build_wheel`) to produce a wheel, and then installs that wheel into the target environment by unpacking it into site-packages, writing `.dist-info` metadata and creating console-script launchers from entry points. Dependencies are resolved and installed first. With `-e`, the backend builds an editable wheel (PEP 660) that points to the source tree."
+    }
+  ]
+}

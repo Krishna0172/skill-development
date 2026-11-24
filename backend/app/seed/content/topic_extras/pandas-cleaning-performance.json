@@ -1,0 +1,70 @@
+{
+  "slug": "pandas-cleaning-performance",
+  "why_md": "Real marketplace reports arrive dirty - currency strings, mixed date formats, inconsistent headers - and large. Cleaning correctly and staying within the memory of a Lambda or ECS task is what separates a robust ingestion job from one that OOMs or silently writes NaN. The same skills are the 'data preprocessing' stage of every ML pipeline.",
+  "revision_notes_md": "- Normalise headers first: `df.columns.str.strip().str.lower().str.replace(r\"\\W+\", \"_\", regex=True)`.\n- `pd.to_numeric(s.str.replace(\",\", \"\"), errors=\"coerce\")`; `to_datetime(..., format=..., errors=\"coerce\")`.\n- Count what got coerced to NaN and log/report it - don't drop silently.\n- `usecols=` and `dtype=` at read time cut memory most.\n- `category` dtype helps low-cardinality strings, not unique IDs.\n- Build a list of frames and `pd.concat` once - never concat in a loop.\n- `chunksize=` to stream big CSVs; `dtype_backend=\"pyarrow\"` for Arrow-backed dtypes.\n- Vectorise: `np.where`, `.str`, `.dt`, `.map` instead of `apply(axis=1)`.",
+  "exercises_md": "1. Write a `clean_amount(series)` that handles '1,200.50', '$15', ' ', 'abc' and returns floats plus a count of unparseable values; test it on a small Series.\n2. Read a large CSV with `chunksize=100_000`, `usecols` and `dtype`, aggregate per chunk, combine the partial results, and compare peak memory with a full read (`df.memory_usage(deep=True)`).",
+  "my_context_md": "ECSMarketplaceDataUpload parses 150+ marketplace report formats with `read_csv`/`read_excel` and then `rename`/`merge`/`groupby`/`apply` - header normalisation, coercion with NaN reporting, and replacing row-wise `apply` with vectorised operations apply directly to those processors.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To convert '1,200.50' and 'abc' to 1200.5 and NaN, call pd.to_numeric(s.str.replace(',', ''), errors='____').",
+      "answers": [
+        "coerce"
+      ],
+      "explanation": "Unparseable values become NaN."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To read a huge CSV in pieces of 100k rows, pass ____=100_000 to read_csv.",
+      "answers": [
+        "chunksize"
+      ],
+      "explanation": "read_csv then returns an iterator of DataFrames."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Building a DataFrame with `df = pd.concat([df, small])` inside a loop of 5,000 iterations is slow because:",
+      "options": [
+        "concat is not vectorised",
+        "each concat copies all accumulated rows -> quadratic time",
+        "pandas locks the GIL",
+        "it uses the python engine"
+      ],
+      "answer_index": 1,
+      "explanation": "Append frames to a list and call pd.concat once."
+    },
+    {
+      "type": "debug",
+      "prompt": "The cleaned totals are lower than expected, with no error raised. What's wrong?",
+      "code": "df[\"amount\"] = pd.to_numeric(df[\"amount\"], errors=\"coerce\")\ndf = df.dropna(subset=[\"amount\"])\ntotal = df[\"amount\"].sum()",
+      "answer": "Values like `'1,200.50'` or `'$15'` fail to parse and become NaN, then `dropna` silently removes them - data loss with no signal. Clean the strings first and report what still fails:\n\n```python\nraw = df[\"amount\"]\ncleaned = raw.astype(\"string\").str.replace(r\"[,$\\s]\", \"\", regex=True)\ndf[\"amount\"] = pd.to_numeric(cleaned, errors=\"coerce\")\nbad = df[\"amount\"].isna() & raw.notna()\nif bad.any():\n    logger.warning(\"%d unparseable amounts, e.g. %s\", bad.sum(), raw[bad].head(3).tolist())\n```",
+      "rubric": [
+        "errors='coerce' turns formatted numbers into NaN",
+        "Normalise strings before conversion",
+        "Count/log coerced values instead of dropping silently"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would reduce the memory footprint of processing a 3 GB CSV in a 2 GB container.",
+      "answer": "Read only needed columns (`usecols`), set compact dtypes up front (`int32`, `float32`, `category` for low-cardinality strings, `string[pyarrow]`), and stream with `chunksize`, aggregating or writing each chunk to the database before reading the next. Avoid intermediate copies (chained operations creating full temporaries, `apply` building Python objects). Measure with `memory_usage(deep=True)`. If it's still too big, push the work into PostgreSQL (COPY then SQL) or use Arrow/Polars/DuckDB.",
+      "rubric": [
+        "usecols + explicit compact dtypes",
+        "chunksize streaming with per-chunk aggregation/writes",
+        "Measure memory; offload to DB or columnar tools if needed"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Converting a column with 2 million unique order IDs to `category` will:",
+      "options": [
+        "Shrink it dramatically",
+        "Likely increase memory, since every value is its own category",
+        "Make it sortable",
+        "Remove duplicates"
+      ],
+      "answer_index": 1,
+      "explanation": "category helps only for low cardinality."
+    }
+  ]
+}

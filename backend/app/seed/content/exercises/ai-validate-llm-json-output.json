@@ -1,0 +1,136 @@
+{
+  "slug": "ai-validate-llm-json-output",
+  "title": "Validate an LLM's JSON output against a mini schema",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "llm-applications",
+  "concepts": [
+    "structured outputs",
+    "json parsing",
+    "schema validation",
+    "guardrails",
+    "error reporting"
+  ],
+  "related_topics": [
+    "ai-structured-outputs",
+    "ai-guardrails",
+    "be-pydantic-validation"
+  ],
+  "problem_md": "You ask the model to classify a review and return JSON. Before trusting it (or retrying with the errors fed back), validate it:\n\n```python\ndef validate_output(raw: str, schema: dict) -> list[str]\n```\n\n`schema` maps field -> `{\"type\": \"string\"|\"integer\"|\"number\"|\"boolean\"|\"array\", \"required\": bool (default true), \"enum\": [...] (optional)}`. Return a list of errors (empty = valid):\n1. Strip whitespace; if the text is wrapped in a Markdown fence (```` ```json ```` or ```` ``` ```` ... ```` ``` ````) remove it.\n2. Not parseable -> `[\"invalid JSON\"]`. Parsed but not an object -> `[\"root: expected object\"]`.\n3. For each schema field **in schema order**: missing & required -> `\"<f>: missing\"`; wrong type -> `\"<f>: expected <type>\"` (booleans are **not** integers/numbers; integers are numbers); value not in `enum` -> `\"<f>: not one of <enum list repr>\"` e.g. `sentiment: not one of ['neg', 'pos']`.\n4. Then, for keys not in the schema (sorted): `\"<key>: unexpected field\"`.",
+  "examples": [
+    {
+      "input": "validate_output('```json\\n{\"sentiment\": \"great\", \"score\": true}\\n```', schema)",
+      "output": "[\"sentiment: not one of ['neg', 'pos']\", 'score: expected number']"
+    }
+  ],
+  "hints": [
+    "For fences: if `text.startswith('```')`, drop the first line and a trailing `` ``` ``. Then `try: json.loads(text) except json.JSONDecodeError`.",
+    "Map types to checks: `integer` -> `isinstance(v, int) and not isinstance(v, bool)`; `number` -> int/float, not bool; `string` -> str; `boolean` -> bool; `array` -> list."
+  ],
+  "starter_code": "import json\n\n\ndef validate_output(raw, schema):\n    try:\n        data = json.loads(raw)\n    except Exception:\n        return ['invalid JSON']\n    errors = []\n    for field in schema:\n        if field not in data:\n            errors.append(f'{field}: missing')\n    return errors\n",
+  "solution_code": "import json\n\n_CHECKS = {\n    'string': lambda v: isinstance(v, str),\n    'integer': lambda v: isinstance(v, int) and not isinstance(v, bool),\n    'number': lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),\n    'boolean': lambda v: isinstance(v, bool),\n    'array': lambda v: isinstance(v, list),\n}\n\n\ndef _strip_fence(text):\n    text = text.strip()\n    if text.startswith('```'):\n        first_nl = text.find('\\n')\n        text = text[first_nl + 1:] if first_nl != -1 else ''\n        if text.rstrip().endswith('```'):\n            text = text.rstrip()[:-3]\n    return text.strip()\n\n\ndef validate_output(raw, schema):\n    try:\n        data = json.loads(_strip_fence(raw))\n    except json.JSONDecodeError:\n        return ['invalid JSON']\n    if not isinstance(data, dict):\n        return ['root: expected object']\n    errors = []\n    for field, rule in schema.items():\n        if field not in data:\n            if rule.get('required', True):\n                errors.append(f'{field}: missing')\n            continue\n        value = data[field]\n        if not _CHECKS[rule['type']](value):\n            errors.append(f\"{field}: expected {rule['type']}\")\n        elif 'enum' in rule and value not in rule['enum']:\n            errors.append(f\"{field}: not one of {rule['enum']!r}\")\n    for key in sorted(set(data) - set(schema)):\n        errors.append(f'{key}: unexpected field')\n    return errors\n",
+  "solution_md": "Models regularly wrap JSON in Markdown fences, invent fields, return `\"5\"` instead of `5`, or produce values outside the allowed labels. Returning *all* errors as a list (rather than raising on the first) lets you feed them back in a repair prompt (\"Your output had these problems: ...\") for one retry. Catch `json.JSONDecodeError` specifically - the starter's broad `except` would also hide bugs. Remember `bool` is a subclass of `int`. O(fields).\n\nIn production prefer provider-side structured outputs / tool schemas (constrained decoding) plus a Pydantic v2 model (`Model.model_validate_json(raw)`) whose `ValidationError.errors()` gives the same list - but still validate: business rules (enums, ranges) are yours to enforce.",
+  "tests": {
+    "function": "validate_output",
+    "cases": [
+      {
+        "args": [
+          "```json\n{\"sentiment\": \"great\", \"score\": true}\n```",
+          {
+            "sentiment": {
+              "type": "string",
+              "enum": [
+                "neg",
+                "pos"
+              ]
+            },
+            "score": {
+              "type": "number"
+            }
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "sentiment: not one of ['neg', 'pos']",
+          "score: expected number"
+        ]
+      },
+      {
+        "args": [
+          "{\"sentiment\": \"pos\", \"score\": 4, \"tags\": [\"fit\"]}",
+          {
+            "sentiment": {
+              "type": "string",
+              "enum": [
+                "neg",
+                "pos"
+              ]
+            },
+            "score": {
+              "type": "integer"
+            },
+            "tags": {
+              "type": "array",
+              "required": false
+            }
+          }
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          "{\"score\": \"5\", \"reason\": \"x\", \"confidence\": 0.9}",
+          {
+            "sentiment": {
+              "type": "string"
+            },
+            "score": {
+              "type": "integer"
+            },
+            "flagged": {
+              "type": "boolean",
+              "required": false
+            }
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "sentiment: missing",
+          "score: expected integer",
+          "confidence: unexpected field",
+          "reason: unexpected field"
+        ]
+      },
+      {
+        "args": [
+          "Sure! Here is the JSON: {\"a\": 1}",
+          {
+            "a": {
+              "type": "integer"
+            }
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "invalid JSON"
+        ]
+      },
+      {
+        "args": [
+          "  [1, 2]  ",
+          {
+            "a": {
+              "type": "integer"
+            }
+          }
+        ],
+        "kwargs": {},
+        "expected": [
+          "root: expected object"
+        ]
+      }
+    ]
+  }
+}

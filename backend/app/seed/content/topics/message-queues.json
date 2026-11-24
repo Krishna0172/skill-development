@@ -1,0 +1,125 @@
+{
+  "slug": "message-queues",
+  "title": "Message Queues and Async Processing: SQS, SNS, DLQs and Idempotent Consumers",
+  "skill": "message-queues",
+  "extra_skills": [
+    "system-design",
+    "aws-lambda",
+    "backend-architecture"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "message-queues",
+    "sqs",
+    "sns",
+    "dlq",
+    "at-least-once",
+    "idempotency",
+    "outbox"
+  ],
+  "summary": "A message queue lets one component hand work to another without waiting for it: producers send messages, consumers process them at their own pace. This decouples services, absorbs traffic spikes and enables retries. Most queues (like Amazon SQS standard) deliver at-least-once, so consumers must be idempotent, and messages that keep failing should be moved to a dead-letter queue instead of retrying forever.",
+  "details_md": "### Why queues\n- **Decoupling**: the producer doesn't need the consumer to be up, fast, or even known.\n- **Load levelling**: a burst of 10,000 uploads becomes a backlog drained at a safe rate (protecting the database).\n- **Retries and failure isolation**: failed messages are retried, and poison messages are isolated in a DLQ.\n- **Scaling**: add consumers to drain faster.\n\n### Queue vs pub/sub vs stream\n- **Queue (point-to-point)**: each message is processed by one consumer. Examples: SQS, RabbitMQ queues, Celery tasks.\n- **Pub/sub (fan-out)**: one message is delivered to many subscribers. Examples: SNS, EventBridge, RabbitMQ exchanges. A common pattern is SNS to several SQS queues.\n- **Log/stream**: an ordered, retained log with offsets per consumer group; consumers can **replay**. Examples: Kafka, Kinesis. Ordering is per partition/shard key.\n\n### Amazon SQS mechanics\n- A consumer **receives** a message, which then becomes invisible for the **visibility timeout** (30 s by default, up to 12 h). If it isn't **deleted** before the timeout, it reappears and is redelivered.\n- **Long polling** (`WaitTimeSeconds` up to 20) reduces empty receives and cost.\n- Retention: 4 days by default, up to 14 days. Message size is limited to a few hundred KB, so put big payloads in S3 and send a pointer.\n- **Standard queues**: nearly unlimited throughput, **at-least-once** delivery, best-effort ordering.\n- **FIFO queues**: strict ordering **per message group ID**, deduplication within a 5-minute window (`MessageDeduplicationId` or content-based), lower (but high-throughput-mode capable) throughput.\n- **DLQ** via a redrive policy: after `maxReceiveCount` failed receives, the message moves to the DLQ for inspection and later redrive.\n- **Lambda trigger** (event source mapping): Lambda polls, invokes with batches, and deletes on success. Set the queue's visibility timeout to at least **6x the function timeout**, enable `ReportBatchItemFailures`, and use **maximum concurrency** to protect downstream systems.\n\n### Delivery semantics\n- *At-most-once*: may lose messages. *At-least-once*: may duplicate (the usual case). *Exactly-once*: in practice achieved as **at-least-once + idempotent processing**.\n- Idempotency techniques: natural upserts (`ON CONFLICT`), a processed-message table keyed by message ID or business key (insert with a unique constraint in the same transaction as the work), conditional writes, and status checks (`WHERE status = 'PENDING'`).\n\n### The dual-write problem and the outbox pattern\n\"Write to DB, then send message\" can fail between the two steps (lost message), and \"send, then write\" can send a message for data that was rolled back. The **transactional outbox**: write the business row **and** an `outbox` row in one DB transaction; a relay process publishes outbox rows to the queue and marks them sent. Delivery is at-least-once, so consumers remain idempotent.\n\n### Operational concerns\n- Monitor **queue depth** (`ApproximateNumberOfMessagesVisible`), **age of oldest message**, and DLQ size; alarm on DLQ > 0.\n- Poison messages: validate early, log the payload ID, and send to the DLQ rather than looping.\n- Backpressure: limit consumer concurrency to what downstream systems can handle.\n- Ordering: design so ordering doesn't matter (use timestamps/versions in upserts), or use FIFO with message groups (e.g. per org).",
+  "code_md": "```python\n# 1) Producer: send a small message pointing to data in S3\nimport json, uuid, boto3\n\nsqs = boto3.client(\"sqs\", region_name=\"ap-south-1\")\nQUEUE_URL = \"https://sqs.ap-south-1.amazonaws.com/123456789012/upload-jobs\"\n\nsqs.send_message(\n    QueueUrl=QUEUE_URL,\n    MessageBody=json.dumps({\n        \"upload_id\": \"u-123\",                 # business key for idempotency\n        \"orgid\": 7,\n        \"s3_key\": \"uploads/7/u-123.xlsx\",     # pointer, not the file itself\n    }),\n    MessageAttributes={\"type\": {\"DataType\": \"String\", \"StringValue\": \"orders_report\"}},\n)\n\n# FIFO variant: ordered per org, deduplicated for 5 minutes\n# sqs.send_message(QueueUrl=FIFO_URL, MessageBody=body,\n#                  MessageGroupId=\"org-7\", MessageDeduplicationId=\"u-123\")\n```\n\n```python\n# 2) Long-polling worker (e.g. in an ECS service)\nwhile True:\n    resp = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=10,\n                               WaitTimeSeconds=20,          # long polling\n                               VisibilityTimeout=300)       # time allowed to process\n    for msg in resp.get(\"Messages\", []):\n        try:\n            handle(json.loads(msg[\"Body\"]))                 # must be idempotent\n            sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=msg[\"ReceiptHandle\"])\n        except Exception:\n            # don't delete: it reappears after the visibility timeout;\n            # after maxReceiveCount attempts SQS moves it to the DLQ\n            log.exception(\"failed %s\", msg[\"MessageId\"])\n```\n\n```sql\n-- 3) Idempotent consumer: record processed message keys in the same transaction\nCREATE TABLE processed_messages (\n    message_key text PRIMARY KEY,\n    processed_at timestamptz NOT NULL DEFAULT now()\n);\n\nBEGIN;\nINSERT INTO processed_messages (message_key) VALUES ('upload:u-123')\nON CONFLICT DO NOTHING\nRETURNING message_key;          -- no row returned => already processed: skip the work and COMMIT\n-- ...do the actual writes here (same transaction)...\nCOMMIT;\n```\n\n```python\n# 4) Transactional outbox: business write + event in ONE transaction\nwith conn, conn.cursor() as cur:\n    cur.execute(\"UPDATE uploads SET status = 'Completed' WHERE id = %s\", (upload_id,))\n    cur.execute(\n        \"INSERT INTO outbox (event_type, payload) VALUES (%s, %s)\",\n        (\"upload.completed\", json.dumps({\"upload_id\": upload_id, \"orgid\": orgid})),\n    )\n# A separate relay polls outbox (FOR UPDATE SKIP LOCKED), publishes to SQS/SNS,\n# then marks rows as sent. Consumers stay idempotent because the relay may resend.\n```",
+  "use_cases_md": "- Buffering file-processing jobs so bursts of uploads don't overload the database.\n- Fan-out of events (order completed leads to profitability calc, notifications, analytics) via SNS to SQS.\n- Retrying calls to flaky third-party APIs with backoff and DLQs.\n- Ordering-sensitive per-entity processing with FIFO message groups (per org or per order).\n- Decoupling a fast API response from slow background work.",
+  "mistakes_md": "- **Non-idempotent consumers**: duplicates create double charges or double rows. Use upserts, unique keys, or a processed-messages table.\n- **Visibility timeout shorter than processing time**: messages are redelivered while still being processed, so they're handled twice. Set it above the worst-case processing time (6x the Lambda timeout for triggers).\n- **No DLQ**: poison messages retry until retention expires and hide real failures. Configure a redrive policy and alarm on the DLQ.\n- **Deleting before processing**: a crash loses the message. Delete only after successful processing.\n- **Huge payloads in messages**: size limits and cost. Store in S3, send the key.\n- **Assuming ordering in standard queues**: out-of-order updates overwrite newer data. Use FIFO groups or version/timestamp checks.\n- **Dual writes without an outbox**: lost or phantom events. Use the outbox pattern or make the consumer reconcile.\n- **Unbounded consumer concurrency**: drains the queue into a database meltdown. Cap concurrency.",
+  "best_practices_md": "- Design every consumer to be idempotent from day one.\n- Keep messages small and versioned (`{\"v\": 1, ...}`); include a business key and correlation ID.\n- Configure DLQs, alarms on DLQ depth and oldest message age, and a documented redrive process.\n- Use long polling and batch operations (`send_message_batch`, `delete_message_batch`).\n- Use partial batch responses with Lambda SQS triggers.\n- Apply backpressure: limit concurrency to what downstream systems can sustain.\n- Prefer the outbox pattern when an event must reflect a committed DB change.",
+  "my_context_md": "You haven't used a dedicated message queue yet; it's a listed gap. Some of your existing work already behaves like queue-based processing, which gives you a way to talk about it. The asynchronous `invoke()` of the profitability Lambda puts the event on Lambda's internal queue with automatic retries. The DynamoDB `fs-sync-requests-db` table holds sync jobs for workers to pick up, and the `fs_upload` table tracks each job's status (Processing/Completed/Error). The concepts here are what you'd add when moving to SQS: an explicit queue with a DLQ, visibility timeouts sized to processing time, and idempotent consumers. Your `ON CONFLICT` upserts already give you idempotent writes, so redelivered messages wouldn't create duplicate rows.",
+  "related": [
+    "aws-lambda-essentials",
+    "dynamodb-essentials",
+    "transactions-isolation",
+    "retries-backoff-idempotency",
+    "caching-strategies",
+    "ecs-fargate"
+  ],
+  "flashcards": [
+    {
+      "front": "What is the SQS visibility timeout?",
+      "back": "How long a received message stays hidden from other consumers; if not deleted in time, it's redelivered. Default 30 s, max 12 h."
+    },
+    {
+      "front": "SQS standard vs FIFO?",
+      "back": "Standard: at-least-once, best-effort order, very high throughput. FIFO: ordered per MessageGroupId, 5-minute deduplication, lower throughput."
+    },
+    {
+      "front": "How is 'exactly-once' achieved in practice?",
+      "back": "At-least-once delivery + idempotent processing (unique keys, upserts, processed-message table)."
+    },
+    {
+      "front": "What is a DLQ?",
+      "back": "A dead-letter queue receiving messages that failed maxReceiveCount times, for inspection and later redrive."
+    },
+    {
+      "front": "What problem does the transactional outbox pattern solve?",
+      "back": "The dual write: updating the DB and publishing an event atomically, by writing the event to an outbox table in the same transaction."
+    },
+    {
+      "front": "Recommended SQS visibility timeout for a Lambda trigger?",
+      "back": "At least 6x the function timeout."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "A consumer takes 2 minutes per message, but the visibility timeout is 30 s. What happens?",
+      "options": [
+        "Messages are lost",
+        "The queue blocks",
+        "SQS extends it automatically",
+        "Messages become visible again and are processed concurrently by other consumers"
+      ],
+      "answer_index": 3,
+      "explanation": "Undeleted messages reappear after the timeout, causing duplicate processing."
+    },
+    {
+      "question": "You need per-org ordering with deduplication on SQS. Which configuration?",
+      "options": [
+        "FIFO queue with MessageGroupId = org id",
+        "Standard queue with long polling",
+        "Standard queue with a DLQ",
+        "SNS topic only"
+      ],
+      "answer_index": 0,
+      "explanation": "FIFO guarantees order within a message group and deduplicates within 5 minutes."
+    },
+    {
+      "question": "Which pattern delivers one event to several independent consumers on AWS?",
+      "options": [
+        "One SQS queue with many consumers",
+        "SNS topic fanning out to multiple SQS queues",
+        "A FIFO queue",
+        "Visibility timeout tuning"
+      ],
+      "answer_index": 1,
+      "explanation": "Consumers of a single queue compete; SNS-to-SQS fan-out gives each subscriber its own copy."
+    },
+    {
+      "question": "When should a worker delete an SQS message?",
+      "options": [
+        "Immediately after receiving",
+        "Never; SQS deletes it",
+        "After processing succeeds",
+        "Before the next receive call"
+      ],
+      "answer_index": 2,
+      "explanation": "Deleting first risks losing work if processing crashes."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you make a message consumer idempotent?",
+      "difficulty": "medium",
+      "answer_md": "Assume every message can arrive **more than once** (redelivery after a timeout, producer retries, at-least-once queues). Idempotent means processing it twice has the same effect as once.\n\nTechniques:\n1. **Natural idempotency**: make the write an upsert keyed on a business key.\n```sql\nINSERT INTO orders (id, orgid, status) VALUES (...)\nON CONFLICT (id, orgid) DO UPDATE SET status = EXCLUDED.status;\n```\n2. **Deduplication table** in the same transaction as the work:\n```sql\nINSERT INTO processed_messages (key) VALUES ('upload:u-123') ON CONFLICT DO NOTHING RETURNING key;\n-- no row returned -> already done -> skip\n```\nBecause it shares the transaction, a crash rolls back both.\n3. **Conditional state transitions**: `UPDATE jobs SET status='DONE' WHERE id=$1 AND status='RUNNING'` (DynamoDB: a ConditionExpression).\n4. **Idempotency keys for side effects** like payments or emails: pass a key to the external API, or record \"sent\" before or atomically with sending.\n\nAlso make sure messages carry a stable business key (not just the queue's message ID, which changes if the producer resends), and that the order of events doesn't break correctness (use versions or timestamps in `WHERE` clauses)."
+    },
+    {
+      "question": "Design an asynchronous file-processing pipeline using queues.",
+      "difficulty": "hard",
+      "answer_md": "1. **Upload**: the client gets a presigned URL; the file lands in S3 at `uploads/{org}/{upload_id}`. An upload row is created with status `PENDING`.\n2. **Enqueue**: an S3 event notification (or the API, via an outbox) sends `{upload_id, orgid, s3_key, report_type}` to an **SQS queue**. The message is small; the data stays in S3.\n3. **Workers**: a Lambda trigger for small files or an ECS service polling with long polling for big ones. Visibility timeout above the worst-case processing time; concurrency capped to protect PostgreSQL.\n4. **Processing**: mark the upload `Processing` (conditional on `PENDING`), download, validate, dispatch to the right processor, upsert in batches with `ON CONFLICT` (idempotent), and mark it `Completed`.\n5. **Failures**: transient errors (deadlock, throttling) are retried in-process with backoff, then left undeleted for SQS to redeliver. Permanent errors (bad file format) mark `Error` with a reason and delete the message (no point retrying). After `maxReceiveCount`, messages go to a **DLQ** with an alarm.\n6. **Downstream**: on completion, publish `upload.completed` to SNS (or EventBridge), which fans out to profitability calculation, notifications and so on, each with its own queue.\n7. **Observability**: correlation ID (`upload_id`) in all logs; dashboards for queue depth, oldest message age, DLQ count and processing duration."
+    },
+    {
+      "question": "Compare SQS, SNS, EventBridge and Kafka/Kinesis.",
+      "difficulty": "medium",
+      "answer_md": "- **SQS**: a durable **queue**. Each message goes to one consumer; pull-based; retries via visibility timeout; DLQs. Best for work distribution and load levelling. Standard = at-least-once, unordered; FIFO = ordered per group with dedup.\n- **SNS**: **pub/sub push**. One message goes to many subscribers (SQS, Lambda, HTTP, email). No storage or replay of its own; pair it with SQS per subscriber for durability (\"fan-out\").\n- **EventBridge**: an **event bus with content-based routing rules** (match on fields in the event JSON), schema registry, scheduling, SaaS and AWS service events (e.g. ECS task state changes). Great for decoupled event-driven architectures across many services, at lower throughput than SNS/Kinesis.\n- **Kafka / Kinesis**: **partitioned, retained logs**. Consumers track offsets and can **replay** history; ordering per partition key; very high throughput; multiple consumer groups read independently. Best for event streaming, analytics pipelines, and event sourcing. More operational complexity (especially self-managed Kafka).\n\nRule of thumb: tasks to process, use SQS. Notify many systems, use SNS (+SQS) or EventBridge (with rules). Ordered, replayable, high-volume streams, use Kinesis/Kafka."
+    }
+  ]
+}

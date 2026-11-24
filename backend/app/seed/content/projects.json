@@ -1,0 +1,260 @@
+[
+  {
+    "slug": "insta-post-downloader",
+    "name": "Insta Post Downloader",
+    "kind": "personal",
+    "status": "unknown",
+    "summary": "Local FastAPI web app that downloads Instagram posts or whole profiles with live progress.",
+    "tech": [
+      "Python",
+      "FastAPI",
+      "Pydantic",
+      "instaloader",
+      "uvicorn",
+      "Server-Sent Events",
+      "threading",
+      "HTML/JS"
+    ],
+    "skills": [
+      "api-design",
+      "error-handling",
+      "fastapi",
+      "pydantic",
+      "python",
+      "python-asyncio"
+    ],
+    "topics": [
+      "fastapi-essentials",
+      "server-sent-events",
+      "python-asyncio",
+      "python-threading-gil",
+      "python-exceptions",
+      "python-oop-dataclasses"
+    ],
+    "source_path": "F:\\Personal Projects\\InstaPostDownloader",
+    "evidence_note": "Source code read: app.py (134 lines), downloader.py (463 lines), static/index.html (358 lines).",
+    "purpose_md": "Download an Instagram profile's posts (or a single post by URL) to a local folder, optionally logged in, with progress shown in the browser.",
+    "architecture_md": "- `app.py` — FastAPI routes; jobs kept in an in-memory `dict[str, JobState]`.\n- `POST /api/download` creates a job id and starts `run_download` in a thread via `loop.run_in_executor`.\n- `GET /api/jobs/{id}/events` streams job snapshots as **Server-Sent Events** (`StreamingResponse`, `text/event-stream`), polling every 0.4s and sending only changes.\n- `POST /api/jobs/{id}/cancel` sets a `threading.Event` the worker checks.\n- `downloader.py` wraps instaloader: session reuse, login with 2FA/bad-credential handling, a fail-fast `RateController`, and a path-traversal guard (`_safe_under`).",
+    "folder_structure_md": "```\nInstaPostDownloader/\n├── app.py            # FastAPI routes + job registry\n├── downloader.py     # instaloader wrapper, JobState dataclass\n├── static/index.html # UI\n├── downloads/        # output (served at /media)\n├── sessions/         # saved login sessions\n├── requirements.txt\n└── run.bat\n```",
+    "modules_md": "- `parse_target` / `normalize_username` — accept username or post URL\n- `JobState` dataclass with `cancel: threading.Event`\n- `FailFastRateController` — stop instead of sleeping on 429\n- `fetch_profile`, `fetch_post`, `run_download`, `list_downloaded_accounts`",
+    "database_md": "None — in-memory job dict; files on disk.",
+    "apis_md": "`GET /` · `POST /api/profile` · `POST /api/download` · `GET /api/jobs/{id}` · `GET /api/jobs/{id}/events` (SSE) · `POST /api/jobs/{id}/cancel` · `GET /api/downloads` · `GET /health`",
+    "business_logic_md": "Maps instaloader exceptions (ProfileNotExists, LoginRequired, TooManyRequests, TwoFactorAuthRequired, BadCredentials, Connection) to friendly `DownloadError` messages returned as HTTP 400.",
+    "challenges_md": "Instagram rate-limits and login requirements; long-running downloads that must not block the event loop; cancellation mid-download.",
+    "solutions_md": "Blocking work in executor threads; `asyncio.to_thread` for profile lookups; SSE for progress; `threading.Event` for cooperative cancellation; fail-fast rate controller.",
+    "contributions_md": "Personal project. _Note how much was written by hand vs. with AI help._",
+    "learnings_md": "_Write this in your own words._ Prompts: Why SSE instead of WebSockets? What happens to jobs if the server restarts? Why must blocking calls leave the event loop?",
+    "pending_improvements_md": "_Ideas:_ persist jobs; tests for `parse_target`; limit concurrent jobs.",
+    "items": [],
+    "interview": [
+      {
+        "q": "In your downloader apps, why did you run downloads with run_in_executor instead of directly inside the async route?",
+        "d": "medium"
+      },
+      {
+        "q": "Explain how your Server-Sent Events progress stream works and its limitations.",
+        "d": "medium"
+      }
+    ]
+  },
+  {
+    "slug": "youtube-playlist-downloader-web",
+    "name": "YouTube Playlist Downloader (Web)",
+    "kind": "personal",
+    "status": "unknown",
+    "summary": "Local FastAPI web app around yt-dlp for downloading playlists or single songs as audio/video with live progress.",
+    "tech": [
+      "Python",
+      "FastAPI",
+      "Pydantic",
+      "yt-dlp",
+      "imageio-ffmpeg",
+      "uvicorn",
+      "Server-Sent Events",
+      "threading",
+      "HTML/JS"
+    ],
+    "skills": [
+      "api-design",
+      "error-handling",
+      "fastapi",
+      "pydantic",
+      "python",
+      "python-asyncio"
+    ],
+    "topics": [
+      "fastapi-essentials",
+      "server-sent-events",
+      "python-threading-gil",
+      "python-exceptions"
+    ],
+    "source_path": "F:\\Personal Projects\\YoutubePlaylistDownloader",
+    "evidence_note": "Source code read: app.py (139 lines), downloader.py (569 lines), static/index.html (429 lines). Same job/SSE architecture as Insta Post Downloader.",
+    "purpose_md": "Look up a YouTube playlist/video URL, then download audio or video at a chosen quality into organised folders.",
+    "architecture_md": "Same pattern as Insta Post Downloader: in-memory jobs, executor thread workers, SSE progress, `threading.Event` cancel. `downloader.py` parses URLs (`urlparse`/`parse_qs`, regex-validated IDs), builds yt-dlp options per media/quality, locates ffmpeg, and maps yt-dlp errors to friendly messages.",
+    "folder_structure_md": "```\nYoutubePlaylistDownloader/\n├── app.py\n├── downloader.py\n├── static/index.html\n├── downloads/\n├── requirements.txt\n└── run.bat\n```",
+    "modules_md": "- `parse_url` — validates hosts and IDs (VIDEO_ID_RE, PLAYLIST_ID_RE)\n- `fetch_target` — metadata lookup\n- `_download_format_opts`, `_output_template` — yt-dlp configuration\n- `run_download` — progress hooks feeding `JobState`\n- `_friendly_ytdlp_error`, `_safe_under`",
+    "database_md": "None.",
+    "apis_md": "`GET /api/status` · `POST /api/lookup` · `POST /api/download` · `GET /api/jobs/{id}` · `GET /api/jobs/{id}/events` · `POST /api/jobs/{id}/cancel` · `GET /api/downloads` · `GET /health`",
+    "business_logic_md": "",
+    "challenges_md": "yt-dlp needs ffmpeg and a JS runtime; progress reporting from a library callback in another thread.",
+    "solutions_md": "ffmpeg location via imageio-ffmpeg fallback; progress hooks update a shared JobState snapshot read by the SSE stream.",
+    "contributions_md": "Personal project.",
+    "learnings_md": "_Write this in your own words._",
+    "pending_improvements_md": "",
+    "items": [],
+    "interview": []
+  },
+  {
+    "slug": "youtube-playlist-downloader-cli",
+    "name": "YouTube Playlist → MP3 (CLI)",
+    "kind": "personal",
+    "status": "unknown",
+    "summary": "Command-line script that downloads every video in a playlist as MP3 via yt-dlp.",
+    "tech": [
+      "Python",
+      "yt-dlp",
+      "argparse",
+      "ffmpeg"
+    ],
+    "skills": [
+      "python"
+    ],
+    "topics": [],
+    "source_path": "F:\\Personal Projects\\Youtube Playlist downloader",
+    "evidence_note": "Source code read: download_playlist.py. Earlier CLI version of the web app.",
+    "purpose_md": "Batch-download a playlist as MP3 with a download archive to skip already-downloaded items.",
+    "architecture_md": "Single script: checks ffmpeg and a JS runtime (Deno/Node) on PATH and common Windows install folders, validates the URL, builds yt-dlp options, prints progress.",
+    "folder_structure_md": "",
+    "modules_md": "`check_ffmpeg`, `find_js_runtimes`, `is_youtube_url`, `is_playlist_url`, `build_options`, `download_playlist`, `parse_args`",
+    "database_md": "",
+    "apis_md": "",
+    "business_logic_md": "",
+    "challenges_md": "",
+    "solutions_md": "",
+    "contributions_md": "Personal project.",
+    "learnings_md": "",
+    "pending_improvements_md": "",
+    "items": [],
+    "interview": []
+  },
+  {
+    "slug": "iphone-android-media-converter",
+    "name": "iPhone → Android Media Converter",
+    "kind": "personal",
+    "status": "unknown",
+    "summary": "CLI that converts HEIC photos to JPEG and MOV/HEVC videos to H.264 MP4 for Android.",
+    "tech": [
+      "Python",
+      "Pillow",
+      "pillow-heif",
+      "ffmpeg",
+      "argparse",
+      "tqdm",
+      "subprocess"
+    ],
+    "skills": [
+      "error-handling",
+      "python"
+    ],
+    "topics": [
+      "python-exceptions"
+    ],
+    "source_path": "F:\\Personal Projects\\Iphone to Android Media convert",
+    "evidence_note": "Source code read: convert_media.py (203 lines).",
+    "purpose_md": "Make iPhone media playable on Android without visible quality loss.",
+    "architecture_md": "argparse CLI (`--input`, `--output`, `--recursive`, `--photo-quality`, `--crf`, `--preset`, `--audio-bitrate`) → collect files → per file: Pillow (RGB convert, JPEG q95, subsampling=0) or ffmpeg subprocess (libx264, CRF 18, yuv420p, +faststart, AAC) → per-file try/except so one failure doesn't stop the batch.",
+    "folder_structure_md": "",
+    "modules_md": "`require_ffmpeg`, `collect_files`, `convert_photo`, `convert_video`, `output_path`, `main`",
+    "database_md": "",
+    "apis_md": "",
+    "business_logic_md": "",
+    "challenges_md": "HEIC isn't supported by Pillow by default; colour modes (RGBA/P) can't be saved as JPEG.",
+    "solutions_md": "`register_heif_opener()`; convert to RGB before saving.",
+    "contributions_md": "Personal project.",
+    "learnings_md": "",
+    "pending_improvements_md": "",
+    "items": [],
+    "interview": []
+  },
+  {
+    "slug": "jpg-image-conversion",
+    "name": "JPG Image Conversion Script",
+    "kind": "personal",
+    "status": "unknown",
+    "summary": "Small script converting PNG/WEBP/AVIF images in a folder to JPEG in place, with backups.",
+    "tech": [
+      "Python",
+      "Pillow",
+      "pathlib",
+      "shutil"
+    ],
+    "skills": [
+      "python"
+    ],
+    "topics": [],
+    "source_path": "F:\\Personal Projects\\Jpg image conversion",
+    "evidence_note": "Source code read: image conversion.py (64 lines). Hard-coded input folder.",
+    "purpose_md": "Normalise a folder of mixed-format images to JPEG.",
+    "architecture_md": "Iterate folder → skip JPEGs (detected by actual format, not extension) → back up original → write temp JPEG → replace original.",
+    "folder_structure_md": "",
+    "modules_md": "",
+    "database_md": "",
+    "apis_md": "",
+    "business_logic_md": "",
+    "challenges_md": "",
+    "solutions_md": "Detects real format via `img.format`; writes to a temp file then renames (safer replace).",
+    "contributions_md": "Personal project.",
+    "learnings_md": "",
+    "pending_improvements_md": "Take the folder as a CLI argument instead of hard-coding it.",
+    "items": [],
+    "interview": []
+  },
+  {
+    "slug": "devgrowth-platform",
+    "name": "DevGrowth — Personal Developer Growth Platform",
+    "kind": "personal",
+    "status": "active",
+    "start_date": "2026-11-18",
+    "summary": "This app: Python-only learning platform (FastAPI + Jinja2 + SQLAlchemy) with assessments, spaced repetition, coding practice and progress analytics.",
+    "tech": [
+      "Python",
+      "FastAPI",
+      "Jinja2",
+      "HTMX",
+      "SQLAlchemy 2",
+      "SQLite",
+      "pytest"
+    ],
+    "skills": [
+      "api-design",
+      "database-design",
+      "fastapi",
+      "python",
+      "python-testing",
+      "sqlalchemy"
+    ],
+    "topics": [
+      "sqlalchemy-essentials",
+      "pytest-essentials",
+      "fastapi-essentials",
+      "rest-api-design"
+    ],
+    "source_path": "F:\\Personal Projects\\Skill_Development",
+    "evidence_note": "Built with Claude Code. Reading its code is a good way to study SQLAlchemy 2.0, FastAPI routers and pytest — three of your gaps.",
+    "purpose_md": "Answer three questions every day: what do I know, what am I forgetting, what should I learn next.",
+    "architecture_md": "See README.md and docs/02-architecture.md.",
+    "folder_structure_md": "",
+    "modules_md": "",
+    "database_md": "",
+    "apis_md": "",
+    "business_logic_md": "",
+    "challenges_md": "",
+    "solutions_md": "",
+    "contributions_md": "",
+    "learnings_md": "",
+    "pending_improvements_md": "",
+    "items": [],
+    "interview": []
+  }
+]

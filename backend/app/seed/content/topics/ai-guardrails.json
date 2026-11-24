@@ -1,0 +1,150 @@
+{
+  "slug": "ai-guardrails",
+  "title": "Guardrails: validating what goes into and out of the model",
+  "skill": "ai-production",
+  "extra_skills": [
+    "web-security",
+    "pydantic"
+  ],
+  "category": "AI",
+  "difficulty": "advanced",
+  "tags": [
+    "guardrails",
+    "validation",
+    "pii",
+    "sql-safety",
+    "refusals",
+    "pydantic"
+  ],
+  "summary": "Guardrails are the deterministic checks around a probabilistic model: validate and redact input, constrain and validate output, and enforce safety where actions happen (e.g. running generated SQL with a read-only role, LIMIT and an EXPLAIN check). They turn 'the model usually behaves' into 'the system always behaves'.",
+  "why_md": "- Model output is untrusted input to the rest of your system — treat it like a request body.\n- Text-to-SQL, PII and refusals are concrete risks in any data-facing LLM product.\n- Interviewers want layered defences, not 'I told the model not to'.",
+  "details_md": "### Layers\n1. **Input guardrails** – length limits, allowed languages/topics, PII detection/redaction before the text is sent to a third-party model or stored, prompt-injection heuristics, rate limits.\n2. **Prompt-level** – clear instructions and output format; helpful but never sufficient on its own.\n3. **Output guardrails** – schema validation (Pydantic), allowed values (enums), length checks, PII/secret scanning, banned content, grounding checks (does the answer cite retrieved sources?).\n4. **Action guardrails** – controls where side effects happen: DB roles, allow-lists, permissions, human approval.\n\n### Schema validation\nAsk for JSON (structured output / tool-call mode where available) and validate with a Pydantic model. On failure: re-prompt once or twice with the validation error, then fall back to a safe error response. Never `eval` model output.\n\n### Safe text-to-SQL\nDefence in depth:\n- **Parse/allow-list**: single statement, starts with `SELECT`/`WITH`, no write keywords (including data-modifying CTEs), only allow-listed schemas/tables. A SQL parser (e.g. sqlglot) is more robust than regex.\n- **Execution**: read-only role on scoped views, `default_transaction_read_only`, `statement_timeout`, wrap with `LIMIT`, always roll back.\n- **Cost check**: run `EXPLAIN (FORMAT JSON)` first and reject plans whose estimated cost/rows exceed a threshold (e.g. seq scan over a huge table).\n\n### PII\nRegex catches structured PII (emails, phone numbers, card-like numbers, PAN); names and addresses need NER-based detectors. Redact before logging and, where policy requires, before sending to the provider. Reversible tokenisation (`[EMAIL_1]` mapped back after the response) preserves usefulness.\n\n### Refusals\nModels sometimes refuse legitimate requests or answer out-of-scope ones. Detect refusals (structured `status` field is better than string matching), return a consistent message, and log them as a metric — a spike signals a prompt or model change. For out-of-scope questions, refuse deliberately with a helpful redirect.\n\n### Trade-offs\nEach check adds latency and false positives. Run cheap deterministic checks inline; run expensive model-based checks (a classifier or judge model) only where the risk justifies it.",
+  "code_md": "```python\n# Output guardrail: validate the model's JSON with Pydantic, re-prompt once with the error.\nfrom typing import Literal\nfrom pydantic import BaseModel, Field, ValidationError\n\nclass SqlAnswer(BaseModel):\n    status: Literal[\"ok\", \"refuse\", \"clarify\"]\n    sql: str | None = Field(default=None, max_length=4000)\n    explanation: str = Field(max_length=500)\n\ndef generate_sql(call_model, messages, retries: int = 1) -> SqlAnswer:\n    for attempt in range(retries + 1):\n        raw = call_model(messages)\n        try:\n            return SqlAnswer.model_validate_json(raw)\n        except ValidationError as e:\n            messages = messages + [\n                {\"role\": \"assistant\", \"content\": raw},\n                {\"role\": \"user\", \"content\": f\"Invalid JSON for schema: {e.errors()[:3]}. Return only valid JSON.\"},\n            ]\n    return SqlAnswer(status=\"refuse\", explanation=\"Could not produce a valid query.\")\n```\n\n```python\n# Action guardrail: EXPLAIN cost check before running model SQL (psycopg2).\nimport json\n\ndef safe_run(conn, sql: str, max_cost: float = 50_000.0):\n    with conn.cursor() as cur:\n        try:\n            cur.execute(\"SET LOCAL ROLE llm_reader\")\n            cur.execute(\"SET LOCAL statement_timeout = '5s'\")\n            cur.execute(\"EXPLAIN (FORMAT JSON) \" + sql)       # sql already passed allow-list checks\n            plan = cur.fetchone()[0][0][\"Plan\"]\n            if plan[\"Total Cost\"] > max_cost:\n                return {\"error\": f\"query too expensive (cost {plan['Total Cost']:.0f})\"}\n            cur.execute(f\"SELECT * FROM ({sql}) q LIMIT 200\")\n            return {\"rows\": cur.fetchall()}\n        finally:\n            conn.rollback()\n```",
+  "use_cases_md": "- **Analytics text-to-SQL**: allow-list + read-only role + EXPLAIN cost gate + LIMIT.\n- **Customer-message summarisation**: redact emails/phones before sending to a third-party model and before logging.\n- **Listing generation**: output validated for length, banned claims ('best price guaranteed'), required attributes.\n- **Support bot**: refuse out-of-scope topics with a standard redirect; track refusal rate.",
+  "mistakes_md": "- **Prompt-only safety** – 'never write DELETE' is not enforcement; injections and mistakes bypass it.\n- **Regex-only SQL filtering** – misses data-modifying CTEs, comments, functions with side effects; combine parser checks with a read-only role.\n- **Unbounded re-prompting on invalid output** – cost/latency blowups; cap retries and fall back.\n- **Logging raw prompts with PII** – logs become a data-leak surface; redact first.\n- **String-matching refusals** ('I'm sorry') – brittle; use a structured status field.",
+  "best_practices_md": "- Layer: input checks -> constrained output -> schema validation -> action permissions.\n- Treat every model output as untrusted; validate with Pydantic.\n- Enforce SQL safety in Postgres (role, read-only, timeout, scoped views) plus a parser allow-list and EXPLAIN gate.\n- Redact PII before logs; consider reversible tokenisation for prompts.\n- Measure guardrail trigger rates and false positives; tune thresholds.\n- Keep guardrails as plain, unit-tested functions.",
+  "my_context_md": "`GetLlmData` stores the original and dynamic SQL produced by the model — that is the exact place a SQL guardrail belongs: before execution, record which check passed/failed alongside the stored SQL. Your codebase's 619 f-string SQL strings are a reminder that composed SQL needs care; for model SQL the answer isn't parameterisation (the whole statement is untrusted) but execution under a read-only role with timeouts and an EXPLAIN gate, using the `db_transaction()` pattern from `AmazonVendorBankRecon/db.py` adapted to always roll back.",
+  "revision_notes_md": "- Guardrails = deterministic checks around the model: input, output, action.\n- Output is untrusted: validate with Pydantic; re-prompt with errors (bounded); safe fallback.\n- SQL: single statement, SELECT/WITH only, no write keywords (incl. CTEs), allow-listed tables.\n- Execute with read-only role, statement_timeout, LIMIT, rollback.\n- EXPLAIN (FORMAT JSON) cost gate rejects expensive plans.\n- PII: regex for structured, NER for names/addresses; redact before logs/providers.\n- Refusals: structured status field; track rate as a metric.\n- Cheap checks inline; expensive model-based checks only where risk justifies.",
+  "exercises_md": "1. Write `check_sql()` using a SQL parser library (e.g. sqlglot) that rejects multi-statements, non-SELECT statements and non-allow-listed tables; build a pytest suite of 20 nasty inputs.\n2. Implement the EXPLAIN cost gate against a local table with 1M rows; find a threshold that blocks a full seq scan but allows indexed lookups.\n3. Build a PII redactor for emails, Indian phone numbers and PAN-format IDs with reversible placeholders.\n4. Add a Pydantic output schema with a `status` enum to a fake text-to-SQL flow and count validation retries.",
+  "related": [
+    "ai-structured-outputs",
+    "ai-security",
+    "ai-agents-tool-calling",
+    "be-pydantic-validation",
+    "explain-analyze",
+    "web-security-owasp"
+  ],
+  "flashcards": [
+    {
+      "front": "Three guardrail layers?",
+      "back": "Input (length, PII, injection heuristics), output (schema, enums, content checks), action (permissions, read-only roles, approvals)."
+    },
+    {
+      "front": "Safe text-to-SQL execution checklist?",
+      "back": "Single SELECT/WITH, allow-listed tables, read-only role, statement_timeout, LIMIT wrap, EXPLAIN cost gate, rollback."
+    },
+    {
+      "front": "What to do when model JSON fails validation?",
+      "back": "Re-prompt with the validation error a bounded number of times, then return a safe fallback."
+    },
+    {
+      "front": "Why a structured status field for refusals?",
+      "back": "Reliable detection and metrics vs brittle string matching on 'I'm sorry'."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which control actually guarantees model-generated SQL cannot modify data?",
+      "options": [
+        "A system prompt forbidding writes",
+        "Temperature 0",
+        "Executing it as a role with only SELECT grants in a read-only transaction",
+        "Checking that the query contains the word SELECT"
+      ],
+      "answer_index": 2,
+      "explanation": "Database privileges are enforced regardless of what the SQL says."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does an EXPLAIN-based guardrail add to text-to-SQL?",
+      "options": [
+        "It fixes syntax errors automatically",
+        "It rejects queries whose estimated cost is too high before running them",
+        "It encrypts results",
+        "It redacts PII from rows"
+      ],
+      "answer_index": 1,
+      "explanation": "EXPLAIN returns the planner's cost estimate without executing the query."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In Pydantic v2, SqlAnswer.____(raw) parses and validates a JSON string in one step.",
+      "answers": [
+        "model_validate_json"
+      ],
+      "explanation": "model_validate_json replaces v1's parse_raw."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A Postgres setting that cancels long-running queries from the LLM role is ____.",
+      "answers": [
+        "statement_timeout"
+      ],
+      "explanation": "SET statement_timeout = '5s' bounds execution time."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this PII redactor print?",
+      "code": "import re\n\nPATTERNS = [\n    (\"EMAIL\", re.compile(r\"[\\w.+-]+@[\\w-]+\\.[\\w.]+\")),\n    (\"PHONE\", re.compile(r\"\\b\\d{10}\\b\")),\n]\n\ndef redact(text):\n    counts = {}\n    for label, rx in PATTERNS:\n        text, n = rx.subn(f\"[{label}]\", text)\n        counts[label] = n\n    return text, counts\n\nout, counts = redact(\"Mail ravi.k@shop.in or 9876543210, cc a@b.co\")\nprint(out)\nprint(counts)\n",
+      "answers": [
+        "Mail [EMAIL] or [PHONE], cc [EMAIL]\n{'EMAIL': 2, 'PHONE': 1}"
+      ],
+      "explanation": "Emails are replaced first (two matches), then the 10-digit phone number (one match). subn returns the new text and count."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this SQL allow-list guard print?",
+      "code": "import re\n\nFORBIDDEN = re.compile(r\"\\b(insert|update|delete|drop|alter|grant|truncate)\\b\", re.I)\n\ndef check(sql):\n    s = sql.strip().rstrip(\";\")\n    if \";\" in s:\n        return \"reject: multiple statements\"\n    if not re.match(r\"(select|with)\\b\", s, re.I):\n        return \"reject: not a query\"\n    if FORBIDDEN.search(s):\n        return \"reject: write keyword\"\n    if not re.search(r\"\\blimit\\s+\\d+\\s*$\", s, re.I):\n        s += \" LIMIT 100\"\n    return s\n\nfor q in [\"SELECT id FROM orders;\", \"select 1; drop table x\",\n          \"WITH t AS (DELETE FROM a RETURNING *) SELECT * FROM t\",\n          \"select * from sales limit 5\"]:\n    print(check(q))\n",
+      "answers": [
+        "SELECT id FROM orders LIMIT 100\nreject: multiple statements\nreject: write keyword\nselect * from sales limit 5"
+      ],
+      "explanation": "The trailing ';' is stripped; the multi-statement is rejected; the data-modifying CTE is caught by the write-keyword check; an existing LIMIT is kept."
+    },
+    {
+      "type": "debug",
+      "prompt": "This guardrail is meant to block writes. What's wrong and how do you fix it?",
+      "code": "def is_safe(sql: str) -> bool:\n    return sql.strip().upper().startswith(\"SELECT\")\n\nif is_safe(model_sql):\n    cur.execute(model_sql)   # app connection with full privileges\n    conn.commit()\n",
+      "answer": "`startswith('SELECT')` allows `SELECT 1; DROP TABLE orders`, `SELECT` with side-effect functions, and rejects legitimate `WITH` queries; data-modifying CTEs start with `WITH`. Worse, execution uses a privileged connection and commits.\n\nFix: defence in depth.\n```python\nif check_sql(model_sql).ok:                     # parser: single statement, SELECT/WITH, allow-listed tables\n    with conn.cursor() as cur:\n        try:\n            cur.execute(\"SET LOCAL ROLE llm_reader\")      # SELECT-only grants\n            cur.execute(\"SET LOCAL statement_timeout='5s'\")\n            cur.execute(f\"SELECT * FROM ({model_sql}) q LIMIT 200\")\n            rows = cur.fetchall()\n        finally:\n            conn.rollback()\n```",
+      "rubric": [
+        "Prefix check is bypassable (multi-statement, CTEs, functions)",
+        "Privileged connection + commit",
+        "Use parser allow-list",
+        "Read-only role, timeout, LIMIT, rollback"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would put guardrails around an LLM feature that answers questions over a company's sales database.",
+      "answer": "Input: auth + rate limits, length cap, out-of-scope classifier, PII redaction before logging. Output: structured JSON (`status`, `sql`, `explanation`) validated by Pydantic with bounded re-prompts. SQL: parser allow-list (single SELECT/WITH, allowed views), EXPLAIN cost gate, read-only role on org-scoped views, statement_timeout, LIMIT, rollback. Answer: summarise only returned rows, scan for PII before display/logging. Observability: log which guardrail fired, refusal rate, validation retry rate.",
+      "rubric": [
+        "Input guardrails",
+        "Schema-validated output",
+        "DB-level SQL enforcement + EXPLAIN gate",
+        "Metrics on guardrail triggers"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you make text-to-SQL safe in production?",
+      "difficulty": "hard",
+      "answer_md": "Assume the SQL is hostile. 1) **Static checks** with a SQL parser: exactly one statement, `SELECT`/`WITH` only, no data-modifying CTEs, only allow-listed schemas/views. 2) **Least privilege**: execute as a role with SELECT on curated, org-scoped views (or RLS keyed on a server-set `app.org_id`), `default_transaction_read_only = on`. 3) **Resource limits**: `statement_timeout`, wrap in `SELECT * FROM (...) q LIMIT n`, EXPLAIN cost threshold, maybe a read replica. 4) **Always roll back**. 5) **Observability**: store generated SQL, check results, errors, latency and row counts per org; review failures. 6) **Eval set** of questions with expected results to catch regressions. Prompt instructions help quality but are not a security control."
+    },
+    {
+      "question": "Your model sometimes returns invalid JSON. What do you do?",
+      "difficulty": "medium",
+      "answer_md": "First reduce the rate: use the provider's structured-output/JSON or tool-calling mode, a clear schema in the prompt, and few-shot examples. Then validate every response with a Pydantic model. On failure, re-prompt once or twice including the validation errors and the bad output; if it still fails, return a safe fallback (`status='error'`) instead of crashing. Track validation-failure and retry rates as metrics — a spike after a model or prompt change is a regression signal. Never use `eval` or lenient regex extraction that silently accepts partial data."
+    }
+  ]
+}

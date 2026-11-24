@@ -1,0 +1,157 @@
+{
+  "slug": "py-threading-patterns",
+  "title": "Threading patterns that are actually safe",
+  "skill": "python-concurrency",
+  "extra_skills": [
+    "python-advanced"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "threading",
+    "lock",
+    "rlock",
+    "event",
+    "queue",
+    "threadpoolexecutor",
+    "double-checked-locking",
+    "daemon-threads"
+  ],
+  "summary": "The practical toolkit for I/O-bound concurrency with threads: `Lock`/`RLock` to protect shared state, `Event` for signalling and graceful shutdown, `queue.Queue` for producer-consumer pipelines, `ThreadPoolExecutor` for fan-out, double-checked locking for lazy singletons such as a connection pool, daemon threads, and timeouts everywhere.",
+  "why_md": "- Backend services are mostly I/O-bound (DB, S3, HTTP); threads release the GIL during I/O, so a pool of threads gives real speedups.\n- The GIL does **not** make your code thread-safe: compound operations (`check-then-act`, `x += 1`, lazy init) still race.\n- Job runners, connection pools and API fan-out all use these exact primitives.\n- Race conditions are rare in tests and frequent in production — interviewers probe whether you can reason about them.",
+  "details_md": "### What the GIL does and doesn't give you\nOnly one thread runs Python bytecode at a time (in the default build), but a thread can be switched out between any two bytecodes. Single operations on built-ins like `list.append` or `dict[k] = v` are effectively atomic; **sequences** (`if k not in d: d[k] = make()`, `counter += 1`, read-modify-write of an object) are not. Blocking I/O releases the GIL, which is why threads help I/O-bound work.\n\n### Lock and RLock\n`Lock` is a mutex; always use it as a context manager (`with lock:`) so exceptions release it. `RLock` can be re-acquired by the thread already holding it — useful when a locked method calls another locked method, but often a sign the locking boundaries should be simplified. Keep critical sections short; never do network I/O while holding a lock unless that's the point (serialising access). Acquire multiple locks in a consistent order to avoid deadlock; `lock.acquire(timeout=...)` can surface a stuck lock.\n\n### Event\nA thread-safe boolean flag: `set()`, `clear()`, `is_set()`, `wait(timeout)`. The standard way to stop worker loops: `while not stop.is_set(): ... stop.wait(5)` — the wait doubles as an interruptible sleep.\n\n### Queue: producer-consumer\n`queue.Queue(maxsize=n)` is internally locked. `put` blocks when full (backpressure), `get` blocks when empty. Shut consumers down with a sentinel per consumer (`None`), and use `task_done()` + `q.join()` if the producer must wait until all items are processed.\n\n### ThreadPoolExecutor\n`ex.submit(fn, *args)` returns a `Future`; `as_completed(futures, timeout=...)` yields them as they finish; `ex.map` returns results **in input order**. Exceptions are captured in the future and re-raised on `.result()` — if you never call it, the error disappears silently. Size the pool to the downstream limit (DB pool size, API rate limit), not CPU count.\n\n### Double-checked locking\nFor a lazily created shared object (connection pool, client):\n```text\nif _pool is None:            # fast path, no lock\n    with _lock:\n        if _pool is None:    # re-check: another thread may have created it\n            _pool = create()\n```\nThe second check prevents two threads both creating it. In CPython the assignment of the reference is atomic, so the unlocked first read is safe.\n\n### Daemon threads and timeouts\nDaemon threads are killed abruptly at interpreter exit — no `finally`, no flush — so don't use them for work that must complete (DB writes). Prefer non-daemon threads plus an Event and `join(timeout)`. Put timeouts on everything that can block: `q.get(timeout=)`, `future.result(timeout=)`, socket/HTTP/DB timeouts — otherwise one hung call blocks shutdown forever.\n\nPython 3.13+ offers an experimental free-threaded (no-GIL) build; code that relies on the GIL for accidental safety will break there, which is another reason to lock properly.",
+  "code_md": "```python\nimport threading\nfrom psycopg2.pool import ThreadedConnectionPool\n\n_pool: ThreadedConnectionPool | None = None\n_pool_lock = threading.Lock()\n\ndef get_pool() -> ThreadedConnectionPool:\n    global _pool\n    if _pool is None:                         # 1st check: cheap, no lock\n        with _pool_lock:\n            if _pool is None:                 # 2nd check: someone may have won the race\n                _pool = ThreadedConnectionPool(1, 10, dsn=load_dsn())\n    return _pool\n\n# Thread-safe counter: += is read-modify-write, not atomic\nclass Stats:\n    def __init__(self):\n        self._lock = threading.Lock()\n        self.processed = 0\n    def incr(self, n=1):\n        with self._lock:\n            self.processed += n\n```\n\n```python\nimport queue, threading\nfrom concurrent.futures import ThreadPoolExecutor, as_completed\n\n# Fan-out with bounded concurrency and per-item error handling\ndef sync_all(skus, fetch_price, max_workers=8):\n    results, errors = {}, {}\n    with ThreadPoolExecutor(max_workers=max_workers) as ex:\n        futs = {ex.submit(fetch_price, s): s for s in skus}\n        for fut in as_completed(futs, timeout=300):\n            sku = futs[fut]\n            try:\n                results[sku] = fut.result()      # re-raises the worker's exception\n            except Exception as e:\n                errors[sku] = repr(e)\n    return results, errors\n\n# Producer-consumer with backpressure and graceful stop\nstop = threading.Event()\nq: queue.Queue = queue.Queue(maxsize=1000)\n\ndef writer():\n    while not stop.is_set() or not q.empty():\n        try:\n            batch = q.get(timeout=1)\n        except queue.Empty:\n            continue\n        insert_batch(batch)          # e.g. execute_values\n        q.task_done()\n```",
+  "use_cases_md": "- Lazily creating a `ThreadedConnectionPool` once per process with double-checked locking.\n- A job runner that claims jobs and executes them on a `ThreadPoolExecutor` sized to the DB pool.\n- Fetching prices/inventory for thousands of SKUs concurrently while respecting a max concurrency.\n- Parser threads feeding a single DB-writer thread through a bounded Queue (backpressure).\n- A heartbeat thread that updates a job's `last_seen` every 30 s and stops via an Event.",
+  "mistakes_md": "- **Assuming the GIL makes code thread-safe**: check-then-act and `+=` race. Fix: Lock around the compound operation.\n- **Never calling `future.result()`**: exceptions vanish. Fix: iterate futures and handle errors.\n- **Pool bigger than the DB connection pool**: threads block waiting for connections or raise `PoolError`. Fix: size workers ≤ pool max.\n- **Sharing a psycopg2 connection/cursor across threads** concurrently. Fix: one connection per thread at a time from a pool.\n- **Daemon threads for important writes**: killed at exit, data lost. Fix: non-daemon + Event + join.\n- **No timeouts**: a hung HTTP call blocks shutdown. Fix: timeouts on I/O, `get`, `result`, `join`.\n- **Holding a lock during slow I/O**: serialises everything. Fix: copy what you need under the lock, do I/O outside.",
+  "best_practices_md": "- Prefer message passing (Queue) and immutable data over shared mutable state.\n- Encapsulate each lock with the state it protects (inside a class).\n- `with lock:` always; consistent lock ordering; short critical sections.\n- Use `ThreadPoolExecutor` rather than raw `Thread` for task fan-out.\n- Bound concurrency to downstream limits; add timeouts everywhere.\n- Use `Event` for shutdown; join threads on exit.\n- For CPU-bound work, use processes instead.",
+  "my_context_md": "`AmazonVendorBankRecon/db.py` creates its `ThreadedConnectionPool` (behind PgBouncer) with **double-checked locking on a `threading.Lock`** — exactly the lazy-singleton pattern in this topic; make sure you can explain why both checks are needed. `ForcesightJobSchedulerAndRunner/runner.py` uses a `ThreadPoolExecutor` to run claimed jobs: worth checking that max_workers is ≤ the connection pool size, that every future's `.result()` is consumed (so job exceptions are recorded, not swallowed), and that shutdown waits for in-flight jobs. The same repo's `SELECT … FOR UPDATE SKIP LOCKED` handles coordination *between* processes; locks here only coordinate threads *within* one process.",
+  "revision_notes_md": "- GIL ≠ thread safety: compound operations race.\n- Threads help I/O-bound work (GIL released during I/O).\n- `with lock:`; RLock only for re-entrant needs; consistent lock order.\n- Event: `set/is_set/wait(timeout)` → graceful shutdown + interruptible sleep.\n- `Queue(maxsize)` = locked + backpressure; sentinel per consumer; `task_done/join`.\n- Executor: `submit` + `as_completed`; `map` keeps input order; call `.result()` to see errors.\n- Double-checked locking: check, lock, check again, create.\n- Daemon threads die abruptly at exit — not for must-finish work.\n- Timeouts on every blocking call; workers ≤ DB pool size.",
+  "exercises_md": "1. Write a test that starts 50 threads calling your `get_pool()`-style factory simultaneously (use a `threading.Barrier`) and asserts the factory ran exactly once; then remove the second check and observe the failure rate.\n2. Build a producer-consumer pipeline: 4 threads parse report files into row batches, 1 thread inserts with `execute_values`, bounded queue, clean shutdown via sentinel.\n3. Write `fetch_all(skus)` with `ThreadPoolExecutor` that returns successes and failures separately and enforces an overall timeout.\n4. Add an Event-based heartbeat thread to a long job that updates a timestamp every N seconds and stops promptly when the job ends.",
+  "related": [
+    "python-threading-gil",
+    "py-multiprocessing",
+    "python-asyncio",
+    "be-connection-pooling",
+    "be-postgres-locking-deadlocks",
+    "python-context-managers"
+  ],
+  "flashcards": [
+    {
+      "front": "Why is `counter += 1` not thread-safe even with the GIL?",
+      "back": "It's load, add, store — several bytecodes. A thread switch between load and store loses updates. Protect it with a Lock."
+    },
+    {
+      "front": "Why the second check in double-checked locking?",
+      "back": "Two threads can both pass the unlocked first check; the one that acquires the lock second must re-check so it doesn't create a second instance."
+    },
+    {
+      "front": "What happens to an exception raised inside a ThreadPoolExecutor task?",
+      "back": "It's stored on the Future and re-raised when you call `future.result()`; if you never call it, the error is silently lost."
+    },
+    {
+      "front": "Why avoid daemon threads for DB writes?",
+      "back": "At interpreter exit daemon threads are killed abruptly — no finally blocks, no commit — so in-flight work is lost."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You run 32 worker threads that each need a DB connection, using a `ThreadedConnectionPool(minconn=1, maxconn=10)`. What happens under load?",
+      "options": [
+        "psycopg2 automatically grows the pool to 32",
+        "Threads beyond 10 get `PoolError` (pool exhausted) since psycopg2's pool doesn't block",
+        "The GIL serialises them so only one connection is used",
+        "Connections are shared safely between threads"
+      ],
+      "answer_index": 1,
+      "explanation": "psycopg2's pool raises `PoolError` when exhausted rather than waiting. Size the executor to the pool (or add a semaphore)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which primitive is best for telling a background worker loop to stop and also serving as its interruptible sleep?",
+      "options": [
+        "`threading.Event`",
+        "`threading.RLock`",
+        "A global boolean checked with `time.sleep(5)`",
+        "`threading.Semaphore`"
+      ],
+      "answer_index": 0,
+      "explanation": "`stop.wait(5)` returns early when `stop.set()` is called, so shutdown is immediate."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To process futures in the order they finish rather than submission order, iterate over `concurrent.futures.____(futures)`.",
+      "answers": [
+        "as_completed",
+        "as_completed()"
+      ],
+      "explanation": "`ex.map` preserves input order; `as_completed` yields completed futures first."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A lock that the same thread can acquire multiple times without deadlocking itself is `threading.____`.",
+      "answers": [
+        "RLock",
+        "RLock()"
+      ],
+      "explanation": "RLock tracks the owning thread and a recursion count."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import queue, threading\n\nq = queue.Queue(maxsize=2)\nresults = []\n\ndef consumer():\n    while True:\n        item = q.get()\n        if item is None:\n            q.task_done()\n            break\n        results.append(item * 10)\n        q.task_done()\n\nt = threading.Thread(target=consumer)\nt.start()\nfor i in range(1, 5):\n    q.put(i)\nq.put(None)\nt.join()\nprint(results, q.empty())",
+      "answers": [
+        "[10, 20, 30, 40] True"
+      ],
+      "explanation": "A single consumer reads FIFO, so order is preserved; `maxsize=2` only makes the producer wait. The sentinel ends the loop."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import time\nfrom concurrent.futures import ThreadPoolExecutor\n\ndef fetch(n):\n    time.sleep(0.05 * (4 - n))   # later items finish first\n    return n * n\n\nwith ThreadPoolExecutor(max_workers=4) as ex:\n    print(list(ex.map(fetch, range(4))))",
+      "answers": [
+        "[0, 1, 4, 9]"
+      ],
+      "explanation": "`Executor.map` yields results in input order regardless of completion order."
+    },
+    {
+      "type": "debug",
+      "prompt": "Under load, this service sometimes creates two S3 clients and the cache counter is wrong. What's wrong and how do you fix it?",
+      "code": "import threading, boto3\n\n_client = None\n_lock = threading.Lock()\nhits = 0\n\ndef get_client():\n    global _client\n    if _client is None:\n        with _lock:\n            _client = boto3.client(\"s3\")\n    return _client\n\ndef record_hit():\n    global hits\n    hits += 1",
+      "answer": "1. Missing second check inside the lock: two threads can both see `None`, then each acquires the lock in turn and creates a client.\n2. `hits += 1` is a read-modify-write and races without a lock.\n\n```python\ndef get_client():\n    global _client\n    if _client is None:\n        with _lock:\n            if _client is None:\n                _client = boto3.client(\"s3\")\n    return _client\n\n_hits_lock = threading.Lock()\ndef record_hit():\n    global hits\n    with _hits_lock:\n        hits += 1\n```\n(Better still: encapsulate the counter and its lock in a class instead of globals.)",
+      "rubric": [
+        "Missing re-check inside the lock (double-checked locking)",
+        "`+=` on shared state is not atomic",
+        "Protect the counter with a lock / encapsulate state"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain when you'd choose threads over asyncio or multiprocessing in a Python backend.",
+      "answer": "Threads suit I/O-bound work where the libraries are blocking (psycopg2, boto3, requests): the GIL is released during network/disk waits, so a `ThreadPoolExecutor` of 8-32 workers gives near-linear speedups without rewriting code. asyncio fits when you have very high concurrency (thousands of sockets) and async-native libraries (httpx, asyncpg), with lower per-task overhead but the requirement that nothing blocks the event loop. Multiprocessing is for CPU-bound Python work (parsing, pandas apply, feature computation), since the GIL prevents threads from running bytecode in parallel; it costs process startup and pickling. Shared state with threads needs locks; prefer queues and bound concurrency to downstream limits like the DB pool.",
+      "rubric": [
+        "Threads for I/O-bound work with blocking libraries (GIL released on I/O)",
+        "asyncio for many concurrent connections with async libraries",
+        "Processes for CPU-bound work because of the GIL",
+        "Mention shared-state/locking or concurrency bounds"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain double-checked locking and why it works in CPython.",
+      "difficulty": "medium",
+      "answer_md": "Goal: lazily create one shared object (pool, client) without locking on every access.\n\n```python\nif _pool is None:              # fast path, no lock\n    with _lock:\n        if _pool is None:      # re-check under the lock\n            _pool = make_pool()\nreturn _pool\n```\n\nThe first check avoids lock contention once initialised. The second is essential: two threads can pass the first check simultaneously; the loser of the lock race must see that the winner already created it. It's safe in CPython because assigning a reference is atomic and `make_pool()` completes before the name is bound, so another thread never sees a half-constructed object. (In languages like Java it historically needed `volatile` for memory-visibility reasons.) Alternatives: create eagerly at startup, or `functools.cache` around a factory (but note that `cache` itself doesn't prevent two threads from computing concurrently on a miss)."
+    },
+    {
+      "question": "Design a producer-consumer pipeline that parses report files and writes rows to Postgres.",
+      "difficulty": "hard",
+      "answer_md": "- **Producers**: N parser threads (or processes if parsing is CPU-heavy) read files and put row *batches* (e.g. 5k rows) on a `queue.Queue(maxsize=20)`. The bound gives backpressure so parsers can't outrun the DB and exhaust memory.\n- **Consumers**: M writer threads, each holding one pooled connection, `execute_values` per batch inside a transaction; use an idempotent upsert (`ON CONFLICT DO UPDATE`) so retries are safe. M ≤ DB pool size.\n- **Shutdown**: producers finish → main thread puts one sentinel per consumer → consumers exit → `join()` all. An `Event` handles abort on fatal error.\n- **Errors**: consumers catch per-batch errors, log with batch identifiers, push to a dead-letter list or retry with backoff (deadlocks).\n- **Timeouts**: `q.get(timeout=)` so consumers notice the abort Event.\n\nThis isolates slow DB writes from parsing and keeps memory bounded."
+    },
+    {
+      "question": "Is `dict` thread-safe in Python?",
+      "difficulty": "easy",
+      "answer_md": "Individual operations on built-in dicts (`d[k] = v`, `d.get(k)`, `d.pop(k, None)`) are atomic in CPython because they execute as a single operation under the GIL, so the dict won't be corrupted. But **logic built from several operations is not**:\n\n```python\nif key not in cache:          # thread A and B both see missing\n    cache[key] = expensive()  # both compute; last write wins\n```\n\nUse `cache.setdefault(key, value)` when the value is cheap, or a lock around check-and-set. Iterating a dict while another thread mutates it can raise `RuntimeError: dictionary changed size during iteration`. Also, relying on GIL atomicity is fragile with the free-threaded build in 3.13+; explicit locks are the portable answer."
+    }
+  ]
+}

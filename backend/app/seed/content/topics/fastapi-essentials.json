@@ -1,0 +1,123 @@
+{
+  "slug": "fastapi-essentials",
+  "title": "FastAPI Essentials",
+  "skill": "fastapi",
+  "extra_skills": [
+    "pydantic",
+    "api-development"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "fastapi",
+    "pydantic",
+    "dependency-injection",
+    "async",
+    "openapi",
+    "python"
+  ],
+  "summary": "FastAPI builds APIs from type-hinted Python functions: it reads your parameters' types to parse path/query params and JSON bodies (with Pydantic v2), validates them, and generates OpenAPI docs at `/docs`. `Depends` provides dependency injection for things like DB connections and auth. Use `async def` only when the code inside awaits async I/O; otherwise plain `def` runs safely in a threadpool.",
+  "details_md": "### How a request flows\nFastAPI sits on **Starlette** (ASGI routing, middleware, responses) and **Pydantic v2** (validation/serialisation), served by an ASGI server like **Uvicorn**. When you register `@app.get(\"/items/{item_id}\")`, FastAPI inspects the function signature once and builds a plan:\n- Names in the path template -> **path params**.\n- Scalar types not in the path -> **query params** (optional if they have a default).\n- Pydantic models -> **request body** (JSON).\n- `Header()`, `Cookie()`, `Form()`, `File()`/`UploadFile` for other sources.\n- `Depends(fn)` -> **dependencies** resolved (and cached per request) before your function runs.\nInvalid input returns **422** with detailed errors automatically.\n\n### Pydantic v2 models\n`BaseModel` fields use type hints plus `Field(...)` constraints (`gt`, `max_length`, `pattern`). Key v2 APIs: `model_validate()`, `model_dump()`, `model_dump_json()`, `@field_validator`, `@model_validator`, `model_config = ConfigDict(from_attributes=True, extra=\"forbid\")`. Use separate models for input and output (`OrderCreate`, `OrderOut`) and set `response_model` (or a return annotation) so responses are filtered and documented - this prevents leaking internal fields.\n\n### Dependencies\nA dependency is any callable; FastAPI calls it and injects the return value. Dependencies can depend on other dependencies, and a dependency that **yields** gets teardown code after the response is generated - ideal for DB connections:\n```python\ndef get_conn():\n    conn = pool.getconn()\n    try: yield conn\n    finally: pool.putconn(conn)\n```\nUse `Annotated[Conn, Depends(get_conn)]` and reuse the alias. In tests, `app.dependency_overrides[get_conn] = fake` swaps implementations.\n\n### async def vs def\n- `async def` endpoints run on the event loop: great with async libraries (httpx, asyncpg), disastrous with blocking calls.\n- `def` endpoints run in a threadpool (AnyIO, default ~40 threads), so blocking libraries (psycopg2, boto3, requests) are fine.\n- For CPU-heavy work, offload to a process pool or a separate worker.\n\n### Background work\n`BackgroundTasks` runs a function **after** the response is sent, in the same process - fine for small things (send an email). For long jobs use an executor with tracked status, or a proper queue (SQS, Celery, RQ) so work survives restarts and scales across workers.\n\n### App structure\n- `APIRouter` per domain (`routers/uploads.py`), included with `app.include_router(router, prefix=\"/v1\")`.\n- `lifespan` async context manager for startup/shutdown (create pools/clients, close them).\n- Settings via `pydantic-settings` (`BaseSettings` reads env vars).\n- Exception handlers (`@app.exception_handler(MyError)`) map domain errors to responses.\n- Middleware for CORS (`CORSMiddleware`), request IDs, timing.\n\n### Responses\nReturn dicts/models (serialised to JSON), or explicit `JSONResponse`, `StreamingResponse` (streams/SSE), `FileResponse`, `RedirectResponse`. Set `status_code=201` on the decorator, and raise `HTTPException(404, ...)` for errors.\n\n### Testing\n`fastapi.testclient.TestClient` (based on httpx) calls the app in-process: `client.get(\"/items/1\")`. Combine with `dependency_overrides` for isolated tests.",
+  "code_md": "```python\n# main.py - models, validation, response_model, errors\nfrom typing import Annotated\nfrom fastapi import FastAPI, HTTPException, Query, status\nfrom pydantic import BaseModel, Field, field_validator\n\napp = FastAPI(title=\"Orders API\")\n\nclass OrderIn(BaseModel):\n    sku: str = Field(min_length=1, max_length=64)\n    qty: int = Field(gt=0)\n    channel: str\n\n    @field_validator(\"sku\")\n    @classmethod\n    def normalise_sku(cls, v: str) -> str:\n        return v.strip().upper()\n\nclass OrderOut(BaseModel):\n    id: int\n    sku: str\n    qty: int\n\nDB: dict[int, dict] = {}\n\n@app.post(\"/orders\", response_model=OrderOut, status_code=status.HTTP_201_CREATED)\ndef create_order(order: OrderIn):\n    order_id = len(DB) + 1\n    DB[order_id] = {\"id\": order_id, **order.model_dump(), \"internal_note\": \"hidden\"}\n    return DB[order_id]                       # response_model drops internal_note\n\n@app.get(\"/orders\")\ndef list_orders(limit: Annotated[int, Query(ge=1, le=100)] = 20, channel: str | None = None):\n    rows = [o for o in DB.values() if channel is None or o[\"channel\"] == channel]\n    return rows[:limit]\n\n@app.get(\"/orders/{order_id}\", response_model=OrderOut)\ndef get_order(order_id: int):\n    if order_id not in DB:\n        raise HTTPException(status_code=404, detail=\"order not found\")\n    return DB[order_id]\n\n# run: uvicorn main:app --reload   -> docs at http://127.0.0.1:8000/docs\n```\n\n```python\n# Dependencies: pooled psycopg2 connection with teardown, and a simple API-key guard\nfrom typing import Annotated\nfrom fastapi import Depends, FastAPI, Header, HTTPException\nfrom psycopg2.pool import ThreadedConnectionPool\n\npool = ThreadedConnectionPool(1, 10, dsn=\"postgresql://user:pw@localhost/app\")\n\ndef get_conn():\n    conn = pool.getconn()\n    try:\n        yield conn                     # injected into the endpoint\n        conn.commit()\n    except Exception:\n        conn.rollback()\n        raise\n    finally:\n        pool.putconn(conn)             # runs after the endpoint finishes\n\ndef require_api_key(x_api_key: Annotated[str | None, Header()] = None) -> str:\n    if x_api_key != \"dev-secret\":      # load from settings in real code\n        raise HTTPException(status_code=401, detail=\"invalid API key\")\n    return x_api_key\n\nConn = Annotated[object, Depends(get_conn)]\napp = FastAPI()\n\n@app.get(\"/uploads/{upload_id}\", dependencies=[Depends(require_api_key)])\ndef get_upload(upload_id: int, conn: Conn):     # plain def: psycopg2 is blocking\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT id, status FROM fs_upload WHERE id = %s\", (upload_id,))\n        row = cur.fetchone()\n    if row is None:\n        raise HTTPException(404, \"not found\")\n    return {\"id\": row[0], \"status\": row[1]}\n```\n\n```python\n# Lifespan, routers and a shared async HTTP client\nfrom contextlib import asynccontextmanager\nimport httpx\nfrom fastapi import APIRouter, FastAPI, Request\n\nrouter = APIRouter(prefix=\"/proxy\", tags=[\"proxy\"])\n\n@router.get(\"/status\")\nasync def upstream_status(request: Request):\n    client: httpx.AsyncClient = request.app.state.http\n    r = await client.get(\"https://example.com\", timeout=10)   # non-blocking\n    return {\"upstream\": r.status_code}\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    app.state.http = httpx.AsyncClient()\n    yield\n    await app.state.http.aclose()\n\napp = FastAPI(lifespan=lifespan)\napp.include_router(router, prefix=\"/v1\")\n```\n\n```python\n# Testing with TestClient and dependency overrides\nfrom fastapi.testclient import TestClient\n\ndef test_create_order():\n    client = TestClient(app)\n    r = client.post(\"/orders\", json={\"sku\": \" ab-1 \", \"qty\": 2, \"channel\": \"amazon\"})\n    assert r.status_code == 201\n    assert r.json()[\"sku\"] == \"AB-1\"\n    assert \"internal_note\" not in r.json()\n\n    bad = client.post(\"/orders\", json={\"sku\": \"x\", \"qty\": 0, \"channel\": \"amazon\"})\n    assert bad.status_code == 422\n```",
+  "use_cases_md": "- JSON APIs for frontends (React/Next.js) with automatic OpenAPI docs.\n- Internal microservices and admin tools on top of PostgreSQL.\n- Job-style APIs with background processing and progress streaming (SSE).\n- Wrapping CLI tools or ML/LLM calls behind HTTP endpoints.\n- Webhook receivers with validated payloads.",
+  "mistakes_md": "- **Blocking calls in `async def`** (psycopg2, requests, boto3, `time.sleep`). Fix: plain `def`, async libraries, or `asyncio.to_thread`.\n- **Returning ORM/DB rows or dicts with secrets** without a response model. Fix: `response_model`/return type with an output model.\n- **One model for input and output** - clients can set `id`/`is_admin`. Fix: separate `XCreate`, `XUpdate`, `XOut` models; `extra=\"forbid\"` on input.\n- **Global connections created at import** - break with reloads/workers. Fix: create in `lifespan`, inject with dependencies.\n- **Using `BackgroundTasks` for long or critical jobs** - lost on restart, runs in the API process. Fix: a queue/worker or tracked executor jobs.\n- **In-memory state with multiple workers** (`uvicorn --workers 4`) - each process has its own dict. Fix: shared store (DB/Redis).\n- **Pydantic v1 APIs** (`.dict()`, `@validator`, `orm_mode`). Fix: v2 `model_dump()`, `@field_validator`, `from_attributes=True`.",
+  "best_practices_md": "- Use `Annotated` for params and dependencies; define reusable aliases.\n- Organise by `APIRouter` per domain; keep business logic in plain functions/services, not in route handlers.\n- Manage resources with `lifespan` and `yield` dependencies.\n- Validate strictly at the edge, return explicit output models, and register exception handlers for domain errors.\n- Load configuration with `pydantic-settings`; never hard-code secrets.\n- Write `TestClient` tests with `dependency_overrides` from day one.\n- Run behind Uvicorn (or Gunicorn with Uvicorn workers) and add CORS, request-ID and logging middleware.",
+  "my_context_md": "- You've built two FastAPI apps (Instagram/YouTube downloaders) with Pydantic request models, `asyncio.to_thread`, `loop.run_in_executor` background jobs in an in-memory dict, `threading.Event` cancellation and SSE via `StreamingResponse` - so routing, bodies and streaming are familiar.\n- Gaps worth closing in those apps: no authentication (an API-key or JWT dependency is the FastAPI way), no tests (`TestClient` + `dependency_overrides` would cover them), and the in-memory job dict only works with a single worker process.\n- Your production code is raw psycopg2 (blocking); in FastAPI that means plain `def` endpoints or `to_thread`, with a `yield` dependency managing `getconn()`/`putconn()` like your `DatabaseManager` does with pooling.",
+  "related": [
+    "rest-api-design",
+    "python-typing",
+    "python-asyncio",
+    "server-sent-events",
+    "jwt-authentication",
+    "pytest-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "How does FastAPI decide a parameter is a query param?",
+      "back": "It's a simple type (int, str, bool, Enum, Literal...) not present in the path template and not a Pydantic model/dependency."
+    },
+    {
+      "front": "Where do `def` endpoints run vs `async def`?",
+      "back": "`def`: in a threadpool. `async def`: directly on the event loop (must not block)."
+    },
+    {
+      "front": "How do you clean up after a dependency?",
+      "back": "Make it a generator: `yield` the resource, put teardown in `finally` - runs after the endpoint completes."
+    },
+    {
+      "front": "Pydantic v2 replacements for `.dict()` and `@validator`?",
+      "back": "`model_dump()` and `@field_validator` (plus `@model_validator`)."
+    },
+    {
+      "front": "How do you swap a dependency in tests?",
+      "back": "`app.dependency_overrides[get_conn] = fake_get_conn`."
+    },
+    {
+      "front": "What does `response_model` do?",
+      "back": "Validates/serialises the return value through that model, filtering extra fields, and documents the response in OpenAPI."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "What does FastAPI return when a request body fails Pydantic validation?",
+      "options": [
+        "500",
+        "400 with plain text",
+        "422 with a JSON list of field errors",
+        "200 with nulls"
+      ],
+      "answer_index": 2,
+      "explanation": "FastAPI's RequestValidationError handler returns 422 with detailed error locations and messages."
+    },
+    {
+      "question": "Your endpoint uses psycopg2 (blocking). Which definition is safest?",
+      "options": [
+        "`def endpoint(...)`",
+        "`async def endpoint(...)` calling psycopg2 directly",
+        "`async def` with `time.sleep` between queries",
+        "Wrapping in `asyncio.run()` inside the endpoint"
+      ],
+      "answer_index": 0,
+      "explanation": "Plain def endpoints run in a threadpool so blocking DB calls don't stall the event loop."
+    },
+    {
+      "question": "Which is the recommended place to create a shared httpx.AsyncClient?",
+      "options": [
+        "Inside each request handler",
+        "At module import as a global with no cleanup",
+        "In a BackgroundTask",
+        "In the app's lifespan handler, closed on shutdown"
+      ],
+      "answer_index": 3,
+      "explanation": "Lifespan creates it once (connection pooling) and closes it cleanly."
+    },
+    {
+      "question": "Running `uvicorn main:app --workers 4` with jobs stored in a module-level dict causes:",
+      "options": [
+        "Shared state across workers automatically",
+        "Each worker process having its own separate dict, so job lookups randomly fail",
+        "A startup error",
+        "Faster lookups"
+      ],
+      "answer_index": 1,
+      "explanation": "Workers are separate processes; in-memory state isn't shared. Use a database or Redis."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain dependency injection in FastAPI with a practical example.",
+      "difficulty": "medium",
+      "answer_md": "FastAPI's `Depends` lets an endpoint declare what it needs; the framework builds it per request, resolving nested dependencies and caching each one within a request.\n\n```python\nfrom typing import Annotated\nfrom fastapi import Depends, Header, HTTPException\n\ndef get_conn():\n    conn = pool.getconn()\n    try:\n        yield conn\n    finally:\n        pool.putconn(conn)\n\ndef current_org(x_api_key: Annotated[str, Header()], conn=Depends(get_conn)) -> int:\n    org = lookup_org_by_key(conn, x_api_key)\n    if org is None:\n        raise HTTPException(401, \"invalid key\")\n    return org\n\nOrg = Annotated[int, Depends(current_org)]\nConn = Annotated[object, Depends(get_conn)]\n\n@app.get(\"/uploads\")\ndef list_uploads(org_id: Org, conn: Conn):\n    ...  # same pooled conn as used by current_org (cached per request)\n```\nBenefits: shared concerns (DB sessions, auth, pagination params, settings) are declared once; teardown via `yield` is guaranteed; endpoints stay thin; and tests swap implementations with `app.dependency_overrides[get_conn] = lambda: fake_conn` - no monkeypatching."
+    },
+    {
+      "question": "When should a FastAPI endpoint be async def vs def?",
+      "difficulty": "medium",
+      "answer_md": "Use **`async def`** when everything slow inside it is awaitable - httpx.AsyncClient, asyncpg/psycopg 3 async, aioboto3, `asyncio.sleep`. Many concurrent requests can then share one thread efficiently.\n\nUse **`def`** when you call blocking libraries - psycopg2, `requests`, boto3, file I/O, pandas. FastAPI runs sync endpoints in a threadpool (AnyIO's default limit is 40 threads), so the event loop stays free.\n\nThe dangerous combination is `async def` + blocking call: it runs on the loop thread, so a 2-second psycopg2 query blocks *every* other request for 2 seconds. If an async endpoint needs one blocking call, wrap it: `await asyncio.to_thread(fn, ...)`.\n\nCPU-heavy work (big pandas transforms, image processing) is a problem in both: threads contend for the GIL. Offload to a process pool or a separate worker service.\n\nQuick rule: if unsure, use `def` - it's slower at extreme concurrency but never freezes the server."
+    },
+    {
+      "question": "How would you structure a production FastAPI project?",
+      "difficulty": "hard",
+      "answer_md": "```text\napp/\n  main.py          # create_app(): FastAPI(lifespan=...), include routers, middleware, handlers\n  config.py        # Settings(BaseSettings) from env vars\n  deps.py          # get_conn, get_current_user, pagination params\n  routers/         # one APIRouter per domain: uploads.py, orders.py\n  schemas/         # Pydantic in/out models\n  services/        # business logic (plain functions/classes, no FastAPI imports)\n  repositories/    # SQL / data access\n  errors.py        # domain exceptions + exception handlers\ntests/             # TestClient + dependency_overrides, unit tests for services\n```\nKey decisions:\n- **Thin routers**: parse/validate, call a service, map result to an output model. Services are testable without HTTP.\n- **Lifespan** creates the DB pool and HTTP clients; `yield` dependencies borrow per request.\n- **Config** via `pydantic-settings`; secrets from env/secret manager.\n- **Errors**: domain exceptions mapped centrally to Problem-Details responses; unexpected errors logged with a request ID.\n- **Middleware**: CORS, request-ID, timing/logging.\n- **Async policy**: decide per router whether you use async drivers; don't mix blocking calls into async endpoints.\n- **Long jobs** go to a queue/worker, with status stored in the DB, not in memory.\n- Deployment: Docker image, Uvicorn workers behind a load balancer, health endpoint, CI running tests and type checks."
+    }
+  ]
+}

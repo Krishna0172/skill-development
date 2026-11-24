@@ -1,0 +1,153 @@
+{
+  "slug": "ai-hybrid-search",
+  "title": "Hybrid search: full-text + vectors + reranking",
+  "skill": "rag",
+  "extra_skills": [
+    "postgresql",
+    "query-optimization"
+  ],
+  "difficulty": "advanced",
+  "tags": [
+    "hybrid-search",
+    "bm25",
+    "full-text-search",
+    "tsvector",
+    "reciprocal-rank-fusion",
+    "reranking"
+  ],
+  "summary": "Hybrid search runs a keyword search (BM25 or PostgreSQL full-text) and a vector search in parallel and merges the ranked lists, typically with reciprocal rank fusion (RRF), then optionally reranks the merged candidates with a cross-encoder. It combines exact-term precision (SKUs, error codes, names) with semantic recall (paraphrases), and it all fits in one PostgreSQL query.",
+  "why_md": "- Pure vector search misses exact identifiers; pure keyword search misses paraphrases - real queries contain both.\n- Hybrid + rerank is a common, robust default for production RAG retrieval.\n- PostgreSQL gives you both halves (tsvector + pgvector) with SQL you already know.\n- Interviews: 'why hybrid?', 'how does RRF work?', 'why not just add the scores?'",
+  "details_md": "### Keyword side: BM25 and Postgres full-text\n**BM25** scores documents by term frequency (with saturation), inverse document frequency (rare terms count more) and document-length normalisation. Dedicated engines (Elasticsearch/OpenSearch, Tantivy-based tools, some Postgres extensions) implement it.\n**PostgreSQL full-text search** is built in: `to_tsvector('english', content)` produces stemmed lexemes, `websearch_to_tsquery` parses user-style queries, `@@` matches, and `ts_rank` / `ts_rank_cd` rank by term frequency and proximity. It's not true BM25 (no corpus-level IDF), but it is good enough for many cases and indexed with GIN on a generated `tsvector` column. Note the `english` configuration stems words and drops stop words; codes like 'B08XYZ' may need the `simple` configuration or an exact-match path.\n\n### Vector side\nEmbedding similarity via pgvector, catching synonyms and paraphrases ('send back' vs 'return').\n\n### Merging: reciprocal rank fusion\nScores from the two systems are on incomparable scales (ts_rank vs cosine), so adding them needs fragile normalisation. **RRF** uses only ranks: `score(d) = sum over lists of 1 / (k + rank_d)`, with k commonly 60. A document ranked well by both lists rises to the top; one strong signal still counts. No tuning of score scales is needed; you can weight lists (`w / (k + rank)`) if one is consistently better. Alternative: **weighted score fusion** after min-max normalising each list, which needs tuning per corpus.\n\n### Rerankers\nAfter fusion, take the top 30-50 and rerank with a **cross-encoder** (query and document read together by one model) or a hosted rerank API. It's slower per pair but much more accurate than either first-stage score, and fixes ordering mistakes from fusion. Keep the top 3-8 for the prompt.\n\n### When to use what\n- Exact codes, SKUs, order numbers, names: keyword (or a direct structured lookup).\n- Natural-language questions: vector.\n- Mixed ('return policy for B08XYZ headphones'): hybrid.\nEvaluate the combinations on your golden set (recall@k, MRR) - hybrid usually helps, but measure.\n",
+  "code_md": "```sql\n-- Full-text column + GIN index next to the embedding\nALTER TABLE doc_chunks\n  ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;\nCREATE INDEX ON doc_chunks USING gin (tsv);\n\n-- Hybrid search with RRF in one query (k = 60), scoped to one org\nWITH vec AS (\n  SELECT id, row_number() OVER (ORDER BY embedding <=> %(qvec)s::vector) AS rnk\n  FROM doc_chunks\n  WHERE org_id = %(org_id)s\n  ORDER BY embedding <=> %(qvec)s::vector\n  LIMIT 40\n),\nkw AS (\n  SELECT id, row_number() OVER (ORDER BY ts_rank_cd(tsv, q) DESC) AS rnk\n  FROM doc_chunks, websearch_to_tsquery('english', %(qtext)s) AS q\n  WHERE org_id = %(org_id)s AND tsv @@ q\n  ORDER BY ts_rank_cd(tsv, q) DESC\n  LIMIT 40\n)\nSELECT d.id, d.content,\n       COALESCE(1.0 / (60 + vec.rnk), 0) + COALESCE(1.0 / (60 + kw.rnk), 0) AS rrf\nFROM vec\nFULL OUTER JOIN kw USING (id)\nJOIN doc_chunks d USING (id)\nORDER BY rrf DESC\nLIMIT 20;\n```\n\n```python\n# RRF in Python (stdlib) + cross-encoder rerank of the fused candidates\nfrom collections import defaultdict\n\ndef rrf(ranked_lists: list[list[int]], k: int = 60, weights=None) -> list[tuple[int, float]]:\n    weights = weights or [1.0] * len(ranked_lists)\n    scores = defaultdict(float)\n    for w, ranking in zip(weights, ranked_lists):\n        for rank, doc_id in enumerate(ranking, start=1):\n            scores[doc_id] += w / (k + rank)\n    return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))\n\nfused = rrf([vector_ids, keyword_ids])[:30]\ntexts = fetch_texts([doc_id for doc_id, _ in fused])\nscores = reranker.predict([(query, texts[d]) for d, _ in fused])      # CrossEncoder\ntop = [d for (d, _), s in sorted(zip(fused, scores), key=lambda x: -x[1])][:5]\n```",
+  "use_cases_md": "- Seller support: 'return policy for B08XYZ123 headphones' - ASIN via keyword, intent via vectors.\n- Searching job-failure runbooks by exact error code plus description.\n- Catalogue search mixing brand names and descriptive phrases.\n- Retrieving table docs for text-to-SQL where column names must match exactly.",
+  "mistakes_md": "- **Adding raw ts_rank and cosine scores** - incomparable scales; one list dominates.\n- **`english` config on codes** - stemming/tokenising mangles SKUs; use `simple` or exact match.\n- **Forgetting the org filter in one branch** of the hybrid query - tenant leak.\n- **Computing `to_tsvector` at query time without an index** - full scans.\n- **Inner join of the two lists** - drops documents found by only one method; use FULL OUTER JOIN.\n- **Reranking thousands of candidates** - latency explodes.",
+  "best_practices_md": "- Generated `tsvector` column + GIN index; pgvector index on embeddings.\n- Same tenant/metadata filters in both branches.\n- Fuse with RRF (k ~ 60); weight only after evaluation.\n- Retrieve ~20-50 per branch, rerank top ~30, keep 3-8.\n- Exact-match path for IDs.\n- Evaluate vector-only vs keyword-only vs hybrid vs hybrid+rerank on the golden set.",
+  "my_context_md": "Your SQL style (CTEs, window functions, COALESCE, FULL joins) is exactly what a Postgres hybrid query is made of - the RRF query above is a CTE pair plus `row_number()` and `COALESCE`. `ECSAmazonReviewRatingPostgres/UpdateNgrams.py` already does keyword-style n-gram analysis on reviews; Postgres full-text plus embeddings would turn that into hybrid review search.",
+  "revision_notes_md": "- Hybrid = keyword (BM25/FTS) + vector, fused, optionally reranked.\n- Postgres FTS: to_tsvector, websearch_to_tsquery, @@, ts_rank_cd, GIN; not true BM25.\n- 'english' stems; use 'simple'/exact match for codes.\n- RRF: sum 1/(k + rank), k ~ 60; rank-based, no score normalisation.\n- FULL OUTER JOIN + COALESCE to keep single-list hits.\n- Cross-encoder rerank top ~30 -> keep 3-8.\n- Same org filter in every branch.\n- Measure with recall@k/MRR.",
+  "exercises_md": "1. Add a generated `tsvector` column and GIN index to your chunks table; compare `EXPLAIN ANALYZE` with and without the index.\n2. Implement the RRF SQL query and the Python `rrf` function; verify they produce the same ordering on 10 queries.\n3. Build a golden set with 10 ID-heavy and 10 paraphrase queries; compare vector-only, keyword-only and hybrid recall@5.\n4. Add a cross-encoder reranker on the fused top 30 and measure MRR and latency.",
+  "related": [
+    "ai-semantic-search",
+    "ai-vector-databases",
+    "ai-retrieval-pipelines",
+    "ai-rag-evaluation",
+    "postgres-indexes",
+    "sql-window-functions"
+  ],
+  "flashcards": [
+    {
+      "front": "RRF formula?",
+      "back": "score(d) = sum over result lists of 1 / (k + rank of d), with k commonly 60."
+    },
+    {
+      "front": "Why fuse by rank rather than adding scores?",
+      "back": "Keyword and vector scores are on incomparable scales; ranks need no normalisation."
+    },
+    {
+      "front": "Postgres full-text building blocks?",
+      "back": "to_tsvector, websearch_to_tsquery/plainto_tsquery, @@, ts_rank/ts_rank_cd, GIN index on a tsvector column."
+    },
+    {
+      "front": "Why rerank after fusion?",
+      "back": "A cross-encoder reads query and chunk together and orders the candidates far more accurately than either first-stage score."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Why is reciprocal rank fusion popular for hybrid search?",
+      "options": [
+        "It uses only ranks, so scores from different systems don't need normalising",
+        "It requires training a model",
+        "It guarantees exact nearest neighbours",
+        "It removes the need for indexes"
+      ],
+      "answer_index": 0,
+      "explanation": "RRF only needs each list's ordering."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In the SQL hybrid query, why FULL OUTER JOIN the vector and keyword CTEs?",
+      "options": [
+        "It's faster than an inner join",
+        "Postgres requires it for CTEs",
+        "To remove duplicates",
+        "To keep documents found by only one method, scoring the missing side as 0"
+      ],
+      "answer_index": 3,
+      "explanation": "An inner join would drop single-list hits; COALESCE gives them partial RRF score."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In PostgreSQL, the index type typically used for a tsvector column is ____.",
+      "answers": [
+        "gin",
+        "gin index"
+      ],
+      "explanation": "GIN (GiST also possible, GIN is usual)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The constant commonly used for k in reciprocal rank fusion is ____.",
+      "answers": [
+        "60",
+        "sixty"
+      ],
+      "explanation": "k = 60 from the original RRF paper."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (reciprocal rank fusion)",
+      "code": "from collections import defaultdict\n\ndef rrf(lists, k=60):\n    scores = defaultdict(float)\n    for ranking in lists:\n        for rank, doc in enumerate(ranking, start=1):\n            scores[doc] += 1 / (k + rank)\n    return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))\n\nvector = [\"refunds\", \"returns\", \"warranty\"]\nkeyword = [\"sku-b08\", \"returns\", \"refunds\"]\nfor doc, s in rrf([vector, keyword]):\n    print(doc, round(s * 1000, 2))\nprint(rrf([vector, keyword], k=0)[0][0])",
+      "answers": [
+        "refunds 32.27\nreturns 32.26\nsku-b08 16.39\nwarranty 15.87\nrefunds"
+      ],
+      "explanation": "refunds: 1/61 + 1/63 = 32.27e-3; returns: 2/62 = 32.26e-3 - almost tied, refunds edges ahead. sku-b08 1/61 = 16.39, warranty 1/63 = 15.87. With k=0 the top rank dominates: refunds 1 + 1/3 = 1.333 and sku-b08 1.0 vs returns 0.5 + 0.5 = 1.0, so refunds still wins."
+    },
+    {
+      "type": "debug",
+      "prompt": "This hybrid search misses SKU queries, and a reviewer flagged the keyword branch as unsafe for multi-tenancy. What's wrong and how do you fix it?",
+      "code": "WITH vec AS (\n  SELECT id, row_number() OVER (ORDER BY embedding <=> %(qvec)s::vector) AS rnk\n  FROM doc_chunks WHERE org_id = %(org_id)s\n  ORDER BY embedding <=> %(qvec)s::vector LIMIT 40\n), kw AS (\n  SELECT id, row_number() OVER (ORDER BY ts_rank(to_tsvector('english', content), q) DESC) AS rnk\n  FROM doc_chunks, plainto_tsquery('english', %(qtext)s) q\n  WHERE to_tsvector('english', content) @@ q\n  LIMIT 40\n)\nSELECT id, 1.0/(60+vec.rnk) + 1.0/(60+kw.rnk) AS score\nFROM vec JOIN kw USING (id) ORDER BY score DESC;",
+      "answer": "- `kw` branch has no `org_id` filter -> it ranks every tenant's chunks (masked only by the inner join; switching to the correct FULL OUTER JOIN would leak them), and other tenants' matches use up the 40 slots.\n- Inner JOIN drops documents found by only one branch, so a SKU found only by keyword search disappears; also no COALESCE for missing ranks.\n- `kw` has no ORDER BY before LIMIT, so it keeps an arbitrary 40 matches.\n- `to_tsvector` computed per row with no index; and 'english' config can mangle codes.\n\n```sql\nkw AS (\n  SELECT id, row_number() OVER (ORDER BY ts_rank_cd(tsv, q) DESC) AS rnk\n  FROM doc_chunks, websearch_to_tsquery('simple', %(qtext)s) q\n  WHERE org_id = %(org_id)s AND tsv @@ q\n  ORDER BY ts_rank_cd(tsv, q) DESC LIMIT 40\n)\nSELECT id, COALESCE(1.0/(60+vec.rnk),0) + COALESCE(1.0/(60+kw.rnk),0) AS score\nFROM vec FULL OUTER JOIN kw USING (id) ORDER BY score DESC LIMIT 20;\n```\n(with `tsv` a generated column with a GIN index).",
+      "rubric": [
+        "Missing org_id filter in the keyword branch",
+        "Use FULL OUTER JOIN with COALESCE",
+        "ORDER BY before LIMIT in kw branch",
+        "Indexed tsvector column; config suitable for codes"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior why we use hybrid search plus a reranker instead of only vector search.",
+      "answer": "Vector search captures meaning - 'send back' matches 'returns' - but blurs exact tokens, so SKUs, order numbers, error codes and rare brand names are often missed. Keyword search (BM25 or Postgres full-text) nails those exact terms but misses paraphrases. Running both and fusing the ranked lists with RRF gives a candidate set that covers both kinds of query without fiddly score normalisation. First-stage rankings are still crude, so a cross-encoder reranker reads the query together with each of the top ~30 candidates and reorders them precisely; we keep only the best few for the LLM prompt. We confirm the benefit with recall@k/MRR on a golden set.",
+      "rubric": [
+        "Vector: semantics, weak on exact terms",
+        "Keyword: exact terms, weak on paraphrase",
+        "RRF fuses by rank",
+        "Reranker improves ordering of a small candidate set; verify with metrics"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How does PostgreSQL full-text search differ from BM25, and does it matter?",
+      "answer": "Postgres FTS ranks with ts_rank/ts_rank_cd using term frequency and (for _cd) proximity within the document, optionally normalised by length, but it doesn't use corpus-wide inverse document frequency or BM25's term-frequency saturation. So common terms aren't down-weighted the way BM25 does. In hybrid search it often matters less because RRF uses only ranks and a reranker reorders later; if keyword quality is critical, use a BM25 implementation (extension or search engine) and compare on a golden set.",
+      "rubric": [
+        "ts_rank uses TF/proximity, no corpus IDF/saturation",
+        "Impact reduced by rank fusion + reranking",
+        "Use true BM25 if evaluation shows need"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you implement hybrid search in PostgreSQL for a RAG system?",
+      "difficulty": "hard",
+      "answer_md": "Schema: `doc_chunks` with `content`, `org_id`, metadata, `embedding vector(d)` (HNSW, cosine opclass) and a generated `tsv tsvector` column (GIN). Query:\n1. CTE `vec`: top 40 by `embedding <=> $q` with `row_number()` as rank, filtered by org.\n2. CTE `kw`: top 40 by `ts_rank_cd(tsv, websearch_to_tsquery(...))` among `tsv @@ query`, same filters.\n3. `FULL OUTER JOIN` on id; RRF score `COALESCE(1/(60+vec.rnk),0) + COALESCE(1/(60+kw.rnk),0)`; order and take 20-30.\n4. In Python, rerank the fused candidates with a cross-encoder, keep top 5 for the prompt.\n\nDetails: same tenant filter in both branches (or RLS); `simple` config or an exact-match branch for SKUs/order ids; tune per-branch limits and k on a golden set by recall@k and MRR; check both indexes are used with `EXPLAIN ANALYZE`."
+    },
+    {
+      "question": "Explain reciprocal rank fusion. Why k = 60?",
+      "difficulty": "medium",
+      "answer_md": "RRF merges ranked lists by giving each document `sum 1/(k + rank)` across lists. Only positions matter, so you can combine BM25 scores, cosine similarities, or any other ranker without normalising scales. Documents that appear high in several lists accumulate the most score; a document strong in one list still contributes.\n\n`k` damps the advantage of top positions. With k = 0, rank 1 gets 1.0 and rank 2 gets 0.5 - the top item of any single list dominates. With k = 60, rank 1 = 1/61 and rank 2 = 1/62 - nearly equal - so agreement between lists matters more than a single first place. 60 is the value from the original RRF paper that worked well across tasks; it's a sensible default, and you can tune it (and per-list weights) against a golden set."
+    }
+  ],
+  "category": "AI"
+}

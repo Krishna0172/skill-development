@@ -1,0 +1,65 @@
+{
+  "slug": "sql-group-by",
+  "why_md": "- Reporting, reconciliation and dashboards are mostly GROUP BY queries; correct aggregation is a daily backend skill.\n- Pushing aggregation into PostgreSQL instead of pulling rows into pandas cuts memory and network time for large marketplace reports.\n- FILTER, HAVING and GROUPING SETS let one query replace several round-trips.\n- Interviews routinely ask WHERE vs HAVING, COUNT(*) vs COUNT(col), and 'top N per group'.",
+  "revision_notes_md": "- Logical order: FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT.\n- WHERE filters rows before grouping; HAVING filters groups after aggregation.\n- `COUNT(*)` counts rows; `COUNT(col)` skips NULLs; `COUNT(DISTINCT col)` de-duplicates.\n- Aggregates over zero rows return NULL (except COUNT → 0); wrap with COALESCE.\n- `COUNT(*) FILTER (WHERE status = 'delivered')` = conditional aggregation (PostgreSQL).\n- Every non-aggregated SELECT column must be in GROUP BY (or functionally dependent on the PK).\n- GROUPING SETS / ROLLUP / CUBE produce subtotals in one pass.",
+  "exercises_md": "1. In one query, produce per-org, per-day counts of total, delivered and cancelled orders plus revenue, using FILTER. Add a grand total row with ROLLUP.\n2. Find an existing pandas `groupby` step in a report pipeline and rewrite it as a SQL GROUP BY; compare runtime and memory on a realistic file.",
+  "my_context_md": "`ECSMarketplaceDataUpload` processes 150+ marketplace reports with pandas `groupby`/`merge`/`apply`. Where a processor aggregates data that is already in PostgreSQL, moving that step into a GROUP BY (with FILTER for per-status counts) would reduce what you load into pandas.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To filter groups by an aggregate such as `SUM(total) > 1000`, use the ____ clause.",
+      "answers": [
+        "having",
+        "having clause"
+      ],
+      "explanation": "WHERE runs before grouping and cannot reference aggregates; HAVING runs after."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In PostgreSQL, `COUNT(*) ____ (WHERE status = 'delivered')` counts only delivered orders within each group.",
+      "answers": [
+        "filter"
+      ],
+      "explanation": "The FILTER clause applies a condition to a single aggregate."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE o(org INT, status TEXT, total INT);\nINSERT INTO o VALUES (1,'paid',10),(1,NULL,20),(2,'paid',5),(2,'paid',NULL);\n''')\nfor r in db.execute('''SELECT org, COUNT(*), COUNT(status), SUM(total)\nFROM o GROUP BY org ORDER BY org'''):\n    print(r)",
+      "answers": [
+        "(1, 2, 1, 30)\n(2, 2, 2, 5)"
+      ],
+      "explanation": "COUNT(*) counts rows; COUNT(status) skips NULL statuses; SUM ignores NULL totals."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE o(org INT, total INT);\nINSERT INTO o VALUES (1,100),(1,300),(2,50),(3,700);\n''')\nrows = db.execute('''SELECT org, SUM(total) AS s FROM o\nWHERE total > 60 GROUP BY org HAVING SUM(total) > 200\nORDER BY org''').fetchall()\nprint(rows)",
+      "answers": [
+        "[(1, 400), (3, 700)]"
+      ],
+      "explanation": "WHERE drops the 50 row (org 2 disappears). HAVING keeps groups whose sum exceeds 200: org 1 (400) and org 3 (700)."
+    },
+    {
+      "type": "debug",
+      "prompt": "This query errors in PostgreSQL. What's wrong and how do you fix it?",
+      "code": "SELECT orgid, marketplace, SUM(total) AS revenue\nFROM orders\nWHERE SUM(total) > 1000\nGROUP BY orgid;",
+      "answer": "Two bugs:\n1. Aggregates are not allowed in WHERE (it runs before grouping) — use HAVING.\n2. `marketplace` is selected but not grouped or aggregated.\n\n```sql\nSELECT orgid, marketplace, SUM(total) AS revenue\nFROM orders\nGROUP BY orgid, marketplace\nHAVING SUM(total) > 1000;\n```",
+      "rubric": [
+        "Aggregate in WHERE is invalid; move it to HAVING",
+        "Non-aggregated column must appear in GROUP BY",
+        "Explains logical evaluation order"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between COUNT(*), COUNT(col) and COUNT(DISTINCT col), and when each gives a misleading answer.",
+      "answer": "- `COUNT(*)` counts rows, including rows where every column is NULL. After a LEFT JOIN it counts the NULL-extended row, so customers with no orders show 1.\n- `COUNT(col)` counts non-NULL values of `col`. Use it after a LEFT JOIN (`COUNT(o.id)`) to get 0 for no matches. It undercounts if `col` is legitimately NULL.\n- `COUNT(DISTINCT col)` counts unique non-NULL values — useful to fix fan-out (`COUNT(DISTINCT o.id)`), but it's more expensive (sort/hash) and hides the real duplication bug.\n\nExample: `SELECT c.id, COUNT(*), COUNT(o.id) FROM customers c LEFT JOIN orders o ON o.cid = c.id GROUP BY c.id` → a customer with no orders gets `1, 0`.",
+      "rubric": [
+        "COUNT(*) counts rows incl. NULL-extended rows",
+        "COUNT(col) skips NULLs (0 for no matches after LEFT JOIN)",
+        "COUNT(DISTINCT) de-duplicates but costs more / can mask fan-out"
+      ]
+    }
+  ]
+}

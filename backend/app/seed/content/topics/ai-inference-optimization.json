@@ -1,0 +1,197 @@
+{
+  "slug": "ai-inference-optimization",
+  "title": "LLM inference optimization: batching, KV cache, quantization, speculative decoding",
+  "skill": "ai-production",
+  "extra_skills": [
+    "llm-applications",
+    "deep-learning",
+    "python-performance"
+  ],
+  "category": "AI",
+  "difficulty": "advanced",
+  "tags": [
+    "inference",
+    "kv-cache",
+    "quantization",
+    "batching",
+    "speculative-decoding",
+    "latency"
+  ],
+  "summary": "Serving an LLM is limited mostly by memory bandwidth and GPU memory, not raw compute. This topic explains prefill versus decode, the KV cache, continuous batching, quantization and speculative decoding, with the arithmetic to estimate memory and throughput.",
+  "why_md": "- Inference dominates the long-run cost of an LLM product; knowing where time and memory go lets you cut cost and latency without hurting quality.\n- Even if you only call hosted APIs, these concepts explain pricing (input vs output tokens), latency (time to first token vs tokens/second) and why prompt caching helps.\n- Self-hosting decisions (which GPU, which quantization, which server) require the memory arithmetic.\n- It is a frequent senior-level interview topic.",
+  "details_md": "### Two phases of generation\n- **Prefill**: process the whole prompt in parallel to build internal state. Compute-bound; determines **time to first token (TTFT)**; cost grows with prompt length.\n- **Decode**: generate output tokens **one at a time**, each needing a pass through the model. Mostly **memory-bandwidth-bound**: for each token the GPU must read all model weights (and the cache) from memory while doing little arithmetic. Determines **inter-token latency** and tokens/second.\nBecause decode is bandwidth-bound, anything that makes each weight read serve more tokens (batching, speculation) or shrinks what is read (quantization) speeds things up.\n\n### The KV cache\nIn attention, each new token needs the **keys and values** of all previous tokens. Recomputing them every step would be quadratic waste, so they are cached. Memory per token:\n`2 (K and V) x layers x kv_heads x head_dim x bytes_per_value`.\nIt grows linearly with sequence length and with the number of concurrent sequences, and often becomes the limiting resource (more than weights) at long contexts or high concurrency. Reducing it: **grouped-query / multi-query attention** (fewer KV heads, built into the model architecture), KV-cache quantization, shorter contexts, and sliding-window designs.\n**PagedAttention** (as in vLLM) stores the cache in fixed-size blocks like OS virtual memory, avoiding fragmentation and enabling sharing of identical prompt prefixes across requests. **Prefix/prompt caching** reuses the KV of a shared prefix (system prompt, documents), cutting TTFT and cost; hosted APIs expose this as discounted cached input tokens.\n\n### Batching\nServing requests one at a time wastes the GPU. **Batching** processes many sequences per forward pass so one read of the weights serves many tokens: throughput rises sharply while per-request latency rises modestly until compute or memory saturates.\n- **Static batching** waits for a full batch and for the slowest request to finish - poor utilisation.\n- **Continuous (in-flight) batching** adds and removes sequences at every decoding step, so finished requests free their slot immediately. This is the standard in modern servers (vLLM, TGI, TensorRT-LLM and others).\n- Trade-off: bigger batches = higher throughput and lower cost per token, but higher latency; tune against your latency SLO.\n\n### Quantization\nStore weights (and sometimes activations or KV cache) in fewer bits: 16-bit -> 8-bit -> 4-bit. Memory and bandwidth shrink roughly proportionally (a 7B model: about 14 GB in fp16, about 7 GB in int8, about 3.5 GB in 4-bit, plus overhead), so decode is faster and cheaper hardware suffices. Methods include post-training quantization such as GPTQ and AWQ, and simple round-to-nearest with per-group scales. The core idea: `q = round(x / scale)`, `x_hat = q * scale`; the **scale** is chosen per tensor, channel or group, and outliers hurt accuracy, which is why group-wise scales and outlier handling matter. Always evaluate quality on your own tasks: 8-bit is usually near-lossless, 4-bit usually small loss that depends on model and task.\n\n### Speculative decoding\nA small **draft model** quickly proposes several tokens; the large **target model** verifies them all in **one forward pass** and accepts the longest correct prefix (using a rejection-sampling rule that preserves the target model's output distribution). When the draft agrees often, you get multiple tokens per expensive pass: lower latency, identical output quality in distribution. Gains depend on acceptance rate and on the draft being much cheaper; variants use draft heads or n-gram lookup from the prompt.\n\n### Other levers\nFlashAttention-style fused kernels (less memory traffic), tensor parallelism across GPUs, shorter prompts, smaller or distilled models, limiting max output tokens, streaming responses for perceived latency, and routing easy requests to cheaper models.\n\n### Metrics to track\nTTFT, inter-token latency (or tokens/s per request), total throughput (tokens/s per GPU), p50/p95/p99 latency, GPU memory use, queue time, cost per 1k tokens, and quality on your eval set after every optimisation.",
+  "code_md": "KV-cache memory arithmetic:\n```python\ndef kv_bytes_per_token(layers, kv_heads, head_dim, bytes_per=2):\n    return 2 * layers * kv_heads * head_dim * bytes_per      # 2 = keys + values\n\n# A 7B-class model with 32 layers, 32 KV heads, head_dim 128, fp16:\nper_tok = kv_bytes_per_token(32, 32, 128, 2)\nseq = 4096\nconcurrent = 16\ntotal_gb = per_tok * seq * concurrent / 1e9\nprint(per_tok, round(total_gb, 1))     # 524288 bytes/token, ~34.4 GB for 16 x 4k sequences\n```\nWeight memory by precision:\n```python\nparams = 7e9\nfor name, bytes_per in [(\"fp16\", 2), (\"int8\", 1), (\"int4\", 0.5)]:\n    print(name, round(params * bytes_per / 1e9, 1), \"GB\")\n```\nSymmetric int8 quantization with a scale (illustrative):\n```python\ndef quantize(xs, bits=8):\n    qmax = 2 ** (bits - 1) - 1\n    scale = max(abs(x) for x in xs) / qmax\n    return [round(x / scale) for x in xs], scale\n\ndef dequantize(qs, scale):\n    return [q * scale for q in qs]\n\nw = [0.12, -0.5, 0.33, 0.9, -0.07]\nq, s = quantize(w)\nprint(q, [round(v, 3) for v in dequantize(q, s)])\n```\nSpeculative decoding in pseudo-code:\n```python\n# draft proposes k tokens; target scores them in ONE forward pass\n# proposal = draft.generate(prefix, k=4)\n# probs = target.forward(prefix + proposal)      # one pass for all positions\n# accept tokens while target agrees (rejection sampling keeps target distribution)\n# on first rejection: sample a corrected token from the target and continue\n```\nBack-of-envelope decode speed (bandwidth-bound):\n```python\n# tokens/s per sequence ~ memory_bandwidth / bytes_read_per_token\nbandwidth = 1.0e12            # 1 TB/s (illustrative)\nweights_bytes = 14e9          # 7B in fp16\nprint(round(bandwidth / weights_bytes))   # ~71 tok/s upper bound at batch size 1\n```",
+  "use_cases_md": "- **Chat product latency**: stream tokens, cache the shared system prompt/schema prefix, cap output length.\n- **Cost reduction**: quantize a self-hosted model to fit a cheaper GPU, or route simple requests to a small model.\n- **Throughput for batch jobs**: classify or summarise thousands of reviews with continuous batching.\n- **Capacity planning**: estimate concurrent users per GPU from KV-cache memory.\n- **Text-to-SQL**: a long, stable schema prompt is an ideal prefix-cache candidate.",
+  "mistakes_md": "- **Assuming inference is compute-bound**: decode is bandwidth-bound; adding FLOPs does not help. Fix: batch, quantize, speculate.\n- **Ignoring KV-cache memory** at high concurrency and long context: out-of-memory. Fix: compute it, use paged attention and shorter contexts.\n- **Static batching** with variable-length outputs. Fix: continuous batching.\n- **Quantizing without evals**: silent quality loss. Fix: compare on your golden set.\n- **Optimising average latency only**: tail latency hurts users. Fix: track p95/p99 and TTFT.\n- **Prefix changes breaking caching**: dynamic text early in the prompt. Fix: put stable content first, variable content last.",
+  "best_practices_md": "- Measure first: TTFT, inter-token latency, throughput, p95, memory, cost.\n- Put stable content (system prompt, schema) at the start of the prompt to benefit from prefix caching.\n- Use a serving engine with continuous batching and paged KV cache rather than hand-rolling.\n- Quantize in steps (8-bit, then 4-bit) and re-run your evals each time.\n- Stream responses and cap max output tokens.\n- Route by difficulty: small model first, escalate when needed.\n- Do the memory arithmetic before choosing hardware.",
+  "my_context_md": "Your LLM chat backend (GetLlmData / ECSLlmQueryProcess) tracks per-org USD cost, which is the metric these optimisations improve; since your repo makes no direct LLM API calls, the practical levers for you are likely prompt-side: keep the long, stable text-to-SQL schema/instructions at the start of the prompt so provider prompt caching can apply, cap output length, and stream. If you later self-host, the KV-cache and quantization arithmetic here is how you would size the GPU.",
+  "revision_notes_md": "- Prefill (parallel, compute-bound, sets TTFT) vs decode (sequential, bandwidth-bound, sets tokens/s).\n- KV cache bytes/token = 2 x layers x kv_heads x head_dim x bytes; grows with length and concurrency.\n- GQA/MQA, KV quantization, PagedAttention and prefix caching reduce or reuse cache.\n- Continuous batching >> static batching; batch size trades latency for throughput.\n- Quantization: fewer bits for weights/KV; q = round(x/scale); fp16->int8->int4 halves memory each step; evaluate quality.\n- Speculative decoding: draft proposes k tokens, target verifies in one pass; same output distribution; speedup depends on acceptance rate.\n- Track TTFT, inter-token latency, throughput, p95, memory, cost.\n- Stable prefix first enables prompt caching.",
+  "exercises_md": "1. Compute KV-cache bytes per token and per 8k-token sequence for 32 layers/8 KV heads/128 head_dim (GQA) versus 32 KV heads, in fp16, and the saving.\n2. Run the quantize/dequantize snippet at 8 and 4 bits on 100 random weights and print the mean absolute error; add one large outlier and see the error change.\n3. Given a GPU with 80 GB, a 7B fp16 model and 4k-token sequences, estimate the maximum number of concurrent sequences from KV memory.\n4. Reorder one of your long prompts so static text comes first and variable text last; explain why that helps prompt caching.",
+  "related": [
+    "ai-model-inference",
+    "ai-latency-cost-optimization",
+    "ai-serving-fastapi",
+    "ai-context-tokens-cost",
+    "ai-transformers"
+  ],
+  "flashcards": [
+    {
+      "front": "Prefill vs decode?",
+      "back": "Prefill processes the prompt in parallel (compute-bound, sets time to first token); decode generates one token at a time (memory-bandwidth-bound, sets tokens/s)."
+    },
+    {
+      "front": "What does the KV cache store and why?",
+      "back": "The attention keys and values of past tokens, so they are not recomputed each step; memory grows with sequence length and concurrency."
+    },
+    {
+      "front": "Static vs continuous batching?",
+      "back": "Static waits for a full batch and the slowest request; continuous adds/removes sequences each step for much better utilisation."
+    },
+    {
+      "front": "Why does quantization speed up decode?",
+      "back": "Fewer bytes per weight are read from memory per token, and the model needs less GPU memory."
+    },
+    {
+      "front": "How does speculative decoding work?",
+      "back": "A small draft model proposes tokens; the target verifies them in one pass and accepts the correct prefix, preserving the target's distribution."
+    },
+    {
+      "front": "Why put the stable prompt text first?",
+      "back": "Prefix/prompt caching reuses computation for identical leading tokens, cutting time to first token and cost."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Single-request token generation (decode) is mostly limited by:",
+      "options": [
+        "Network speed",
+        "Disk speed",
+        "Memory bandwidth reading the weights and cache",
+        "CPU clock"
+      ],
+      "answer_index": 2,
+      "explanation": "Each token requires reading all weights with little arithmetic per byte."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What happens to KV-cache memory when the number of concurrent sequences doubles (same length)?",
+      "options": [
+        "Roughly doubles",
+        "Unchanged",
+        "Halves",
+        "Becomes quadratic"
+      ],
+      "answer_index": 0,
+      "explanation": "The cache is per sequence, so it scales linearly with concurrency."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which statement about speculative decoding is true?",
+      "options": [
+        "It changes the target model's output distribution",
+        "It requires 4-bit weights",
+        "It only speeds up prefill",
+        "A draft model proposes tokens and the target verifies them in one pass"
+      ],
+      "answer_index": 3,
+      "explanation": "Verification with rejection sampling preserves the target distribution."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The metric measuring how long before the first output token appears is time to first ____.",
+      "answers": [
+        "token"
+      ],
+      "explanation": "Time to first token (TTFT)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Reusing the cached computation for an identical shared prompt start is called ____ caching.",
+      "answers": [
+        "prefix",
+        "prompt",
+        "prompt prefix"
+      ],
+      "explanation": "Prefix or prompt caching."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def kv_bytes_per_token(layers, kv_heads, head_dim, bytes_per=2):\n    return 2 * layers * kv_heads * head_dim * bytes_per\nmha = kv_bytes_per_token(32, 32, 128)\ngqa = kv_bytes_per_token(32, 8, 128)\nprint(mha, gqa, mha // gqa)\nprint(round(gqa * 8192 / 1e9, 2))",
+      "answers": [
+        "524288 131072 4\n1.07"
+      ],
+      "explanation": "Grouped-query attention with 8 KV heads uses a quarter of the cache of 32 heads."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def quantize(xs, bits=8):\n    qmax = 2 ** (bits - 1) - 1\n    scale = max(abs(x) for x in xs) / qmax\n    return [round(x / scale) for x in xs], scale\nw = [0.12, -0.5, 0.33, 0.9, -0.07]\nfor bits in (8, 4):\n    q, s = quantize(w, bits)\n    err = max(abs(a - b * s) for a, b in zip(w, q))\n    print(bits, q, round(err, 4))",
+      "answers": [
+        "8 [17, -71, 47, 127, -10] 0.0031\n4 [1, -4, 3, 7, -1] 0.0586"
+      ],
+      "explanation": "Lower bit-width gives coarser integer levels and a larger worst-case error."
+    },
+    {
+      "type": "debug",
+      "prompt": "A team estimates GPU memory for serving as 'model weights only' and then hits out-of-memory at 32 concurrent 8k-token chats. What did they forget?",
+      "code": "weights_gb = 7e9 * 2 / 1e9          # 14 GB\ngpu_gb = 40\nprint('fits' if weights_gb < gpu_gb else 'too big')   # prints fits",
+      "answer": "They ignored the KV cache (and activations/overhead). At about 0.5 MB per token (32 layers, 32 KV heads, head_dim 128, fp16) an 8k sequence needs about 4 GB, so 32 sequences need about 137 GB. Fix: budget memory as weights + KV cache x concurrency + overhead, and reduce it with GQA models, KV quantization, paged attention, shorter contexts or fewer concurrent sequences.",
+      "rubric": [
+        "Identifies missing KV cache",
+        "Does the per-token/sequence arithmetic",
+        "Offers mitigations (GQA, paged, quantization, limits)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain why LLM decoding is memory-bandwidth-bound and how batching helps.",
+      "answer": "Each generated token requires a forward pass that reads all the model weights (and KV cache) from GPU memory but performs relatively few arithmetic operations per byte read, so memory bandwidth limits speed. Batching processes many sequences in one pass, so a single read of the weights serves many tokens, increasing throughput and lowering cost per token, at the price of some extra per-request latency. Continuous batching keeps the GPU full as requests finish at different times.",
+      "rubric": [
+        "Weights read per token, low arithmetic intensity",
+        "Batching amortises weight reads",
+        "Throughput vs latency trade-off / continuous batching"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "You must cut cost and latency for a chat feature with a long fixed system prompt. List the levers you would try in order and how you would verify quality.",
+      "answer": "First measure TTFT, inter-token latency, tokens and cost. Then: move the stable system prompt/schema to the start to enable prefix caching, trim the prompt, cap output tokens, stream, route simple requests to a smaller model. If self-hosting: use a continuous-batching server with paged KV cache, quantize 8-bit then 4-bit, and consider speculative decoding. After each change re-run the golden-set eval and compare quality, latency percentiles and cost against the baseline.",
+      "rubric": [
+        "Prompt-side levers (prefix caching, trim, cap, stream, route)",
+        "Serving-side levers (batching, quantization, speculation)",
+        "Verifies quality with evals and tracks p95/cost"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which change most directly reduces KV-cache memory per token in the model architecture?",
+      "options": [
+        "More layers",
+        "Fewer KV heads (grouped-query attention)",
+        "Higher temperature",
+        "Longer prompts"
+      ],
+      "answer_index": 1,
+      "explanation": "GQA shares K/V across query heads, shrinking the cache."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain prefill vs decode and why it matters for latency.",
+      "difficulty": "medium",
+      "answer_md": "Prefill processes the entire prompt in parallel and is compute-bound; it determines time to first token and grows with prompt length. Decode produces one token per forward pass and is memory-bandwidth-bound; it determines tokens per second. So long prompts hurt TTFT, long outputs hurt total time, and optimisations differ: prompt caching and shorter prompts help prefill; batching, quantization and speculative decoding help decode."
+    },
+    {
+      "question": "How would you estimate how many concurrent users a GPU can serve?",
+      "difficulty": "hard",
+      "answer_md": "Memory budget = GPU memory minus model weights minus overhead; divide by KV-cache per sequence (2 x layers x kv_heads x head_dim x bytes x average context length) to get concurrent sequences. Then check compute and latency targets with a load test, since throughput and p95 latency depend on batch size and the serving engine. Optimise with GQA models, quantized weights/KV and paged attention."
+    },
+    {
+      "question": "What is the trade-off in quantization and how do you manage it?",
+      "difficulty": "medium",
+      "answer_md": "Fewer bits cut memory and bandwidth, speeding decode and lowering hardware cost, but add rounding error that can reduce quality, especially at 4-bit or with outlier weights. Manage with group-wise scales and methods like GPTQ/AWQ, step down gradually (fp16, 8-bit, 4-bit), and evaluate each level on your own golden set, including latency and cost, before adopting it."
+    }
+  ]
+}

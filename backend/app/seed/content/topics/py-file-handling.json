@@ -1,0 +1,154 @@
+{
+  "slug": "py-file-handling",
+  "title": "File handling for data pipelines",
+  "skill": "python",
+  "extra_skills": [
+    "etl-data-processing"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "pathlib",
+    "encoding",
+    "csv",
+    "zipfile",
+    "tempfile",
+    "bytesio",
+    "atomic-writes"
+  ],
+  "summary": "Practical file I/O for ingestion services: `pathlib` paths, text vs bytes and encodings (including the UTF-8 BOM that Excel adds), streaming large CSV/Excel instead of loading everything, the `csv` module's quirks, in-memory files with `io.BytesIO`, `tempfile` and `zipfile`, and atomic writes via temp file + `os.replace`.",
+  "why_md": "- Marketplace reports arrive as CSV/TSV/XLSX/ZIP with inconsistent encodings; a BOM or cp1252 byte silently breaks column matching.\n- Memory: a 2 GB report loaded at once kills a 1 GB ECS task; streaming/chunking keeps memory flat.\n- Partial files from crashed writers cause downstream jobs to read garbage — atomic writes prevent that.\n- `BytesIO` lets you parse S3 objects without touching disk (and keeps tests hermetic).",
+  "details_md": "### Text vs bytes\n`open(path, 'rb')` gives bytes; `'r'` decodes with an encoding. **Always pass `encoding=`** — the default is platform-dependent (cp1252 on many Windows setups unless UTF-8 mode is on). Excel-exported CSVs often start with a UTF-8 BOM (`\\ufeff`); decoding with `utf-8` keeps it as part of the first header (`'\\ufeffsku'`), so `row['sku']` fails. Use `encoding='utf-8-sig'`, which strips a BOM if present. `errors='replace'` or `'strict'` is a choice: strict for financial data (fail loudly), replace for free-text scraping.\n\n### pathlib\n`Path` objects compose with `/`, expose `.name`, `.stem`, `.suffix(es)`, `.parent`, and have `read_text`, `write_bytes`, `glob`, `mkdir(parents=True, exist_ok=True)`, `exists`, `unlink(missing_ok=True)`. They work everywhere `open()` and pandas accept paths.\n\n### The csv module\nOpen CSV files with `newline=''` so the csv module handles embedded newlines and `\\r\\n` itself. `csv.DictReader` yields dicts lazily — it streams. Use `delimiter='\\t'` for TSV reports. Values are always strings; convert explicitly.\n\n### Streaming large files\nIterate the file object (`for line in f`), use `csv.reader`, or `pd.read_csv(..., chunksize=50_000)` / `usecols=` / `dtype=` to bound memory. For XLSX, `openpyxl.load_workbook(path, read_only=True)` streams rows; `pd.read_excel` loads the whole sheet. Gzip: `gzip.open(path, 'rt', encoding=...)` streams too.\n\n### In-memory files\n`io.BytesIO(data)` / `io.StringIO(text)` are file-like objects. Parse an S3 body with `pd.read_csv(io.BytesIO(body))`, or wrap a binary stream for text with `io.TextIOWrapper(stream, encoding='utf-8-sig')`.\n\n### tempfile and zipfile\n`tempfile.TemporaryDirectory()` and `NamedTemporaryFile(delete=False)` give safe unique scratch paths (in ECS, `/tmp` is ephemeral). `zipfile.ZipFile(BytesIO(body))` lets you `namelist()` and `open(name)` members as streams without extracting.\n\n### Atomic writes\nWriting directly to the target leaves a truncated file if the process dies mid-write. Write to a temp file **in the same directory**, flush + `os.fsync`, then `os.replace(tmp, target)` — an atomic rename on the same filesystem (POSIX and Windows). Readers see either the old or the new file, never half. S3 PUTs are already atomic per object.",
+  "code_md": "```python\nimport csv, io, zipfile\nfrom pathlib import Path\n\n# Stream a BOM-prefixed TSV report row by row\ndef iter_rows(path: Path):\n    with path.open(\"r\", encoding=\"utf-8-sig\", newline=\"\") as f:\n        yield from csv.DictReader(f, delimiter=\"\\t\")\n\n# Read a CSV inside a zip downloaded from S3, without touching disk\ndef rows_from_zip(body: bytes):\n    with zipfile.ZipFile(io.BytesIO(body)) as zf:\n        name = next(n for n in zf.namelist() if n.endswith(\".csv\"))\n        with zf.open(name) as raw:                       # binary stream\n            text = io.TextIOWrapper(raw, encoding=\"utf-8-sig\", newline=\"\")\n            yield from csv.DictReader(text)\n\n# Chunked pandas processing keeps memory bounded\nimport pandas as pd\nfor chunk in pd.read_csv(\"orders.csv\", chunksize=50_000, usecols=[\"sku\", \"qty\"],\n                         dtype={\"sku\": \"string\", \"qty\": \"Int64\"}):\n    load(chunk)\n```\n\n```python\nimport os, tempfile\nfrom pathlib import Path\n\ndef atomic_write_text(target: Path, text: str, encoding=\"utf-8\") -> None:\n    \"\"\"Readers see the old file or the new file, never a partial one.\"\"\"\n    target.parent.mkdir(parents=True, exist_ok=True)\n    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f\".{target.name}.\")\n    try:\n        with os.fdopen(fd, \"w\", encoding=encoding, newline=\"\") as f:\n            f.write(text)\n            f.flush()\n            os.fsync(f.fileno())\n        os.replace(tmp, target)          # atomic on the same filesystem\n    except BaseException:\n        Path(tmp).unlink(missing_ok=True)\n        raise\n```",
+  "use_cases_md": "- Parsing Amazon/Flipkart settlement reports (TSV, BOM, cp1252 from some sellers) uploaded to S3.\n- Unzipping a bulk report from an API response in memory and streaming the CSV into `execute_values` batches.\n- Generating an export CSV into `io.StringIO`, then `put_object` to S3 — no disk needed.\n- Writing a local state/checkpoint file atomically so a restarted job never reads a half-written checkpoint.\n- Using `TemporaryDirectory()` for Selenium downloads that must be cleaned up.",
+  "mistakes_md": "- **No `encoding=`**: works on a Linux container, breaks on Windows dev box. Fix: always explicit.\n- **Ignoring the BOM**: first header becomes `'\\ufeffsku'`, KeyError later. Fix: `utf-8-sig`.\n- **Forgetting `newline=''` with csv**: blank lines between rows on Windows, broken quoted newlines. Fix: `newline=''`.\n- **`f.read()` / `readlines()` on huge files**: memory spike. Fix: iterate or chunk.\n- **Writing in place**: crash leaves a truncated file. Fix: temp file in same dir + `os.replace`.\n- **Temp file in a different filesystem** (e.g. `/tmp` → mounted volume): `os.replace` is no longer atomic or fails across devices. Fix: `dir=target.parent`.\n- **String path concatenation** (`dir + '/' + name`). Fix: `Path(dir) / name`.",
+  "best_practices_md": "- Use `pathlib.Path` everywhere; convert to str only for APIs that require it.\n- Always specify `encoding` (and `newline=''` for csv).\n- Default to `utf-8-sig` when reading files that may come from Excel.\n- Stream or chunk; specify `usecols` and `dtype` in pandas to cut memory.\n- Use context managers for every file/zip/tempdir.\n- Atomic write pattern for any file another process reads.\n- Prefer `BytesIO` over temp files when data fits in memory.",
+  "my_context_md": "`ECSMarketplaceDataUpload` routes 150+ marketplace reports through processors that use pandas `read_csv`/`read_excel` — exactly where BOMs, encodings, `usecols`/`dtype` and chunking matter. Check whether those processors pass `encoding=` explicitly and how they handle zipped or very large reports (whole-file loads vs `chunksize`). The `ECSAmazonBankStatementPostgres` and S3-based services (boto3 s3) are candidates for parsing objects straight from `io.BytesIO(body)` rather than writing to local disk first.",
+  "revision_notes_md": "- Always `encoding=`; Excel CSV → `utf-8-sig` strips the BOM.\n- csv files: `open(..., newline='')`; TSV → `delimiter='\\t'`.\n- Stream: iterate file / DictReader / `read_csv(chunksize=)`; set `usecols`, `dtype`.\n- `io.BytesIO(body)` for S3 objects; `TextIOWrapper` to decode a binary stream.\n- `zipfile.ZipFile(BytesIO(b)).open(name)` streams a member.\n- `TemporaryDirectory()` / `mkstemp(dir=...)` for scratch files.\n- Atomic write: temp in same dir → flush+fsync → `os.replace`.\n- `Path` API: `/`, `.stem`, `.suffix`, `.suffixes`, `.parent`, `mkdir(parents=True, exist_ok=True)`.",
+  "exercises_md": "1. Write `sniff_encoding(path)` that tries `utf-8-sig`, then `cp1252`, and returns which one decoded the first 64 KB; test it with a file you save from Excel.\n2. Process a 1M-row CSV with `pd.read_csv(chunksize=...)`, inserting each chunk via `execute_values`; measure peak memory with `tracemalloc` vs a full load.\n3. Implement `atomic_write_bytes` and write a test that simulates a crash (raise inside the `with`) and asserts the old file is unchanged and no temp file remains.\n4. Download a zipped report from S3 into memory and stream its CSV member row by row without extracting to disk.",
+  "related": [
+    "pandas-cleaning-performance",
+    "python-context-managers",
+    "python-generators-iterators",
+    "s3-presigned-urls",
+    "py-performance"
+  ],
+  "flashcards": [
+    {
+      "front": "What encoding handles a UTF-8 BOM from Excel CSVs?",
+      "back": "`utf-8-sig` — it strips a leading BOM if present and otherwise behaves like utf-8."
+    },
+    {
+      "front": "Why open CSV files with `newline=''`?",
+      "back": "So the csv module sees raw line endings and correctly handles `\\r\\n` and newlines inside quoted fields (otherwise blank rows / broken records)."
+    },
+    {
+      "front": "How do you write a file atomically?",
+      "back": "Write to a temp file in the same directory, flush + fsync, then `os.replace(tmp, target)`; on error delete the temp file."
+    },
+    {
+      "front": "How do you parse an S3 object with pandas without a temp file?",
+      "back": "`pd.read_csv(io.BytesIO(obj['Body'].read()))`, or pass the streaming body when it fits."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A CSV exported from Excel gives `KeyError: 'sku'` even though the header clearly shows `sku`. Most likely cause?",
+      "options": [
+        "The file uses `\\r\\n` line endings",
+        "The first header contains a UTF-8 BOM, so the key is `'\\ufeffsku'`",
+        "csv.DictReader lowercases headers",
+        "The file is gzip-compressed"
+      ],
+      "answer_index": 1,
+      "explanation": "Reading with `encoding='utf-8'` keeps the BOM; use `utf-8-sig`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why should the temp file for an atomic write be created in the target's directory?",
+      "options": [
+        "Temp directories are slower",
+        "`os.replace` is only atomic within the same filesystem",
+        "It avoids needing `fsync`",
+        "tempfile cannot create files in /tmp on Linux"
+      ],
+      "answer_index": 1,
+      "explanation": "A rename across filesystems is not atomic (and may fail with a cross-device error)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To swap a fully written temp file into place atomically on both POSIX and Windows, call `os.____(tmp, target)`.",
+      "answers": [
+        "replace",
+        "replace()"
+      ],
+      "explanation": "`os.replace` overwrites the destination atomically; `os.rename` fails on Windows if the target exists."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To read a 5 GB CSV with pandas in bounded memory, pass the `____=50_000` argument to `pd.read_csv` and iterate over the result.",
+      "answers": [
+        "chunksize"
+      ],
+      "explanation": "`chunksize` returns an iterator of DataFrames."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import csv, io\n\nraw = \"\\ufeffsku,qty\\nA1,3\\n\".encode(\"utf-8\")\nr1 = csv.DictReader(io.StringIO(raw.decode(\"utf-8\")))\nr2 = csv.DictReader(io.StringIO(raw.decode(\"utf-8-sig\")))\nprint(r1.fieldnames)\nprint(r2.fieldnames)\nprint(next(r2)[\"sku\"])",
+      "answers": [
+        "['\\ufeffsku', 'qty']\n['sku', 'qty']\nA1"
+      ],
+      "explanation": "Plain utf-8 keeps the BOM as part of the first header (shown escaped in the list repr); utf-8-sig strips it."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from pathlib import PurePosixPath\n\np = PurePosixPath(\"/data/reports/amazon/settlement_2024.csv.gz\")\nprint(p.name, p.stem, p.suffix)\nprint(p.suffixes, p.parent.name)\nprint(p.with_suffix(\"\").with_suffix(\".parquet\").name)",
+      "answers": [
+        "settlement_2024.csv.gz settlement_2024.csv .gz\n['.csv', '.gz'] amazon\nsettlement_2024.parquet"
+      ],
+      "explanation": "`stem` and `suffix` only strip the last extension; `suffixes` lists all of them."
+    },
+    {
+      "type": "debug",
+      "prompt": "This job writes a status JSON that another service polls. Occasionally the reader crashes with `JSONDecodeError`. What's wrong and how do you fix it?",
+      "code": "import json\n\ndef save_status(path, status):\n    with open(path, \"w\") as f:\n        json.dump(status, f)",
+      "answer": "The file is truncated and rewritten in place, so a reader can see an empty or half-written file (and a crash mid-write leaves it corrupt). No encoding is specified either. Write to a temp file in the same directory and atomically replace:\n\n```python\nimport json, os, tempfile\nfrom pathlib import Path\n\ndef save_status(path, status):\n    path = Path(path)\n    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=\".tmp\")\n    try:\n        with os.fdopen(fd, \"w\", encoding=\"utf-8\") as f:\n            json.dump(status, f)\n            f.flush(); os.fsync(f.fileno())\n        os.replace(tmp, path)\n    except BaseException:\n        Path(tmp).unlink(missing_ok=True)\n        raise\n```",
+      "rubric": [
+        "Readers can observe a truncated/partial file during the write",
+        "Write to temp file in same directory then os.replace",
+        "Flush/fsync and clean up temp file on error; set encoding"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would process a 3 GB marketplace CSV in an ECS task with 1 GB of memory.",
+      "answer": "Never materialise the whole file. Stream it from S3 (`get_object()['Body']` is a stream) or download to `/tmp` first, then read in chunks: `pd.read_csv(src, chunksize=50_000, usecols=[...], dtype={...}, encoding='utf-8-sig')`, or `csv.DictReader` for row-level work. Restrict columns and set compact dtypes (category/Int32) to cut per-chunk memory. Transform each chunk independently and write it with `execute_values` in a transaction (or one per chunk with an idempotent upsert so retries are safe). Aggregations that need the whole file are done incrementally (running totals) or pushed to Postgres (`COPY` into a staging table, then SQL). Measure with `tracemalloc` or container metrics to confirm memory stays flat.",
+      "rubric": [
+        "Stream/chunk instead of loading entire file",
+        "Limit columns and dtypes to reduce memory",
+        "Write per chunk in batches (idempotent / transactional)",
+        "Incremental aggregation or push work to the database"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What's the difference between opening a file in text and binary mode, and why does encoding matter?",
+      "difficulty": "easy",
+      "answer_md": "Binary mode (`'rb'`) returns raw `bytes`; text mode decodes bytes to `str` using an encoding and translates newlines. If you omit `encoding`, Python uses the locale's preferred encoding, which differs between a Linux container (UTF-8) and many Windows setups (cp1252) — the same code then works in prod and fails locally or vice versa (`UnicodeDecodeError`, or worse, mojibake that passes silently). Always pass `encoding=`, use `utf-8-sig` for Excel output, and choose `errors='strict'` for financial data so bad bytes fail loudly. Use binary mode for zip/gzip/images and when you pass data on (e.g. to S3) without interpreting it."
+    },
+    {
+      "question": "How do you guarantee a reader never sees a half-written file?",
+      "difficulty": "medium",
+      "answer_md": "Write to a temporary file in the **same directory**, flush and `os.fsync`, then `os.replace(tmp, target)`. A rename within one filesystem is atomic, so readers observe either the old content or the complete new content. Clean up the temp file in an `except`. For durability against power loss also fsync the directory on POSIX.\n\nIn S3 this is built in: a PUT is atomic per object, so readers never see partial objects. For DB-backed outputs the equivalent is writing into a staging table and swapping/merging in one transaction."
+    },
+    {
+      "question": "How would you read a CSV inside a zip that you downloaded from S3, without touching disk?",
+      "difficulty": "medium",
+      "answer_md": "```python\nimport boto3, csv, io, zipfile\n\nbody = s3.get_object(Bucket=b, Key=k)[\"Body\"].read()\nwith zipfile.ZipFile(io.BytesIO(body)) as zf:\n    for name in zf.namelist():\n        if name.endswith(\".csv\"):\n            with zf.open(name) as raw:\n                reader = csv.DictReader(io.TextIOWrapper(raw, encoding=\"utf-8-sig\", newline=\"\"))\n                for row in reader:\n                    ...\n```\n\n`ZipFile` needs a seekable file, hence `BytesIO`. `zf.open` returns a binary stream that decompresses lazily; `TextIOWrapper` decodes it. The compressed zip is held in memory, but rows are streamed. For archives too large for memory, download to `/tmp` (TemporaryDirectory) and open the path instead."
+    }
+  ]
+}

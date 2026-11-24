@@ -1,0 +1,178 @@
+{
+  "slug": "py-functions-basics",
+  "title": "Functions: def, return, defaults and scope",
+  "skill": "python",
+  "extra_skills": [],
+  "category": "Python",
+  "difficulty": "beginner",
+  "tags": [
+    "functions",
+    "def",
+    "return",
+    "default arguments",
+    "scope"
+  ],
+  "summary": "A function packages reusable code under a name. You define it with def, give it parameters, and send a result back with return. This topic covers arguments, default values, the mutable-default trap and how variable scope works.",
+  "why_md": "- Functions are the main unit of reuse and testing.\n- Default arguments and scope rules cause some of the most common beginner bugs.\n- Readable, small functions with clear inputs and outputs are what separates tidy code from tangled scripts.",
+  "details_md": "### Defining and calling\n```python\ndef total_price(qty, unit_price):\n    return qty * unit_price\n\nprint(total_price(3, 50))      # 150\n```\n`def` creates a function object and binds it to a name. `qty` and `unit_price` are *parameters*; the values you pass (`3`, `50`) are *arguments*.\n\n### return\n`return value` ends the function and hands back the value. A function with no `return` (or a bare `return`) gives back `None`. You can return several values; Python packs them into a tuple: `return lo, hi`, and the caller unpacks: `lo, hi = f()`.\n\n### Positional, keyword and default arguments\n```python\ndef greet(name, greeting=\"Hello\"):\n    return f\"{greeting}, {name}\"\n\ngreet(\"Asha\")                    # positional\ngreet(\"Asha\", greeting=\"Hi\")     # keyword\ngreet(greeting=\"Hey\", name=\"Ravi\")\n```\nDefaults make parameters optional. Parameters with defaults must come after those without. Keyword arguments make calls self-documenting.\n\n### The mutable default trap\nDefaults are evaluated **once**, when `def` runs, not at every call:\n\n```python\ndef add(item, bucket=[]):\n    bucket.append(item)\n    return bucket\nadd(1); print(add(2))   # [1, 2]  (shared list!)\n```\nThe safe pattern uses `None`:\n\n```python\ndef add(item, bucket=None):\n    if bucket is None:\n        bucket = []\n    bucket.append(item)\n    return bucket\n```\n\n### *args and **kwargs (intro)\n`def f(*args, **kwargs)` collects extra positional arguments into a tuple and extra keyword arguments into a dict. Handy for wrappers; do not overuse it because it hides the real signature.\n\n### Scope: LEGB\nWhen Python looks up a name it checks Local, Enclosing function, Global (module) and Built-in, in that order. Assigning to a name inside a function creates a *local* variable even if a global with the same name exists. To rebind a global you must declare `global x`, but needing that is a sign to pass values in and return results instead.\n\n### Functions are objects\nYou can store them in variables, pass them as arguments (`sorted(items, key=len)`) and return them. A `lambda` is a tiny anonymous function: `lambda x: x * 2`.\n\n### Docstrings and type hints\nA string right after `def` is the docstring. Type hints (`def f(qty: int) -> float:`) document intent and help tools; they are not enforced at runtime.\n\n### Keep functions small\nOne function, one job, few parameters, no hidden dependence on globals. That makes them easy to test.",
+  "code_md": "```python\n# 1. return, multiple values, defaults\ndef stats(nums, ndigits=1):\n    avg = round(sum(nums) / len(nums), ndigits)\n    return min(nums), max(nums), avg\n\nlo, hi, avg = stats([4, 8, 9])\nprint(lo, hi, avg)\n```\n\n```python\n# 2. the mutable default bug and its fix\ndef bad(x, acc=[]):\n    acc.append(x)\n    return acc\n\ndef good(x, acc=None):\n    acc = [] if acc is None else acc\n    acc.append(x)\n    return acc\n\nbad(1); print(bad(2))      # [1, 2]\ngood(1); print(good(2))    # [2]\n```\n\n```python\n# 3. scope\ncounter = 10\ndef show():\n    counter = 99          # local; global untouched\n    return counter\nprint(show(), counter)    # 99 10\n```\n\n```python\n# 4. keyword-only options and *args\ndef log(msg, *tags, level=\"INFO\"):\n    return f\"[{level}] {msg} {tags}\"\nprint(log(\"saved\", \"db\", \"orders\", level=\"DEBUG\"))\n```",
+  "use_cases_md": "- Extracting `normalize_sku(raw)` once instead of copy-pasting cleaning code.\n- Returning `(ok, error_message)` tuples from validators.\n- Config helpers with sensible defaults (`timeout=30`).\n- Passing a `key=` function to `sorted` for custom ordering.\n- Small pure functions that are trivial to unit test.",
+  "mistakes_md": "- **Mutable default arguments** (`def f(x, items=[])`): use `None`.\n- **Forgetting `return`**: the function returns `None` and later code fails with odd errors.\n- **Modifying a global** by assignment inside a function without `global` (creates a local instead).\n- **Too many parameters / 100-line functions**: split them.\n- **Calling without parentheses**: `f` is the function, `f()` runs it.",
+  "best_practices_md": "- One job per function; name it with a verb.\n- Use `None` as the default for mutable values.\n- Prefer returning values over mutating globals.\n- Use keyword arguments for readability when there are several.\n- Add a one-line docstring and type hints.",
+  "my_context_md": "",
+  "revision_notes_md": "- `def name(params): return value`; no return means `None`.\n- Parameters are in the definition, arguments are at the call.\n- Defaults are evaluated once at definition time.\n- Never use `[]` or `{}` as default; use `None` and create inside.\n- Multiple returns are a tuple.\n- Scope order: Local, Enclosing, Global, Built-in.\n- Assignment inside a function makes a local; `global x` to rebind.\n- Functions are first-class objects; `lambda` is an inline function.",
+  "exercises_md": "1. Write `clean_sku(raw: str) -> str` that strips, uppercases and replaces spaces with dashes; call it on 3 inputs.\n2. Reproduce the mutable default bug, then fix it with `None`.\n3. Write `price_after_discount(price, pct=0)` and call it positionally and by keyword.\n4. Show with a tiny script why assigning to a global name inside a function does not change the global.",
+  "related": [
+    "py-control-flow-loops",
+    "python-functions-args",
+    "python-decorators",
+    "py-oop-basics"
+  ],
+  "flashcards": [
+    {
+      "front": "What does a function without return give back?",
+      "back": "`None`."
+    },
+    {
+      "front": "When are default argument values evaluated?",
+      "back": "Once, at function definition time, not on each call."
+    },
+    {
+      "front": "Safe default for a list parameter?",
+      "back": "`None`, then create the list inside: `if x is None: x = []`."
+    },
+    {
+      "front": "What is LEGB?",
+      "back": "Name lookup order: Local, Enclosing, Global, Built-in."
+    },
+    {
+      "front": "What are *args and **kwargs?",
+      "back": "Extra positional arguments as a tuple, extra keyword arguments as a dict."
+    },
+    {
+      "front": "Parameter vs argument?",
+      "back": "Parameter is in the def; argument is the value passed in the call."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What does a function return if it has no return statement?",
+      "options": [
+        "0",
+        "An empty string",
+        "None",
+        "It raises an error"
+      ],
+      "answer_index": 2,
+      "explanation": "Falling off the end returns None."
+    },
+    {
+      "type": "mcq",
+      "prompt": "When are default argument values created?",
+      "options": [
+        "Each call",
+        "When the function is defined",
+        "When first used",
+        "At import of the caller"
+      ],
+      "answer_index": 1,
+      "explanation": "Defaults are evaluated once at `def` time, hence the mutable default trap."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Inside a function you write `total = 5` while a global `total` exists. What happens?",
+      "options": [
+        "Global is changed",
+        "A new local is created",
+        "SyntaxError",
+        "The global is deleted"
+      ],
+      "answer_index": 1,
+      "explanation": "Assignment creates a local unless `global total` is declared."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To collect extra keyword arguments into a dict, a parameter is written `____kwargs`.",
+      "answers": [
+        "**",
+        "**kwargs"
+      ],
+      "explanation": "`**kwargs` captures keyword arguments."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The safe default value for a mutable parameter such as a list is ____.",
+      "answers": [
+        "none",
+        "None"
+      ],
+      "explanation": "Use None and build the list inside."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def add(item, bucket=[]):\n    bucket.append(item)\n    return bucket\n\nadd(1)\nprint(add(2))\nprint(add(3, []))\n",
+      "answers": [
+        "[1, 2]\n[3]"
+      ],
+      "explanation": "The default list is shared: after add(1) it holds [1], add(2) makes [1, 2]. Passing a fresh list avoids it."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "count = 10\ndef show():\n    count = 99\n    return count\n\ndef lohi(xs):\n    return min(xs), max(xs)\n\nprint(show(), count)\nprint(lohi([4, 8, 9]))\n",
+      "answers": [
+        "99 10\n(4, 9)"
+      ],
+      "explanation": "Local assignment does not touch global; multiple returns form a tuple."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "def add_tag(tag, tags=[]):\n    tags.append(tag)\n\nresult = add_tag(\"new\")\nprint(result)\ntotal = 0\ndef add(n):\n    total += n\nadd(5)\n",
+      "answer": "(1) `tags=[]` is created once and shared between calls; use `tags=None` and create a list inside. (2) `add_tag` has no `return`, so `result` is None; return `tags`. (3) `total += n` inside `add` makes `total` local, raising UnboundLocalError; pass it in and return the new value (or declare `global total`, which is discouraged).",
+      "rubric": [
+        "Fixes mutable default with None",
+        "Notes missing return gives None",
+        "Explains UnboundLocalError from local assignment"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain Python's scope lookup rule (LEGB) with an example.",
+      "answer": "When a name is read, Python searches the Local scope of the current function, then any Enclosing function scopes, then the Global (module) scope, then Built-ins. Assignment inside a function binds a local name, even if a global of the same name exists, so reading it before assigning in that function raises UnboundLocalError. `global` and `nonlocal` declare that an assignment should rebind a name in the module or enclosing scope. Better design passes inputs as parameters and returns results.",
+      "rubric": [
+        "Order: Local, Enclosing, Global, Built-in",
+        "Assignment creates locals",
+        "global/nonlocal change binding target"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why is `def f(x, items=[])` dangerous and how do you fix it?",
+      "answer": "The default list is created once when the function is defined and reused by every call that omits `items`, so state leaks between calls. Fix: `def f(x, items=None): if items is None: items = []`. The same applies to dicts and sets. (Immutable defaults like numbers, strings and None are safe.)",
+      "rubric": [
+        "Default evaluated once and shared",
+        "Use None sentinel and create inside"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between parameters and arguments, and between positional and keyword arguments?",
+      "difficulty": "easy",
+      "answer_md": "Parameters are the names in the function definition; arguments are the values you pass when calling. Positional arguments are matched by order; keyword arguments are matched by name (`f(x=1)`), can be given in any order and make calls clearer. Rules: positionals first, then keywords at the call site; in the definition, parameters without defaults come before those with defaults. You can force keyword-only parameters with `*` (`def f(a, *, flag=False)`)."
+    },
+    {
+      "question": "What is a closure and when does a function 'remember' variables?",
+      "difficulty": "medium",
+      "answer_md": "A closure is an inner function that keeps references to variables from its enclosing function even after the outer function returned.\n\n```python\ndef make_counter():\n    n = 0\n    def inc():\n        nonlocal n\n        n += 1\n        return n\n    return inc\nc = make_counter(); c(); print(c())  # 2\n```\n`nonlocal` is needed to rebind `n`. Closures are the basis of decorators and factory functions."
+    },
+    {
+      "question": "Explain what happens with `def f(x, y=[])` called twice.",
+      "difficulty": "easy",
+      "answer_md": "The list `[]` is created once at definition time and stored in the function's `__defaults__`. Each call that does not pass `y` mutates the same list, so data accumulates across calls. Fix with a `None` sentinel. You can verify via `f.__defaults__`. This is among the most-asked Python gotchas."
+    }
+  ]
+}

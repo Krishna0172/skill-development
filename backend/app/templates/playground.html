@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Python playground{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Python playground</h1><p>Run any Python script locally (5s limit, isolated process). Supports <code>input()</code> via the stdin box. Tab indents, Ctrl+Enter runs. Not recorded.</p></div></div>
+<form class="card"><div class="body form-grid">
+  <textarea class="code" id="pg-code" name="code" rows="18" spellcheck="false" placeholder="print('hello')"></textarea>
+  <label class="field">stdin <span class="hint">optional — one line per input() call</span><textarea name="stdin" rows="2" id="pg-stdin"></textarea></label>
+  <div class="row">
+    <button type="button" class="btn primary" hx-post="/playground/run" hx-include="closest form" hx-target="#pg-result" hx-swap="innerHTML">▶ Run</button>
+    <span class="tiny faint htmx-indicator">running…</span>
+  </div>
+  <div id="pg-result"></div>
+</div></form>
+<script>
+  (function () {
+    var el = document.getElementById("pg-code");
+    try { el.value = localStorage.getItem("playground-code") || ""; } catch (e) {}
+    el.addEventListener("input", function () { try { localStorage.setItem("playground-code", el.value); } catch (e) {} });
+  })();
+</script>
+{% endblock %}

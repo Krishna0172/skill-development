@@ -1,0 +1,156 @@
+{
+  "slug": "flatten-nested-json",
+  "title": "Flatten nested API JSON into dotted keys",
+  "category": "python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "etl-data-processing",
+  "concepts": [
+    "recursion",
+    "dict traversal",
+    "JSON normalisation"
+  ],
+  "related_topics": [
+    "python-data-structures",
+    "pandas-essentials"
+  ],
+  "problem_md": "An orders API returns nested JSON. To load it into a flat staging table you want one key per leaf value, joined with a separator.\n\nImplement:\n\n```python\ndef flatten_json(data: dict, sep: str = \".\") -> dict:\n```\n\nRules:\n- Nested dict keys are joined with `sep`: `{\"buyer\": {\"name\": \"Sam\"}}` → `{\"buyer.name\": \"Sam\"}`.\n- List elements use their index as the key segment: `{\"items\": [{\"sku\": \"X\"}]}` → `{\"items.0.sku\": \"X\"}`. Lists inside lists work the same way.\n- An **empty** dict or list is a leaf: keep it as the value (`{\"meta\": {}}` → `{\"meta\": {}}`).\n- Scalars (strings, numbers, booleans, `None`) are leaves and are kept as-is.\n- If `data` is not a dict, raise `TypeError`.\n- Do not modify the input.",
+  "examples": [
+    {
+      "input": "data = {'order_id': 'A1', 'buyer': {'name': 'Sam', 'address': {'city': 'Austin'}}}",
+      "output": "{'order_id': 'A1', 'buyer.name': 'Sam', 'buyer.address.city': 'Austin'}"
+    },
+    {
+      "input": "data = {'items': [{'sku': 'X', 'qty': 2}]}",
+      "output": "{'items.0.sku': 'X', 'items.0.qty': 2}"
+    },
+    {
+      "input": "data = {'a': {'b': 1}}, sep = '__'",
+      "output": "{'a__b': 1}"
+    }
+  ],
+  "hints": [
+    "Write a helper that takes the current value and the key prefix built so far.",
+    "If the value is a non-empty dict, recurse into `.items()`; if it's a non-empty list, recurse into `enumerate(...)`; otherwise it's a leaf — store it under the prefix.",
+    "Build child keys with `f\"{prefix}{sep}{key}\" if prefix else str(key)`."
+  ],
+  "starter_code": "def flatten_json(data: dict, sep: str = \".\") -> dict:\n    # your code here\n    ...\n",
+  "solution_code": "def flatten_json(data: dict, sep: str = \".\") -> dict:\n    if not isinstance(data, dict):\n        raise TypeError(\"data must be a dict\")\n    out = {}\n\n    def walk(value, prefix):\n        if isinstance(value, dict) and value:\n            children = value.items()\n        elif isinstance(value, list) and value:\n            children = enumerate(value)\n        else:\n            out[prefix] = value\n            return\n        for key, child in children:\n            walk(child, f\"{prefix}{sep}{key}\" if prefix else str(key))\n\n    for key, value in data.items():\n        walk(value, str(key))\n    return out\n",
+  "solution_md": "A recursive walk that carries the key prefix. Non-empty dicts and lists are *containers* (recurse); everything else — including empty containers — is a *leaf* (write it out).\n\nTreating lists via `enumerate` means `{\"items\": [{\"sku\": \"X\"}]}` becomes `items.0.sku`, which is the same convention `pandas.json_normalize` uses for record paths.\n\n- **Time:** O(total number of nodes)\n- **Space:** O(depth) recursion + O(leaves) output\n\n**Notes**\n- Deeply nested payloads could hit Python's recursion limit (~1000). An explicit stack (`stack = [(prefix, value)]`) avoids that.\n- `pandas.json_normalize(data, sep=\".\")` flattens dicts but leaves lists as list values — fine for many cases, but you'd still need your own logic for arrays.\n- Key collisions (e.g. a literal key `\"a.b\"` alongside `{\"a\": {\"b\": ...}}`) silently overwrite; real pipelines should pick a separator that can't appear in keys.",
+  "tests": {
+    "function": "flatten_json",
+    "cases": [
+      {
+        "args": [
+          {
+            "order_id": "A1",
+            "buyer": {
+              "name": "Sam",
+              "address": {
+                "city": "Austin"
+              }
+            }
+          }
+        ],
+        "kwargs": {},
+        "expected": {
+          "order_id": "A1",
+          "buyer.name": "Sam",
+          "buyer.address.city": "Austin"
+        }
+      },
+      {
+        "args": [
+          {
+            "items": [
+              {
+                "sku": "X",
+                "qty": 2
+              },
+              {
+                "sku": "Y",
+                "qty": 1
+              }
+            ]
+          }
+        ],
+        "kwargs": {},
+        "expected": {
+          "items.0.sku": "X",
+          "items.0.qty": 2,
+          "items.1.sku": "Y",
+          "items.1.qty": 1
+        }
+      },
+      {
+        "args": [
+          {}
+        ],
+        "kwargs": {},
+        "expected": {}
+      },
+      {
+        "args": [
+          {
+            "meta": {},
+            "tags": [],
+            "note": null,
+            "paid": true
+          }
+        ],
+        "kwargs": {},
+        "expected": {
+          "meta": {},
+          "tags": [],
+          "note": null,
+          "paid": true
+        }
+      },
+      {
+        "args": [
+          {
+            "a": {
+              "b": {
+                "c": 1
+              }
+            }
+          }
+        ],
+        "kwargs": {
+          "sep": "__"
+        },
+        "expected": {
+          "a__b__c": 1
+        }
+      },
+      {
+        "args": [
+          {
+            "matrix": [
+              [
+                1,
+                2
+              ],
+              [
+                3
+              ]
+            ]
+          }
+        ],
+        "kwargs": {},
+        "expected": {
+          "matrix.0.0": 1,
+          "matrix.0.1": 2,
+          "matrix.1.0": 3
+        }
+      },
+      {
+        "args": [
+          "not a dict"
+        ],
+        "kwargs": {},
+        "raises": "TypeError"
+      }
+    ]
+  }
+}

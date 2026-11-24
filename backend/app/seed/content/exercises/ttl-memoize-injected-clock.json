@@ -1,0 +1,181 @@
+{
+  "slug": "ttl-memoize-injected-clock",
+  "title": "Memoize with a TTL (injected clock)",
+  "category": "advanced-python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "caching-redis",
+  "concepts": [
+    "decorator factories",
+    "closures",
+    "TTL caching",
+    "testable time"
+  ],
+  "related_topics": [
+    "python-decorators",
+    "caching-strategies",
+    "be-connection-pooling"
+  ],
+  "problem_md": "Fetching a DB secret from AWS Secrets Manager on every connection is slow and costs money, but caching it forever breaks secret rotation. Write a decorator factory:\n\n```python\ndef ttl_cache(ttl: float, clock=time.monotonic): ...\n```\n\n- Cache results per positional-argument tuple.\n- A cached value stored at time `s` is fresh while `clock() - s < ttl`; at or after `s + ttl` it is recomputed (and re-stored with the new time).\n- Preserve `__name__`/`__doc__` of the wrapped function.\n- `ttl <= 0` raises `ValueError` when `ttl_cache(...)` is called.\n\nTests call the starter's `simulate(ttl, events)` harness, which controls the fake clock.",
+  "examples": [
+    {
+      "input": "simulate(10, [['call','db',0], ['call','db',5], ['call','db',10]])",
+      "output": "{'results': ['db#1', 'db#1', 'db#2'], 'backend_calls': 2, 'name': 'get_secret'}",
+      "explanation": "At t=10 the entry (stored at 0) has expired."
+    }
+  ],
+  "hints": [
+    "Store `cache[args] = (value, stored_at)` in a dict closed over by the wrapper.",
+    "In the wrapper: `now = clock()`; if `args in cache` and `now - stored_at < ttl` return the value; otherwise call, store `(value, now)` and return."
+  ],
+  "starter_code": "import functools\nimport time\n\n\ndef ttl_cache(ttl, clock=time.monotonic):\n    def decorator(func):\n        # TODO: cache results for `ttl` seconds using clock()\n        return func\n    return decorator\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). events: [[\"call\", arg, now], ...]\n# Returns what each call returned; the underlying function tags results with a call counter.\n# ---------------------------------------------------------------------------\ndef simulate(ttl, events):\n    now = {\"t\": 0}\n    calls = {\"n\": 0}\n\n    @ttl_cache(ttl, clock=lambda: now[\"t\"])\n    def get_secret(name):\n        \"\"\"Pretend this hits AWS Secrets Manager.\"\"\"\n        calls[\"n\"] += 1\n        return f\"{name}#{calls['n']}\"\n\n    out = []\n    for _, arg, t in events:\n        now[\"t\"] = t\n        out.append(get_secret(arg))\n    return {\"results\": out, \"backend_calls\": calls[\"n\"], \"name\": get_secret.__name__}\n",
+  "solution_code": "import functools\nimport time\n\n\ndef ttl_cache(ttl, clock=time.monotonic):\n    if ttl <= 0:\n        raise ValueError('ttl must be > 0')\n\n    def decorator(func):\n        cache = {}\n\n        @functools.wraps(func)\n        def wrapper(*args):\n            now = clock()\n            hit = cache.get(args)\n            if hit is not None and now - hit[1] < ttl:\n                return hit[0]\n            value = func(*args)\n            cache[args] = (value, now)\n            return value\n        return wrapper\n    return decorator\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). events: [[\"call\", arg, now], ...]\n# Returns what each call returned; the underlying function tags results with a call counter.\n# ---------------------------------------------------------------------------\ndef simulate(ttl, events):\n    now = {\"t\": 0}\n    calls = {\"n\": 0}\n\n    @ttl_cache(ttl, clock=lambda: now[\"t\"])\n    def get_secret(name):\n        \"\"\"Pretend this hits AWS Secrets Manager.\"\"\"\n        calls[\"n\"] += 1\n        return f\"{name}#{calls['n']}\"\n\n    out = []\n    for _, arg, t in events:\n        now[\"t\"] = t\n        out.append(get_secret(arg))\n    return {\"results\": out, \"backend_calls\": calls[\"n\"], \"name\": get_secret.__name__}\n",
+  "solution_md": "The cache dict lives in the `decorator` closure, so each decorated function gets its own cache. Entries store `(value, stored_at)`; freshness is a single comparison against the injected clock, which makes the behaviour testable without `sleep` and lets production use `time.monotonic` (immune to wall-clock jumps).\n\nLookup is O(1). Missing pieces for production: a size bound (expired entries are only replaced, never evicted - combine with LRU), thread safety (two threads may both miss and both fetch; use a `threading.Lock` per key or accept the duplicate fetch), and caching exceptions (don't). `functools.lru_cache` has no TTL; `cachetools.TTLCache` is the library option.",
+  "tests": {
+    "function": "simulate",
+    "cases": [
+      {
+        "args": [
+          10,
+          [
+            [
+              "call",
+              "db",
+              0
+            ],
+            [
+              "call",
+              "db",
+              5
+            ],
+            [
+              "call",
+              "db",
+              10
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "results": [
+            "db#1",
+            "db#1",
+            "db#2"
+          ],
+          "backend_calls": 2,
+          "name": "get_secret"
+        }
+      },
+      {
+        "args": [
+          10,
+          [
+            [
+              "call",
+              "db",
+              0
+            ],
+            [
+              "call",
+              "api",
+              1
+            ],
+            [
+              "call",
+              "db",
+              9.99
+            ],
+            [
+              "call",
+              "api",
+              11
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "results": [
+            "db#1",
+            "api#2",
+            "db#1",
+            "api#3"
+          ],
+          "backend_calls": 3,
+          "name": "get_secret"
+        }
+      },
+      {
+        "args": [
+          3,
+          [
+            [
+              "call",
+              "x",
+              0
+            ],
+            [
+              "call",
+              "x",
+              3
+            ],
+            [
+              "call",
+              "x",
+              5
+            ],
+            [
+              "call",
+              "x",
+              6
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "results": [
+            "x#1",
+            "x#2",
+            "x#2",
+            "x#3"
+          ],
+          "backend_calls": 3,
+          "name": "get_secret"
+        }
+      },
+      {
+        "args": [
+          5,
+          [
+            [
+              "call",
+              "a",
+              100
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "results": [
+            "a#1"
+          ],
+          "backend_calls": 1,
+          "name": "get_secret"
+        }
+      },
+      {
+        "args": [
+          0,
+          [
+            [
+              "call",
+              "a",
+              0
+            ]
+          ]
+        ],
+        "raises": "ValueError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

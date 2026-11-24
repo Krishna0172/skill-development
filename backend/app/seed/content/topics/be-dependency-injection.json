@@ -1,0 +1,150 @@
+{
+  "slug": "be-dependency-injection",
+  "title": "Dependency injection in FastAPI (and without a framework)",
+  "skill": "fastapi",
+  "extra_skills": [
+    "backend-architecture",
+    "python-testing"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "fastapi",
+    "depends",
+    "dependency-injection",
+    "testing",
+    "globals",
+    "yield-dependencies"
+  ],
+  "summary": "Dependency injection means a function receives its collaborators (DB connection, current user, clients) instead of reaching for globals. FastAPI's `Depends` builds a per-request dependency graph, supports `yield` for setup/teardown such as a DB session per request, and lets tests swap implementations with `app.dependency_overrides`. The same idea works in plain Python by passing collaborators as arguments.",
+  "why_md": "- Globals make code order-dependent, hard to test and unsafe under threads; DI fixes all three.\n- `Depends` is how FastAPI does auth, DB sessions, pagination and tenant scoping — you'll use it on every endpoint.\n- Overridable dependencies are what make API tests fast and deterministic.\n- \"How do you test code that talks to the database / S3 / an LLM?\" is a standard interview question; DI is the answer.",
+  "details_md": "### The idea\nInstead of `def save(row): conn = GLOBAL_POOL.getconn()`, write `def save(row, conn)`. The caller decides *which* connection (real, transactional, fake). Code becomes explicit about what it needs, and tests pass a fake without patching module state.\n\n### FastAPI `Depends`\nA dependency is any callable. Declare it in a parameter: `user: Annotated[User, Depends(get_current_user)]`. Before your handler runs, FastAPI:\n- inspects the dependency's own parameters (which can be query params, headers or other dependencies), building a **graph**;\n- calls each dependency **once per request** (results cached; `use_cache=False` to opt out);\n- runs sync dependencies in the threadpool, async ones on the loop.\n\nDependencies can be attached to a router (`APIRouter(dependencies=[Depends(require_admin)])`) for cross-cutting checks.\n\n### Yield dependencies\n```python\ndef get_conn():\n    conn = pool.getconn()\n    try:\n        yield conn          # value injected into the handler\n        conn.commit()\n    except Exception:\n        conn.rollback()\n        raise\n    finally:\n        pool.putconn(conn)\n```\nCode before `yield` is setup; code after is teardown, which runs after the handler finishes. Exceptions raised in the handler are re-thrown into the dependency at the `yield`, so you can roll back. Since FastAPI 0.106 teardown runs before the response is sent rather than after — keep it fast either way and don't rely on the resource in background tasks.\n\n### Overrides in tests\n`app.dependency_overrides[get_conn] = lambda: fake_conn` replaces the dependency everywhere it is used; clear it after the test (`app.dependency_overrides.clear()`). Combine with a transaction-per-test connection that rolls back for real-DB tests.\n\n### DI without a framework\nConstructor/argument injection is enough: `ReportService(repo, s3_client, clock)`. Wire everything in one place (a `main()` or `lifespan`), the **composition root**. Avoid service locators and module-level mutable state; if you need lazily-created singletons, wrap them in a function with `functools.cache` and inject the result.",
+  "code_md": "```python\nfrom typing import Annotated\nfrom fastapi import Depends, FastAPI, Header, HTTPException\n\napp = FastAPI()\n\ndef get_conn():                                   # one pooled connection per request\n    conn = app.state.pool.getconn()\n    try:\n        yield conn\n        conn.commit()\n    except Exception:\n        conn.rollback()\n        raise\n    finally:\n        app.state.pool.putconn(conn)\n\nConn = Annotated[object, Depends(get_conn)]\n\ndef get_org_id(x_org_id: Annotated[int, Header()]) -> int:\n    return x_org_id\n\ndef get_repo(conn: Conn, org_id: Annotated[int, Depends(get_org_id)]):\n    return OrderRepo(conn, org_id)                # repo scoped to tenant\n\n@app.get(\"/orders/{order_id}\")\ndef read_order(order_id: int, repo: Annotated[\"OrderRepo\", Depends(get_repo)]):\n    order = repo.get(order_id)\n    if order is None:\n        raise HTTPException(404, \"order not found\")\n    return order\n\n# --- test ---\ndef test_read_order_404():\n    from fastapi.testclient import TestClient\n    app.dependency_overrides[get_repo] = lambda: FakeRepo(orders={})\n    try:\n        r = TestClient(app).get(\"/orders/1\", headers={\"X-Org-Id\": \"7\"})\n        assert r.status_code == 404\n    finally:\n        app.dependency_overrides.clear()\n```\n\n```python\n# Before: hidden global state\n_pool = None\ndef save_rows(rows):\n    global _pool\n    if _pool is None:\n        _pool = make_pool()\n    ...\n\n# After: plain-Python DI, wired once in a composition root\nclass UploadService:\n    def __init__(self, repo, s3, clock):\n        self.repo, self.s3, self.clock = repo, s3, clock\n    def process(self, key):\n        rows = parse(self.s3.get_object(Bucket=\"reports\", Key=key)[\"Body\"].read())\n        self.repo.insert_many(rows, uploaded_at=self.clock())\n\ndef main():\n    pool = make_pool()\n    svc = UploadService(PgRepo(pool), boto3.client(\"s3\"), datetime.utcnow)\n    svc.process(\"seller-1/2024-05.csv\")\n```",
+  "use_cases_md": "- A DB connection per request with commit/rollback in a yield dependency.\n- `get_current_user` → `require_role(\"admin\")` dependency chain for authorization.\n- Tenant scoping: a dependency reads `org_id` from the token and returns a repository that always filters by it.\n- Injecting an LLM client so tests use a fake that returns canned completions.\n- Injecting a clock to test 'next run' calculations in a job scheduler deterministically.",
+  "mistakes_md": "- **Creating a pool inside a dependency** (`def get_conn(): pool = ThreadedConnectionPool(...)`): a new pool per request. Create in lifespan; dependency only checks out.\n- **Forgetting `try/finally` around `yield`**: connection leaks when the handler raises.\n- **Calling the dependency function directly** inside the handler instead of declaring `Depends` — bypasses caching and overrides.\n- **Not clearing `dependency_overrides`** between tests — leaks fakes into other tests.\n- **Using `global` for lazily-created clients**: race conditions and untestable code; inject instead.\n- **Passing the DB connection into a BackgroundTask** from a yield dependency — it may already be returned to the pool.",
+  "best_practices_md": "- Use `Annotated[T, Depends(fn)]` aliases (`Conn`, `CurrentUser`) and reuse them.\n- Keep dependencies small and composable; one responsibility each.\n- Create long-lived resources in `lifespan`, hand out per-request ones in dependencies.\n- Business logic in plain classes/functions that take collaborators as arguments — framework-agnostic and testable.\n- One composition root per process wires everything.\n- Override at the highest useful level in tests (repo/service, not the raw connection) for simpler fakes.",
+  "my_context_md": "Your codebase has 342 `global` statements — typically lazily-initialized pools, clients and caches. `AmazonVendorBankRecon/db.py` creates its `ThreadedConnectionPool` lazily with double-checked locking and exposes `@contextmanager db_transaction()`; that context manager is already 90% of a FastAPI yield dependency (commit, rollback, return to pool). Converting one service so functions accept a connection/repo argument instead of touching the module global would let you unit-test it with a fake repo.",
+  "revision_notes_md": "- DI = receive collaborators, don't fetch globals.\n- `Annotated[T, Depends(fn)]`; dependencies can depend on other dependencies.\n- Results cached once per request (`use_cache=False` to disable).\n- Yield dependency: setup → `yield value` → teardown; wrap in try/except/finally.\n- Handler exceptions are re-raised at the `yield` → rollback there.\n- Router-level: `APIRouter(dependencies=[Depends(check)])`.\n- Tests: `app.dependency_overrides[dep] = fake`, then `.clear()`.\n- Plain Python: constructor injection + one composition root.",
+  "exercises_md": "1. Convert `db_transaction()` from `AmazonVendorBankRecon/db.py` into a FastAPI yield dependency and write a test that proves rollback happens when the handler raises.\n2. Pick a module with `global` state, refactor it to take the collaborator as an argument, and write a pytest that injects a fake.\n3. Build `get_current_user` → `require_role(role)` dependency factory and protect a router with it.\n4. Write a test fixture that overrides `get_conn` with a connection inside a transaction that is rolled back after each test.",
+  "related": [
+    "fastapi-essentials",
+    "python-context-managers",
+    "py-testing-mocking",
+    "py-clean-architecture",
+    "be-connection-pooling",
+    "be-authn-authz"
+  ],
+  "flashcards": [
+    {
+      "front": "How many times is a dependency called if three sub-dependencies of one request all depend on it?",
+      "back": "Once — FastAPI caches dependency results per request (unless `use_cache=False`)."
+    },
+    {
+      "front": "What runs after the `yield` in a yield dependency?",
+      "back": "Teardown code (commit/close/return to pool); handler exceptions are re-raised at the yield."
+    },
+    {
+      "front": "How do you swap a dependency in tests?",
+      "back": "`app.dependency_overrides[original] = replacement`, then clear it."
+    },
+    {
+      "front": "What is a composition root?",
+      "back": "The single place (main/lifespan) where concrete implementations are created and wired together."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Two dependencies used by the same endpoint both declare `Depends(get_conn)`. With default settings, how many times does `get_conn` run for one request?",
+      "options": [
+        "Twice, once per declaration",
+        "Once, the result is cached for the request",
+        "Once per application lifetime",
+        "Zero — FastAPI uses a global connection"
+      ],
+      "answer_index": 1,
+      "explanation": "FastAPI caches dependency values within a request, so both consumers receive the same connection."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is `app.dependency_overrides` preferred over `unittest.mock.patch` for replacing a DB dependency in FastAPI tests?",
+      "options": [
+        "patch doesn't work in pytest",
+        "Overrides are faster at runtime",
+        "FastAPI captured a reference to the original function at route registration, so patching the module name may not affect it",
+        "Overrides make the test use a real database"
+      ],
+      "answer_index": 2,
+      "explanation": "Routes store the dependency callable itself; patching the module attribute afterwards doesn't change what FastAPI calls. Overrides are looked up by that callable."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In a FastAPI dependency that opens a DB session, the session is handed to the handler with the keyword ____ and cleaned up in the code after it.",
+      "answers": [
+        "yield"
+      ],
+      "explanation": "Yield dependencies split setup and teardown around the yield."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In tests you replace a dependency with `app.____[get_conn] = fake_conn_factory`.",
+      "answers": [
+        "dependency_overrides"
+      ],
+      "explanation": "`dependency_overrides` is a dict mapping original dependency callables to replacements."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib code mimics how FastAPI drives a yield dependency around a handler that fails. What does it print?",
+      "code": "def get_conn():\n    print(\"checkout\")\n    try:\n        yield \"conn\"\n        print(\"commit\")\n    except ValueError:\n        print(\"rollback\")\n        raise\n    finally:\n        print(\"return to pool\")\n\ndef handler(conn):\n    print(\"handler uses\", conn)\n    raise ValueError(\"bad row\")\n\ngen = get_conn()\nconn = next(gen)\ntry:\n    handler(conn)\nexcept ValueError as e:\n    try:\n        gen.throw(e)\n    except ValueError:\n        print(\"500 sent\")\n",
+      "answers": [
+        "checkout\nhandler uses conn\nrollback\nreturn to pool\n500 sent"
+      ],
+      "explanation": "The handler's exception is thrown into the generator at the `yield`, so the except block rolls back, `finally` returns the connection, and the re-raised error propagates to become an error response — the same mechanics FastAPI uses."
+    },
+    {
+      "type": "debug",
+      "prompt": "Connections run out after a few hundred requests and the database shows many idle connections. What's wrong?",
+      "code": "from psycopg2.pool import ThreadedConnectionPool\n\ndef get_conn():\n    pool = ThreadedConnectionPool(1, 10, dsn=DSN)\n    conn = pool.getconn()\n    yield conn\n    pool.putconn(conn)\n",
+      "answer": "Two bugs:\n1. A **new pool is created per request** — each one opens its own connection(s) that are never closed, so connections pile up.\n2. No `try/finally`: if the handler raises, code after `yield` doesn't return the connection.\n\n```python\n# create once, e.g. in lifespan: app.state.pool = ThreadedConnectionPool(1, 10, dsn=DSN)\ndef get_conn(request: Request):\n    pool = request.app.state.pool\n    conn = pool.getconn()\n    try:\n        yield conn\n        conn.commit()\n    except Exception:\n        conn.rollback()\n        raise\n    finally:\n        pool.putconn(conn)\n```",
+      "rubric": [
+        "Pool created per request instead of once (lifespan/app.state)",
+        "Missing try/finally so exceptions leak connections",
+        "Commit/rollback handled around the yield"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain dependency injection to a colleague whose code uses many `global` statements for pools and clients. Why change, and how, without adopting a framework?",
+      "answer": "Globals hide what a function needs, make behaviour depend on import/initialization order, need locks for lazy init under threads, and force tests to monkeypatch module state. DI means passing collaborators in: `def insert_rows(conn, rows)` or `ReportService(repo, s3, clock)`. You create the real objects once in a composition root (`main()` or app startup) and pass them down. Tests construct the service with fakes — no patching. Start small: make functions accept an optional collaborator argument, then move creation to the entry point, then delete the global.",
+      "rubric": [
+        "Problems with globals: hidden deps, init order, thread safety, testing",
+        "Pass collaborators as arguments / constructor injection",
+        "Composition root wires real implementations once",
+        "Tests inject fakes without patching"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you enforce that every endpoint under `/admin` requires an admin user, without repeating code in each handler?",
+      "answer": "Create a dependency `require_admin(user: CurrentUser)` that raises `HTTPException(403)` if `user.role != \"admin\"`, then attach it at router level: `admin = APIRouter(prefix=\"/admin\", dependencies=[Depends(require_admin)])`. Every route on that router runs the check before the handler; handlers that need the user object can still declare `CurrentUser` and get the cached value.",
+      "rubric": [
+        "Dependency that checks role and raises 403",
+        "Router-level dependencies=[Depends(...)]",
+        "Cached current-user dependency reused"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you test a FastAPI endpoint that reads from Postgres?",
+      "difficulty": "medium",
+      "answer_md": "Two levels. **Unit-ish API tests**: the handler depends on a repository (`Depends(get_repo)`); in tests set `app.dependency_overrides[get_repo] = lambda: FakeRepo({...})` and use `TestClient`. This tests routing, validation, auth and status codes in milliseconds without a DB. **Integration tests**: run a real Postgres (Docker/testcontainers), apply migrations once per session, and override `get_conn` with a fixture that opens a connection, starts a transaction, yields it, and rolls back after each test so tests stay isolated. Always clear overrides in a fixture teardown. The key enabler is that the endpoint never reaches for a global pool — it declares what it needs and the test supplies it."
+    },
+    {
+      "question": "What happens to an exception raised inside a handler when a yield dependency is in use?",
+      "difficulty": "hard",
+      "answer_md": "FastAPI runs yield dependencies inside an exit stack. If the handler raises, the exception is thrown into the dependency's generator at the `yield` point. So an `except` block around `yield` can roll back the transaction and must **re-raise** so the error still reaches the exception handlers — swallowing it hides the real failure. A `finally` block always runs to return the connection. After teardown, the exception continues to exception handlers (HTTPException → its status, unhandled → 500 from ServerErrorMiddleware). Note `HTTPException` raised in the handler also passes through the dependency, so a broad `except Exception: rollback; raise` correctly rolls back on 404s too, which is usually desired. Since FastAPI 0.106, teardown runs before the response is sent, so resources from yield dependencies are not available in background tasks."
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+{
+  "slug": "retry-exponential-backoff-delays",
+  "title": "Retry with exponential backoff (deterministic delays)",
+  "category": "advanced-python",
+  "language": "python",
+  "difficulty": "hard",
+  "skill": "error-handling",
+  "concepts": [
+    "decorator factories",
+    "exponential backoff",
+    "capped delay",
+    "injected sleep"
+  ],
+  "related_topics": [
+    "retries-backoff-idempotency",
+    "python-decorators",
+    "python-exceptions"
+  ],
+  "problem_md": "SP-API throttles you with 429s; hammering it again immediately makes it worse. Extend the classic retry decorator with exponential backoff:\n\n```python\ndef retry_backoff(max_attempts=3, base_delay=1.0, factor=2.0, max_delay=None,\n                  retry_on=(Exception,), sleep=time.sleep): ...\n```\n\n- At most `max_attempts` calls. Only exceptions in `retry_on` are retried; others propagate immediately.\n- After failed attempt *n* (1-based) and **only if another attempt follows**, call `sleep(delay)` with `delay = base_delay * factor ** (n - 1)`, capped at `max_delay` when it is not `None`.\n- When attempts are exhausted re-raise the last exception.\n- `max_attempts < 1` or `base_delay < 0` raise `ValueError` at decoration time.\n- No jitter here (so tests are deterministic) - discuss it in your notes.\n\nTests call the starter's `simulate(...)` harness which injects `sleep=delays.append`.",
+  "examples": [
+    {
+      "input": "simulate(3, 5, base_delay=0.5)",
+      "output": "{'result': 'ok', 'calls': 4, 'delays': [0.5, 1.0, 2.0]}"
+    },
+    {
+      "input": "simulate(9, 4, base_delay=1, max_delay=3)",
+      "output": "{'error': 'ConnectionError', 'calls': 4, 'delays': [1.0, 2.0, 3.0]}",
+      "explanation": "4th delay would be 4 but there is no 5th attempt; 3rd was capped to 3."
+    }
+  ],
+  "hints": [
+    "Loop `for attempt in range(1, max_attempts + 1)`; in `except retry_on:` re-raise if `attempt == max_attempts`, else compute the delay and `sleep(delay)`.",
+    "`delay = base_delay * factor ** (attempt - 1)`; then `if max_delay is not None: delay = min(delay, max_delay)`."
+  ],
+  "starter_code": "import functools\nimport time\n\n\ndef retry_backoff(max_attempts=3, base_delay=1.0, factor=2.0, max_delay=None,\n                  retry_on=(Exception,), sleep=time.sleep):\n    def decorator(func):\n        @functools.wraps(func)\n        def wrapper(*args, **kwargs):\n            for attempt in range(max_attempts):\n                try:\n                    return func(*args, **kwargs)\n                except retry_on:\n                    if attempt == max_attempts - 1:\n                        raise\n                    sleep(base_delay)  # TODO: exponential + cap\n        return wrapper\n    return decorator\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). sleep is injected, so delays are recorded, not slept.\n# ---------------------------------------------------------------------------\ndef simulate(fail_times, max_attempts, base_delay=1.0, factor=2.0, max_delay=None, error=\"ConnectionError\"):\n    exc_cls = {\"ConnectionError\": ConnectionError, \"ValueError\": ValueError}[error]\n    delays = []\n    calls = {\"n\": 0}\n\n    @retry_backoff(max_attempts=max_attempts, base_delay=base_delay, factor=factor,\n                   max_delay=max_delay, retry_on=(ConnectionError,), sleep=delays.append)\n    def call_api():\n        calls[\"n\"] += 1\n        if calls[\"n\"] <= fail_times:\n            raise exc_cls(\"flaky\")\n        return \"ok\"\n\n    try:\n        return {\"result\": call_api(), \"calls\": calls[\"n\"], \"delays\": delays}\n    except (ConnectionError, ValueError) as e:\n        return {\"error\": type(e).__name__, \"calls\": calls[\"n\"], \"delays\": delays}\n",
+  "solution_code": "import functools\nimport time\n\n\ndef retry_backoff(max_attempts=3, base_delay=1.0, factor=2.0, max_delay=None,\n                  retry_on=(Exception,), sleep=time.sleep):\n    if max_attempts < 1:\n        raise ValueError('max_attempts must be >= 1')\n    if base_delay < 0:\n        raise ValueError('base_delay must be >= 0')\n\n    def compute_delay(attempt):\n        delay = base_delay * factor ** (attempt - 1)\n        return delay if max_delay is None else min(delay, max_delay)\n\n    def decorator(func):\n        @functools.wraps(func)\n        def wrapper(*args, **kwargs):\n            for attempt in range(1, max_attempts + 1):\n                try:\n                    return func(*args, **kwargs)\n                except retry_on:\n                    if attempt == max_attempts:\n                        raise\n                    sleep(compute_delay(attempt))\n        return wrapper\n    return decorator\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). sleep is injected, so delays are recorded, not slept.\n# ---------------------------------------------------------------------------\ndef simulate(fail_times, max_attempts, base_delay=1.0, factor=2.0, max_delay=None, error=\"ConnectionError\"):\n    exc_cls = {\"ConnectionError\": ConnectionError, \"ValueError\": ValueError}[error]\n    delays = []\n    calls = {\"n\": 0}\n\n    @retry_backoff(max_attempts=max_attempts, base_delay=base_delay, factor=factor,\n                   max_delay=max_delay, retry_on=(ConnectionError,), sleep=delays.append)\n    def call_api():\n        calls[\"n\"] += 1\n        if calls[\"n\"] <= fail_times:\n            raise exc_cls(\"flaky\")\n        return \"ok\"\n\n    try:\n        return {\"result\": call_api(), \"calls\": calls[\"n\"], \"delays\": delays}\n    except (ConnectionError, ValueError) as e:\n        return {\"error\": type(e).__name__, \"calls\": calls[\"n\"], \"delays\": delays}\n",
+  "solution_md": "Delays grow geometrically (`base * factor**(n-1)`) so a struggling API gets breathing room, and the cap stops waits from exploding (attempt 10 at factor 2 would be 512 s). No sleep happens after the final attempt - that would just delay the error. Validation lives in the factory so a bad config fails at import.\n\nInjecting `sleep` keeps tests instant and lets an async version pass `asyncio.sleep`.\n\nIn production add **jitter** (\"full jitter\": `random.uniform(0, delay)`) so many workers that failed together don't retry in lockstep, honour `Retry-After` on 429/503, log each retry, and only retry idempotent calls. `tenacity` (`wait_exponential`, `stop_after_attempt`) packages all of this.",
+  "tests": {
+    "function": "simulate",
+    "cases": [
+      {
+        "args": [
+          0,
+          3
+        ],
+        "kwargs": {},
+        "expected": {
+          "result": "ok",
+          "calls": 1,
+          "delays": []
+        }
+      },
+      {
+        "args": [
+          3,
+          5
+        ],
+        "kwargs": {
+          "base_delay": 0.5
+        },
+        "expected": {
+          "result": "ok",
+          "calls": 4,
+          "delays": [
+            0.5,
+            1.0,
+            2.0
+          ]
+        }
+      },
+      {
+        "args": [
+          9,
+          4
+        ],
+        "kwargs": {
+          "base_delay": 1,
+          "max_delay": 3
+        },
+        "expected": {
+          "error": "ConnectionError",
+          "calls": 4,
+          "delays": [
+            1.0,
+            2.0,
+            3
+          ]
+        }
+      },
+      {
+        "args": [
+          2,
+          3
+        ],
+        "kwargs": {
+          "base_delay": 2,
+          "factor": 3
+        },
+        "expected": {
+          "result": "ok",
+          "calls": 3,
+          "delays": [
+            2,
+            6
+          ]
+        }
+      },
+      {
+        "args": [
+          2,
+          5
+        ],
+        "kwargs": {
+          "error": "ValueError"
+        },
+        "expected": {
+          "error": "ValueError",
+          "calls": 1,
+          "delays": []
+        }
+      },
+      {
+        "args": [
+          0,
+          0
+        ],
+        "raises": "ValueError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

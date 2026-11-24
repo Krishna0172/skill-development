@@ -1,0 +1,194 @@
+{
+  "slug": "refactor-print-to-structured-logs",
+  "title": "Refactor: print() debugging to structured log records",
+  "category": "refactoring",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "python-exceptions-logging",
+  "concepts": [
+    "structured logging",
+    "log levels",
+    "dependency injection",
+    "testable side effects"
+  ],
+  "related_topics": [
+    "py-logging",
+    "be-dependency-injection",
+    "py-testing-mocking"
+  ],
+  "problem_md": "**Refactor-your-own-habits kata.** The starter reports progress with `print()`: no levels, no fields to search on in CloudWatch, and impossible to assert in tests. Refactor to emit **structured records** through an injected logger callable:\n\n```python\ndef sync_inventory(items: list[dict], log=None) -> dict\n```\n\n- `log(level, event, **fields)`; when `log` is `None` use a no-op (nothing printed).\n- For each item `{\"sku\": str, \"qty\": ...}`: if `qty` is an `int` (not bool) and `>= 0` -> `log(\"DEBUG\", \"item_synced\", sku=..., qty=...)`; otherwise -> `log(\"WARNING\", \"invalid_qty\", sku=..., qty=<the raw value or None if missing>)`.\n- At the end: `log(\"INFO\", \"sync_done\", synced=n, skipped=m)` and return `{\"synced\": n, \"skipped\": m}`.\n- No `print()` anywhere.\n\nTests use the `run_sync(items)` harness, which also checks that nothing was printed.",
+  "examples": [
+    {
+      "input": "run_sync([{'sku':'A','qty':3}, {'sku':'B','qty':-1}])",
+      "output": "{'summary': {'synced': 1, 'skipped': 1}, 'logs': [{'level':'DEBUG','event':'item_synced','sku':'A','qty':3}, {'level':'WARNING','event':'invalid_qty','sku':'B','qty':-1}, {'level':'INFO','event':'sync_done','synced':1,'skipped':1}], 'printed': False}"
+    }
+  ],
+  "hints": [
+    "Start with `log = log or (lambda level, event, **fields: None)` so the default is silent.",
+    "`qty = item.get('qty')`; valid when `isinstance(qty, int) and not isinstance(qty, bool) and qty >= 0`. Pass data as keyword fields, not formatted into the event string."
+  ],
+  "starter_code": "def sync_inventory(items, log=None):\n    synced = skipped = 0\n    for item in items:\n        qty = item.get('qty')\n        if isinstance(qty, int) and qty >= 0:\n            print(f\"synced {item['sku']} qty={qty}\")\n            synced += 1\n        else:\n            print('BAD QTY!!!', item)\n            skipped += 1\n    print('done', synced, skipped)\n    return {'synced': synced, 'skipped': skipped}\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). Captures stdout and the structured log records.\n# ---------------------------------------------------------------------------\ndef run_sync(items):\n    import contextlib, io\n    records = []\n\n    def log(level, event, **fields):\n        records.append({\"level\": level, \"event\": event, **fields})\n\n    buf = io.StringIO()\n    with contextlib.redirect_stdout(buf):\n        summary = sync_inventory(items, log=log)\n        sync_inventory(items)            # default logger must work and stay silent\n    return {\"summary\": summary, \"logs\": records, \"printed\": buf.getvalue() != \"\"}\n",
+  "solution_code": "def _noop(level, event, **fields):\n    pass\n\n\ndef sync_inventory(items, log=None):\n    log = log or _noop\n    synced = skipped = 0\n    for item in items:\n        sku, qty = item.get('sku'), item.get('qty')\n        if isinstance(qty, int) and not isinstance(qty, bool) and qty >= 0:\n            log('DEBUG', 'item_synced', sku=sku, qty=qty)\n            synced += 1\n        else:\n            log('WARNING', 'invalid_qty', sku=sku, qty=qty)\n            skipped += 1\n    log('INFO', 'sync_done', synced=synced, skipped=skipped)\n    return {'synced': synced, 'skipped': skipped}\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). Captures stdout and the structured log records.\n# ---------------------------------------------------------------------------\ndef run_sync(items):\n    import contextlib, io\n    records = []\n\n    def log(level, event, **fields):\n        records.append({\"level\": level, \"event\": event, **fields})\n\n    buf = io.StringIO()\n    with contextlib.redirect_stdout(buf):\n        summary = sync_inventory(items, log=log)\n        sync_inventory(items)            # default logger must work and stay silent\n    return {\"summary\": summary, \"logs\": records, \"printed\": buf.getvalue() != \"\"}\n",
+  "solution_md": "`print` writes unlevelled free text to stdout: you can't filter DEBUG out in production, can't query `sku=B123` in CloudWatch Logs Insights, and can't assert on it in tests. A constant event name plus keyword fields is a *structured* record - one JSON line per event once a formatter is attached.\n\nInjecting `log` keeps the function pure-ish and testable (the harness passes a list-appending fake). In real code, adapt the standard library: `logger.log(getattr(logging, level), event, extra=fields)` with a JSON formatter (or `structlog`), configured once at startup via `logging.basicConfig`/`dictConfig`, with `logger = logging.getLogger(__name__)` per module.\n\nAlso fixed: `True` passed the old `isinstance(qty, int)` check.",
+  "tests": {
+    "function": "run_sync",
+    "cases": [
+      {
+        "args": [
+          [
+            {
+              "sku": "A",
+              "qty": 3
+            },
+            {
+              "sku": "B",
+              "qty": -1
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "summary": {
+            "synced": 1,
+            "skipped": 1
+          },
+          "logs": [
+            {
+              "level": "DEBUG",
+              "event": "item_synced",
+              "sku": "A",
+              "qty": 3
+            },
+            {
+              "level": "WARNING",
+              "event": "invalid_qty",
+              "sku": "B",
+              "qty": -1
+            },
+            {
+              "level": "INFO",
+              "event": "sync_done",
+              "synced": 1,
+              "skipped": 1
+            }
+          ],
+          "printed": false
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "sku": "C",
+              "qty": 0
+            },
+            {
+              "sku": "D"
+            },
+            {
+              "sku": "E",
+              "qty": "7"
+            },
+            {
+              "sku": "F",
+              "qty": true
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "summary": {
+            "synced": 1,
+            "skipped": 3
+          },
+          "logs": [
+            {
+              "level": "DEBUG",
+              "event": "item_synced",
+              "sku": "C",
+              "qty": 0
+            },
+            {
+              "level": "WARNING",
+              "event": "invalid_qty",
+              "sku": "D",
+              "qty": null
+            },
+            {
+              "level": "WARNING",
+              "event": "invalid_qty",
+              "sku": "E",
+              "qty": "7"
+            },
+            {
+              "level": "WARNING",
+              "event": "invalid_qty",
+              "sku": "F",
+              "qty": true
+            },
+            {
+              "level": "INFO",
+              "event": "sync_done",
+              "synced": 1,
+              "skipped": 3
+            }
+          ],
+          "printed": false
+        }
+      },
+      {
+        "args": [
+          []
+        ],
+        "kwargs": {},
+        "expected": {
+          "summary": {
+            "synced": 0,
+            "skipped": 0
+          },
+          "logs": [
+            {
+              "level": "INFO",
+              "event": "sync_done",
+              "synced": 0,
+              "skipped": 0
+            }
+          ],
+          "printed": false
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "sku": "G",
+              "qty": 12
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "summary": {
+            "synced": 1,
+            "skipped": 0
+          },
+          "logs": [
+            {
+              "level": "DEBUG",
+              "event": "item_synced",
+              "sku": "G",
+              "qty": 12
+            },
+            {
+              "level": "INFO",
+              "event": "sync_done",
+              "synced": 1,
+              "skipped": 0
+            }
+          ],
+          "printed": false
+        }
+      }
+    ]
+  }
+}

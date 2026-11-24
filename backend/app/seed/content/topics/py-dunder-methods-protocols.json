@@ -1,0 +1,188 @@
+{
+  "slug": "py-dunder-methods-protocols",
+  "title": "Dunder methods and Python's data model",
+  "skill": "python-advanced",
+  "extra_skills": [
+    "python-oop"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "dunder",
+    "data model",
+    "protocols",
+    "duck typing",
+    "__eq__",
+    "__hash__"
+  ],
+  "summary": "Special methods like __len__, __eq__, __iter__ and __enter__ let your classes plug into Python syntax and built-ins. Understanding the data model and its protocols is how you make objects behave like native types.",
+  "why_md": "- Built-ins (`len`, `sorted`, `in`, `for`, `with`, `==`) are just calls to dunder methods; this is the key to how Python works.\n- Library code (Pydantic models, SQLAlchemy columns, pandas) relies on these protocols.\n- Interviews ask about `__eq__`/`__hash__`, `__repr__` vs `__str__`, iterator protocol and operator overloading.",
+  "details_md": "### The data model idea\nPython does not special-case types; syntax maps to methods. `len(x)` calls `type(x).__len__(x)`, `a + b` calls `a.__add__(b)`, `x[i]` calls `__getitem__`, `for` calls `__iter__`, `with` calls `__enter__`/`__exit__`, `f()` calls `__call__`. Dunder (double underscore) methods are looked up on the **type**, not the instance, which is why assigning `obj.__len__ = ...` on an instance does not affect `len(obj)`.\n\n### Representation\n`__repr__` should be unambiguous and ideally look like the constructor call. `__str__` is the friendly form used by `print`/`str`; if missing it falls back to `__repr__`. Define `__repr__` first. `__format__` powers f-string specs.\n\n### Equality, ordering and hashing\n- `__eq__(self, other)` defines `==`. Return `NotImplemented` (not `False`) when `other` is an unsupported type so Python can try the reflected operation.\n- **Defining `__eq__` without `__hash__` sets `__hash__` to None**, making the object unhashable (not usable in sets or as dict key). If equal objects must hash equally, define `__hash__` from the same fields, and only do so for effectively immutable objects.\n- Ordering: `__lt__`, `__le__`, `__gt__`, `__ge__`. `functools.total_ordering` derives the rest from `__eq__` and one of them.\n\n### Containers\n`__len__`, `__getitem__`, `__setitem__`, `__delitem__`, `__contains__` make a class a container. If only `__getitem__` with integer indexes exists, `for` and `in` still work through the legacy sequence protocol.\n\n### Iteration protocol\nAn *iterable* has `__iter__` returning an *iterator*; an iterator has `__next__` (raising `StopIteration` at the end) and `__iter__` returning itself. A generator method is the easy way: `def __iter__(self): yield from self.items`.\n\n### Truthiness and callables\n`bool(x)` uses `__bool__`, falling back to `__len__` (zero length means false). `__call__` makes instances callable like functions, useful for configurable, stateful callables.\n\n### Context managers\n`__enter__` runs on entry and its return value is bound by `as`; `__exit__(exc_type, exc, tb)` runs on exit and a truthy return value suppresses the exception.\n\n### Arithmetic operators\n`__add__`, `__sub__`, `__mul__`, ... plus reflected versions (`__radd__`) used when the left operand does not know the right one, and in-place versions (`__iadd__`). Return `NotImplemented` for unknown types.\n\n### Protocols and duck typing\nA 'protocol' is just the set of methods an operation expects. If it has `__len__` and `__getitem__` it behaves like a sequence; nothing needs to inherit from `Sequence`. `typing.Protocol` lets type checkers verify structural conformance without inheritance.\n\n### Attribute access hooks (brief)\n`__getattr__` runs only when normal lookup fails; `__getattribute__` runs on every access; `__setattr__` on every assignment. Use sparingly.",
+  "code_md": "```python\n# 1. a small value object: repr, eq, hash, ordering\nfrom functools import total_ordering\n\n@total_ordering\nclass Money:\n    def __init__(self, paise):\n        self.paise = paise\n    def __repr__(self):\n        return f\"Money({self.paise})\"\n    def __eq__(self, other):\n        if not isinstance(other, Money):\n            return NotImplemented\n        return self.paise == other.paise\n    def __lt__(self, other):\n        if not isinstance(other, Money):\n            return NotImplemented\n        return self.paise < other.paise\n    def __hash__(self):\n        return hash(self.paise)\n    def __add__(self, other):\n        return Money(self.paise + other.paise)\n\nprint(sorted([Money(30), Money(10)]), Money(5) in {Money(5)})\n```\n\n```python\n# 2. container + iterator protocol\nclass Batch:\n    def __init__(self, items):\n        self._items = list(items)\n    def __len__(self):\n        return len(self._items)\n    def __getitem__(self, i):\n        return self._items[i]\n    def __iter__(self):\n        yield from self._items\n    def __contains__(self, x):\n        return x in self._items\n\nb = Batch([\"a\", \"b\", \"c\"])\nprint(len(b), b[1], \"c\" in b, list(b), bool(Batch([])))\n```\n\n```python\n# 3. __call__ and a context manager\nclass Timer:\n    def __enter__(self):\n        print(\"start\"); return self\n    def __exit__(self, exc_type, exc, tb):\n        print(\"stop\"); return False\n\nclass Adder:\n    def __init__(self, n): self.n = n\n    def __call__(self, x): return x + self.n\n\nwith Timer():\n    print(Adder(5)(10))\n```",
+  "use_cases_md": "- Value objects (Money, SKU, DateRange) with `__eq__`, `__hash__` and ordering so they work in sets, dict keys and `sorted`.\n- A `Batch` or `Page` class that supports `len`, iteration and indexing for report code.\n- A connection or transaction wrapper using `__enter__`/`__exit__`.\n- Callable strategy objects with configuration, e.g. a retry policy instance used like a function.\n- Frameworks: Pydantic, SQLAlchemy and Django use `__getattr__`, `__set_name__` and operator overloading extensively.",
+  "mistakes_md": "- **`__eq__` without `__hash__`** makes instances unhashable; define both consistently or use `@dataclass(frozen=True)`.\n- **Returning `False` instead of `NotImplemented`** for foreign types breaks the reflected comparison.\n- **Mutable hash fields**: if the hashed attribute changes while the object sits in a set, lookups fail.\n- **Forgetting `__repr__`**: debug output is useless.\n- **`__iter__` returning a list** instead of an iterator raises `TypeError`; return `iter(...)` or yield.\n- **Calling dunders directly** (`x.__len__()`) instead of the built-in (`len(x)`).",
+  "best_practices_md": "- Implement the smallest set of dunders that your class needs.\n- Keep `__eq__` and `__hash__` consistent and based on immutable fields.\n- Use `@dataclass`/`total_ordering` to avoid boilerplate.\n- Return `NotImplemented` for unsupported operand types.\n- Prefer generators for `__iter__`.\n- Use `typing.Protocol` for structural interfaces instead of forced inheritance.",
+  "my_context_md": "- `@contextmanager db_transaction()` in `AmazonVendorBankRecon/db.py` is the generator-based shortcut for `__enter__`/`__exit__`; write the same thing as a class to see how it maps.\n- The `@dataclass` config in `ECSInventoryPriceTracking/app/fetchers/spapi.py` already generates `__init__`, `__repr__` and `__eq__` for you; inspect what `dataclasses` adds.",
+  "revision_notes_md": "- Syntax maps to dunder methods looked up on the type: `len`, `+`, `[]`, `for`, `with`, `()`.\n- `__repr__` for developers, `__str__` for users (falls back to repr).\n- Define `__eq__` => `__hash__` becomes None unless you define it.\n- Return `NotImplemented` for unsupported operand types.\n- `total_ordering`: define `__eq__` plus one of `<`, `<=`, `>`, `>=`.\n- Iterable: `__iter__`; iterator: `__next__` + `__iter__` returns self.\n- `__bool__`, else `__len__`, drives truthiness.\n- `__enter__`/`__exit__` for `with`; truthy `__exit__` return suppresses exceptions.\n- `__call__` makes instances callable; duck typing/Protocols over inheritance.",
+  "exercises_md": "1. Build a `DateRange(start, end)` with `__contains__`, `__len__` (days), `__iter__` yielding dates and `__repr__`.\n2. Make a `Money` class sortable and hashable; put several instances in a set and verify duplicates collapse.\n3. Convert a `@contextmanager` function into a class with `__enter__`/`__exit__` and test that it suppresses nothing when `__exit__` returns False.\n4. Write a class with only `__getitem__` and show `for` and `in` still work; then add `__iter__`.",
+  "related": [
+    "py-oop-basics",
+    "python-oop-dataclasses",
+    "python-context-managers",
+    "python-generators-iterators",
+    "py-descriptors-properties"
+  ],
+  "flashcards": [
+    {
+      "front": "What does `len(x)` actually call?",
+      "back": "`type(x).__len__(x)`; dunders are looked up on the type."
+    },
+    {
+      "front": "What happens if you define `__eq__` but not `__hash__`?",
+      "back": "`__hash__` is set to None: instances become unhashable."
+    },
+    {
+      "front": "Why return `NotImplemented` from `__eq__`/`__add__`?",
+      "back": "It tells Python to try the reflected operation on the other operand instead of failing or wrongly returning False."
+    },
+    {
+      "front": "Iterable vs iterator?",
+      "back": "Iterable has `__iter__` returning an iterator; iterator has `__next__` and its `__iter__` returns itself."
+    },
+    {
+      "front": "`__repr__` vs `__str__`?",
+      "back": "repr is unambiguous for developers; str is user friendly and falls back to repr."
+    },
+    {
+      "front": "What does a truthy return value from `__exit__` do?",
+      "back": "Suppresses the exception that occurred in the with-block."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which method does `for x in obj:` call first?",
+      "options": [
+        "__next__",
+        "__getitem__",
+        "__iter__",
+        "__len__"
+      ],
+      "answer_index": 2,
+      "explanation": "`for` calls `iter(obj)` which uses `__iter__` (falling back to `__getitem__`)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A class defines `__eq__` only. What is true about `hash(obj)`?",
+      "options": [
+        "It uses id",
+        "It raises TypeError (unhashable)",
+        "It hashes all attributes",
+        "It returns 0"
+      ],
+      "answer_index": 1,
+      "explanation": "Defining `__eq__` sets `__hash__` to None unless you define `__hash__` too."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What should `__eq__` return for an unsupported operand type?",
+      "options": [
+        "False",
+        "None",
+        "NotImplemented",
+        "raise TypeError"
+      ],
+      "answer_index": 2,
+      "explanation": "NotImplemented lets Python try the other operand's reflected method."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Making an instance callable like `obj(1)` requires defining the method ____.",
+      "answers": [
+        "__call__",
+        "call"
+      ],
+      "explanation": "`__call__` is invoked by the call syntax."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In `with Timer() as t:` the object bound to `t` is what `____` returns.",
+      "answers": [
+        "__enter__",
+        "enter"
+      ],
+      "explanation": "The return value of `__enter__` is bound by `as`."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class Batch:\n    def __init__(self, items):\n        self._items = list(items)\n    def __len__(self):\n        return len(self._items)\n    def __getitem__(self, i):\n        return self._items[i]\n    def __contains__(self, x):\n        return x in self._items\n\nb = Batch([\"a\", \"b\", \"c\"])\nprint(len(b), b[1], \"c\" in b, bool(Batch([])))\nprint(list(b))\n",
+      "answers": [
+        "3 b True False\n['a', 'b', 'c']"
+      ],
+      "explanation": "`len` -> 3, `[1]` -> 'b', `in` -> True, empty Batch is falsy via `__len__`; `list(b)` works via the legacy `__getitem__` iteration protocol."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class P:\n    def __init__(self, x):\n        self.x = x\n    def __eq__(self, other):\n        return isinstance(other, P) and self.x == other.x\n\na, b = P(1), P(1)\nprint(a == b, a is b)\ntry:\n    print(len({a, b}))\nexcept TypeError as e:\n    print(\"TypeError:\", e)\n",
+      "answers": [
+        "True False\nTypeError: cannot use 'P' as a set element (unhashable type: 'P')"
+      ],
+      "explanation": "`__eq__` makes `a == b` True but sets `__hash__` to None so putting them in a set raises TypeError: unhashable type: 'P'."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "class Money:\n    def __init__(self, paise):\n        self.paise = paise\n    def __eq__(self, other):\n        return self.paise == other.paise\n\nprint(Money(5) == 5)\nprint({Money(5), Money(5)})\n",
+      "answer": "(1) `other.paise` raises AttributeError for non-Money operands; check `isinstance` and `return NotImplemented`. (2) Defining `__eq__` without `__hash__` makes Money unhashable, so the set raises TypeError. Add `def __hash__(self): return hash(self.paise)` (keeping paise effectively immutable), or use `@dataclass(frozen=True)`.",
+      "rubric": [
+        "Checks type and returns NotImplemented",
+        "Explains __hash__ becomes None",
+        "Adds consistent __hash__ or frozen dataclass"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the iterator protocol and how a class becomes iterable.",
+      "answer": "An object is iterable if `iter(obj)` works: its type defines `__iter__`, which returns an iterator. An iterator defines `__next__` which returns the next value and raises `StopIteration` when exhausted, and `__iter__` that returns itself. A `for` loop calls `iter()` once and then `next()` repeatedly. The easiest implementation is `def __iter__(self): yield from self.items`, because a generator is already an iterator. Separating iterable from iterator lets many independent loops run over the same container.",
+      "rubric": [
+        "__iter__ returns an iterator",
+        "__next__ and StopIteration",
+        "for loop calls iter then next",
+        "Generator in __iter__ is easiest"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why must `__eq__` and `__hash__` be consistent, and what is the rule?",
+      "answer": "Sets and dicts first compare hashes then use `==`. If two objects are equal they must have the same hash, otherwise they land in different buckets and duplicates are not detected. Hash only fields that equality uses and that do not change while the object is stored in a hashed container. That is why mutable objects are normally unhashable and value objects are frozen.",
+      "rubric": [
+        "Equal objects must have equal hashes",
+        "Hash from immutable fields used in __eq__"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What are dunder methods and why does `len(x)` not just call `x.len()`?",
+      "difficulty": "easy",
+      "answer_md": "Dunder (special) methods are hooks that Python's syntax and built-ins call: `__len__`, `__add__`, `__iter__`, `__enter__`. Built-ins like `len` call `type(x).__len__(x)`, giving a uniform interface across all types, validating that the result is a non-negative int, and allowing the interpreter to optimise common operations. The data model is what lets your own classes work with `len`, `sorted`, `in`, `with` and `+` exactly like built-in ones."
+    },
+    {
+      "question": "Explain `__repr__` vs `__str__` and which you must implement.",
+      "difficulty": "easy",
+      "answer_md": "`__repr__` returns an unambiguous developer string, ideally something that could recreate the object (`Money(5)`). It is used by the REPL, in containers (`print([obj])` shows reprs) and in logs. `__str__` returns a readable string for end users and `print`. `str()` falls back to `__repr__` when `__str__` is absent, but not vice versa, so always implement `__repr__`."
+    },
+    {
+      "question": "How do `__eq__`, `__hash__` and `@dataclass` interact?",
+      "difficulty": "hard",
+      "answer_md": "`@dataclass` generates `__eq__` comparing fields as tuples. By default (`eq=True`, `frozen=False`) it sets `__hash__ = None` because instances are mutable and equal objects must hash equally. `@dataclass(frozen=True)` makes fields read-only and generates a field-based `__hash__`, so instances are usable as dict keys. `@dataclass(unsafe_hash=True)` forces a hash on a mutable class, which is risky if fields change while stored in a set. The same logic applies to hand-written classes."
+    },
+    {
+      "question": "What is the difference between `__getattr__` and `__getattribute__`?",
+      "difficulty": "hard",
+      "answer_md": "`__getattribute__` is called for every attribute access and implements the normal lookup (instance dict, class, descriptors). `__getattr__` is only called as a fallback when normal lookup raises `AttributeError`. So `__getattr__` is safe for dynamic or proxy attributes, while overriding `__getattribute__` easily causes infinite recursion (use `super().__getattribute__`) and slows every access. Prefer `__getattr__` or descriptors/properties."
+    }
+  ]
+}

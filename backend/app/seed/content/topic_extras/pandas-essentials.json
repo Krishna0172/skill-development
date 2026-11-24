@@ -1,0 +1,70 @@
+{
+  "slug": "pandas-essentials",
+  "why_md": "pandas is the default tool for tabular ingestion and the first step of almost every ML/AI data pipeline: reading marketplace reports, joining them to catalogue data, aggregating, and producing features. Interviewers for data-heavy backend and AI roles expect you to know `loc`/boolean masks, merges and their pitfalls, groupby/agg/transform and dtypes.",
+  "revision_notes_md": "- `df.loc[mask, \"col\"] = value` - never chained `df[mask][\"col\"] = ...`.\n- Read IDs/SKUs/zip codes with `dtype={\"sku\": \"string\"}` to keep leading zeros.\n- `merge(..., how=\"left\", validate=\"many_to_one\", indicator=True)` catches duplicate-key row explosions.\n- `groupby(...).agg(total=(\"qty\", \"sum\"))` = named aggregation; `transform` keeps the original shape.\n- `rename(columns=map)` + check `set(required) - set(df.columns)` for schema validation.\n- `pd.to_datetime(..., errors=\"coerce\")`, `pd.to_numeric(..., errors=\"coerce\")`.\n- Vectorised ops beat `apply(axis=1)` by orders of magnitude.\n- `df.to_dict(\"records\")` / `itertuples()` to feed DB writes.",
+  "exercises_md": "1. Load a marketplace CSV, validate the required columns, rename to your schema, and left-merge to a SKU master with `validate=\"many_to_one\"` and `indicator=True`; report unmatched SKUs.\n2. Compute per-SKU daily revenue with named aggregation, then add a column with each row's share of its SKU's total using `transform`.",
+  "my_context_md": "ECSMarketplaceDataUpload's 150+ report processors are pandas pipelines - `read_csv`/`read_excel`, then `rename`, `merge`, `groupby` and `apply` - so this topic maps directly onto that code. Replacing row-wise `apply` with vectorised expressions and adding `validate=` to merges are the highest-value changes there.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To set qty to 0 where it is negative without a SettingWithCopyWarning: `df.____[df['qty'] < 0, 'qty'] = 0`.",
+      "answers": [
+        "loc"
+      ],
+      "explanation": ".loc does selection and assignment in one step."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To make merge raise if the right table has duplicate keys in a left join, pass validate='many_to____'.",
+      "answers": [
+        "one"
+      ],
+      "explanation": "validate='many_to_one' asserts right-side keys are unique."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You need a column with each order's quantity divided by its channel's total quantity, same number of rows. Which is right?",
+      "options": [
+        "df.groupby('channel')['qty'].sum()",
+        "df['qty'] / df.groupby('channel')['qty'].transform('sum')",
+        "df.groupby('channel').apply(len)",
+        "df['qty'].cumsum()"
+      ],
+      "answer_index": 1,
+      "explanation": "transform broadcasts the group sum back to each row, aligned on the original index."
+    },
+    {
+      "type": "debug",
+      "prompt": "After this merge, total revenue is higher than the source report. Why?",
+      "code": "orders = pd.read_csv(\"orders.csv\")          # 1,000 rows\ncatalog = pd.read_csv(\"catalog.csv\")        # sku can repeat (one row per marketplace)\ndf = orders.merge(catalog, on=\"sku\", how=\"left\")\nprint(len(df), df[\"revenue\"].sum())          # 1,240 rows",
+      "answer": "`catalog` has duplicate `sku` keys, so each matching order row is duplicated - a many-to-many join inflates rows and sums.\n\n```python\ncatalog = catalog.drop_duplicates(\"sku\")    # or merge on [\"sku\", \"marketplace\"]\ndf = orders.merge(catalog, on=\"sku\", how=\"left\", validate=\"many_to_one\")\n```",
+      "rubric": [
+        "Duplicate keys on the right side multiply rows",
+        "Deduplicate or merge on the full key",
+        "Use validate='many_to_one' to fail fast"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between groupby().agg() and groupby().transform().",
+      "answer": "`agg` reduces each group to one row - the result is indexed by the group keys (e.g. total qty per SKU). `transform` returns a result with the same index and length as the original frame, broadcasting the group's value back to every row, so you can assign it as a new column (e.g. each row's share of its SKU's total, or filling NaN with the group mean). Use agg for summary tables, transform for per-row features.",
+      "rubric": [
+        "agg -> one row per group",
+        "transform -> same shape as input, aligned to original index",
+        "transform for per-row features/assignments"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why read an order-id column with dtype='string'?",
+      "options": [
+        "It makes reading faster in all cases",
+        "It prevents numeric parsing that drops leading zeros or converts to float",
+        "pandas cannot merge int columns",
+        "It's required for groupby"
+      ],
+      "answer_index": 1,
+      "explanation": "IDs like '00123' would become 123, or 1.23e+05 floats when NaN appears."
+    }
+  ]
+}

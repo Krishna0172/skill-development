@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty, stat %}
+{% block title %}Resume claims{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Resume claims</h1><p>Every claim on your resume, the evidence behind it, and a STAR story ready for "tell me about…" questions. Mark a claim <strong>ready</strong> once you've written and rehearsed it.</p></div>
+  <div class="actions"><a class="btn" href="/interview">Interview prep</a></div>
+</div>
+<div class="grid g4 mb">{% for s in statuses %}{{ stat(s|label, counts[s]) }}{% endfor %}</div>
+{% if not claims %}{{ empty("No resume claims yet") }}{% endif %}
+<div class="stack">
+{% for c in claims %}
+  <details class="card" id="claim-{{ c.id }}">
+    <summary class="body" style="cursor:pointer;list-style:none"><div class="between"><strong>{{ c.claim }}</strong>{{ badge(c.status) }}</div></summary>
+    <div class="body topic-section">
+      {% if c.likely_questions %}<div class="small muted">Likely questions</div><ul class="small">{% for lq in c.likely_questions %}<li>{{ lq }}</li>{% endfor %}</ul>{% endif %}
+      <form method="post" action="/claims/{{ c.id }}" class="form-grid mt">
+        <label class="field">Status<select name="status" style="max-width:260px">{% for s in statuses %}<option value="{{ s }}" {{ 'selected' if s == c.status }}>{{ s|label }}</option>{% endfor %}</select></label>
+        {% for key, heading in [("situation", "Situation"), ("task", "Task"), ("action", "Action"), ("result", "Result")] %}
+          <label class="field">{{ heading }}{% if c.star_prompts and c.star_prompts.get(key) %} <span class="hint">{{ c.star_prompts.get(key) }}</span>{% endif %}
+            <textarea name="star_{{ key }}" rows="3">{{ c["star_" ~ key] }}</textarea></label>
+        {% endfor %}
+        <label class="field">Evidence <span class="hint">markdown: what in the code or the numbers backs this up</span><textarea name="evidence_md" rows="4">{{ c.evidence_md }}</textarea></label>
+        <div><button class="btn primary">Save claim</button></div>
+      </form>
+    </div>
+  </details>
+{% endfor %}
+</div>
+{% endblock %}

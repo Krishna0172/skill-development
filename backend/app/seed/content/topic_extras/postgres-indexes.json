@@ -1,0 +1,65 @@
+{
+  "slug": "postgres-indexes",
+  "why_md": "- Indexes are the first lever for slow queries on large ETL tables, and the most common source of write slowdowns when overused.\n- Composite column order, partial indexes and expression indexes decide whether a multi-tenant `WHERE orgid = ... AND date > ...` query takes milliseconds or minutes.\n- Vector search in AI systems (pgvector HNSW/IVFFlat) is the same idea: an index trades write cost and memory for read speed.\n- 'Why isn't my index used?' is a standard backend interview question.",
+  "revision_notes_md": "- B-tree: equality, range, ORDER BY, prefix LIKE (with suitable collation/opclass).\n- Composite (a, b): usable for `a`, `a AND b`, `a` + range on `b`; not for `b` alone (except rare skip scans).\n- Equality columns first, range column last.\n- Wrapping the column in a function/cast (`date(created_at)`, `col + 0`) disables a plain index; use an expression index or rewrite the predicate.\n- Partial index: `CREATE INDEX ... WHERE status = 'pending'` — small and fast for hot subsets.\n- Covering: `INCLUDE (cols)` enables index-only scans (needs visibility map → VACUUM).\n- GIN for JSONB/arrays/full-text; BRIN for huge append-only, naturally ordered tables.\n- `CREATE INDEX CONCURRENTLY` avoids blocking writes (can't run inside a transaction).",
+  "exercises_md": "1. For a large orders table queried by `orgid` + date range + status, design two candidate composite/partial indexes, create them with CONCURRENTLY on a copy, and compare EXPLAIN (ANALYZE, BUFFERS) results.\n2. Use `pg_stat_user_indexes` to find indexes with `idx_scan = 0` on your biggest tables, and estimate how much write overhead and disk they cost.",
+  "my_context_md": "Your services filter by org on most tables and store JSONB heavily, so composite indexes leading with the org column and GIN indexes for JSONB containment (`@>`) are the two index types most relevant to your queries. The `ForcesightJobSchedulerAndRunner` claim query (`FOR UPDATE SKIP LOCKED`) is a good candidate for a partial index on only the pending/runnable jobs.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "An index created with `CREATE INDEX ... ON jobs (run_at) ____ status = 'pending'` only covers pending rows (a partial index).",
+      "answers": [
+        "where"
+      ],
+      "explanation": "A WHERE clause on CREATE INDEX makes a partial index."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To build an index without blocking writes on a busy table, use `CREATE INDEX ____ idx ON orders (orgid)`.",
+      "answers": [
+        "concurrently"
+      ],
+      "explanation": "CONCURRENTLY builds the index without taking a lock that blocks INSERT/UPDATE/DELETE (slower, and not inside a transaction block)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (SQLite's EXPLAIN QUERY PLAN says SEARCH when an index is used, SCAN for a full scan.)",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.execute(\"CREATE TABLE o(id INTEGER PRIMARY KEY, org INT, d TEXT)\")\ndb.execute(\"CREATE INDEX ix ON o(org, d)\")\nqs = [\"SELECT * FROM o WHERE org = 1 AND d > '2024'\",\n      \"SELECT * FROM o WHERE d > '2024'\",\n      \"SELECT * FROM o WHERE org + 0 = 1\"]\nfor q in qs:\n    plan = db.execute(\"EXPLAIN QUERY PLAN \" + q).fetchone()[3]\n    print(plan.split()[0])",
+      "answers": [
+        "SEARCH\nSCAN\nSCAN"
+      ],
+      "explanation": "The composite index serves the leading column + range. Filtering only on the second column, or wrapping the column in an expression, can't use it."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.execute(\"CREATE TABLE o(id INTEGER PRIMARY KEY, org INT, d TEXT, note TEXT)\")\ndb.execute(\"CREATE INDEX ix ON o(org, d)\")\nfor q in [\"SELECT org, d FROM o WHERE org = 1\",\n          \"SELECT note FROM o WHERE org = 1\"]:\n    plan = db.execute(\"EXPLAIN QUERY PLAN \" + q).fetchone()[3]\n    print(\"COVERING\" in plan)",
+      "answers": [
+        "True\nFalse"
+      ],
+      "explanation": "The first query only needs indexed columns, so it is answered from the index alone (like PostgreSQL's index-only scan). The second needs `note` from the table."
+    },
+    {
+      "type": "debug",
+      "prompt": "This query is slow even though there is a B-tree index on `created_at`. Why, and how do you fix it?",
+      "code": "-- index: CREATE INDEX ix_orders_created ON orders (created_at);\nSELECT count(*)\nFROM orders\nWHERE date(created_at) = '2024-05-01'\n  AND orgid = 7;",
+      "answer": "Applying `date()` to the column means the predicate is on an expression, not on `created_at`, so the plain index can't be used.\n\nRewrite as a sargable range, and index for the full predicate:\n```sql\nSELECT count(*) FROM orders\nWHERE orgid = 7\n  AND created_at >= '2024-05-01' AND created_at < '2024-05-02';\n\nCREATE INDEX CONCURRENTLY ix_orders_org_created ON orders (orgid, created_at);\n```\n(Alternative: an expression index on `date(created_at)` — but the range rewrite is usually better.)",
+      "rubric": [
+        "Function on the column prevents index use",
+        "Rewrite as a half-open range on the raw column",
+        "Composite index with equality column (orgid) first"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "How do you decide whether to add an index, and what does it cost?",
+      "answer": "Start from the query, not the table: find the slow/frequent queries (pg_stat_statements), run `EXPLAIN (ANALYZE, BUFFERS)`, and check if a Seq Scan reads many rows to return few (`Rows Removed by Filter`). Then design the index for that predicate: equality columns first, range/sort column last, `INCLUDE` for index-only scans, partial `WHERE` for a hot subset, GIN for JSONB.\n\nCosts:\n- Every INSERT/UPDATE (non-HOT) must also update each index → slower writes and more WAL — significant for bulk ETL upserts.\n- Disk and memory (indexes compete for shared_buffers).\n- Indexing an updated column prevents HOT updates.\n\nVerify after creating (the plan uses it, latency drops) and periodically drop unused ones (`pg_stat_user_indexes.idx_scan = 0`).",
+      "rubric": [
+        "Driven by actual slow queries and EXPLAIN",
+        "Column order / partial / covering design",
+        "Write, WAL and storage overhead",
+        "Verify usage and drop unused indexes"
+      ]
+    }
+  ]
+}

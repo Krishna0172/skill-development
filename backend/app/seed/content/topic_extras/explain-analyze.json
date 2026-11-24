@@ -1,0 +1,70 @@
+{
+  "slug": "explain-analyze",
+  "why_md": "- EXPLAIN ANALYZE is how you prove why a query is slow instead of guessing; it's the core skill of query tuning.\n- ETL and report jobs that 'suddenly got slow' are usually stale statistics, a changed plan, or a missing index — all visible in the plan.\n- When an LLM generates SQL (text-to-SQL), checking its plan before running it on production is a guardrail.\n- Senior interviews often hand you a plan and ask what's wrong.",
+  "revision_notes_md": "- `EXPLAIN` = estimated plan; `EXPLAIN ANALYZE` actually runs the query (wrap writes in BEGIN/ROLLBACK).\n- Add `BUFFERS` to see shared hit (cache) vs read (disk) pages.\n- `cost=startup..total` is in arbitrary units; `rows` estimated vs `actual rows` — big mismatches = bad statistics.\n- `actual time` is per loop: total ≈ time × loops.\n- `Rows Removed by Filter` large → missing/unused index.\n- Nested Loop with many loops on the inner side + bad estimate is a classic slow pattern.\n- Fix estimates with `ANALYZE table`, extended statistics (`CREATE STATISTICS`), or higher statistics target.\n- pg_stat_statements finds which queries to look at first.",
+  "exercises_md": "1. Pick the slowest query from a report job, run `EXPLAIN (ANALYZE, BUFFERS)` on a copy of production data, and annotate each node: estimated vs actual rows, loops, and where time is spent.\n2. Deliberately make statistics stale (bulk insert into a table with autovacuum disabled on a test DB), capture the bad plan, run ANALYZE, and compare.",
+  "my_context_md": "Your LLM chat backend (`GetLlmData` / `ECSLlmQueryProcess`) stores the model-generated SQL; running `EXPLAIN` (without ANALYZE) on that SQL before execution is a cheap way to reject queries with huge estimated costs. For the heavy JSONB/CTE queries in `python-postgres`, `EXPLAIN (ANALYZE, BUFFERS)` is the tool to confirm where time goes.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To see shared buffer hits vs disk reads for each plan node, run `EXPLAIN (ANALYZE, ____) SELECT ...`.",
+      "answers": [
+        "buffers"
+      ],
+      "explanation": "The BUFFERS option reports shared hit/read/dirtied/written pages."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "When estimated rows are far from actual rows after a bulk load, run ____ on the table to refresh planner statistics.",
+      "answers": [
+        "analyze",
+        "analyze table",
+        "vacuum analyze"
+      ],
+      "explanation": "ANALYZE re-samples the table and updates pg_statistic, which the planner uses for row estimates."
+    },
+    {
+      "type": "output",
+      "prompt": "A plan line reads `actual time=0.050..0.080 rows=2 loops=40000`. This snippet computes the total time for the node. What does it print?",
+      "code": "per_loop_ms = 0.080\nloops = 40000\ntotal_ms = per_loop_ms * loops\nprint(f\"{total_ms:.0f} ms, {2 * loops} rows\")",
+      "answers": [
+        "3200 ms, 80000 rows"
+      ],
+      "explanation": "actual time and rows are averages per loop; multiply by loops to get totals (about 3.2 s and 80k rows for this node)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You run `EXPLAIN ANALYZE DELETE FROM staging WHERE batch_id = 9;` to check its plan. What happened?",
+      "options": [
+        "Nothing — EXPLAIN never executes statements",
+        "The rows were actually deleted",
+        "PostgreSQL raised an error because ANALYZE can't be used with DELETE",
+        "Only the first 100 rows were deleted"
+      ],
+      "answer_index": 1,
+      "explanation": "EXPLAIN ANALYZE really executes the statement. Wrap it in BEGIN; ... ROLLBACK; to inspect a write plan safely."
+    },
+    {
+      "type": "debug",
+      "prompt": "A developer says: 'The plan shows the Index Scan took 0.03 ms, so the index is fine — the slowness must be in Python.' What did they miss?",
+      "code": "Nested Loop  (cost=0.43..9512.11 rows=12 width=48) (actual time=0.06..4210.55 rows=380000 loops=1)\n  ->  Seq Scan on orders o  (cost=0.00..1250.00 rows=12 width=16) (actual time=0.01..95.20 rows=95000 loops=1)\n        Filter: (orgid = 7)\n  ->  Index Scan using ix_items_order on order_items i  (cost=0.43..688.10 rows=1 width=32) (actual time=0.010..0.030 rows=4 loops=95000)\n        Index Cond: (order_id = o.id)",
+      "answer": "`actual time` on the inner Index Scan is **per loop**, and it ran `loops=95000` times: ~0.03 ms × 95,000 ≈ 2.9 s. The real problem is the estimate: the planner expected `rows=12` orders for orgid 7 but got 95,000, so it chose a nested loop.\n\nFix:\n- `ANALYZE orders;` (or raise the statistics target on `orgid`) so estimates are right; the planner will then likely choose a hash join.\n- Add an index on `orders (orgid)` if the filter is selective for most orgs.\n- Re-check with `EXPLAIN (ANALYZE, BUFFERS)`.",
+      "rubric": [
+        "actual time is per loop; multiply by loops",
+        "Estimated rows (12) vs actual (95000) mismatch",
+        "Bad estimate led to nested loop; fix statistics (ANALYZE)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Walk me through reading an EXPLAIN ANALYZE plan for a slow query.",
+      "answer": "1. Read it inside-out: the most indented nodes run first and feed their parents.\n2. For each node compare **estimated rows** vs **actual rows**. A 10×+ mismatch means the planner made decisions on bad information (stale stats, correlated columns, functions on columns).\n3. Find where the time goes: `actual time` (end value) × `loops`. The node with the largest inclusive time minus its children is the hotspot.\n4. Look for red flags: `Seq Scan` with large `Rows Removed by Filter`; nested loops with huge loop counts; `Sort Method: external merge Disk` (work_mem too small); Hash batches > 1.\n5. With `BUFFERS`, high `read` means disk I/O; high `hit` means CPU/cache work.\n6. Fix the cause (index, rewrite, ANALYZE/extended statistics, work_mem) and re-run to confirm.\n\nRemember ANALYZE executes the query — use a transaction + ROLLBACK for writes.",
+      "rubric": [
+        "Inside-out reading; estimates vs actual rows",
+        "Time × loops to locate the hotspot",
+        "Red flags: seq scan + filter, nested loop with many loops, disk sorts",
+        "Fix then re-measure; ANALYZE executes the query"
+      ]
+    }
+  ]
+}

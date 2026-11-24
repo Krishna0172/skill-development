@@ -1,0 +1,154 @@
+{
+  "slug": "py-multiprocessing",
+  "title": "Multiprocessing for CPU-bound work",
+  "skill": "python-concurrency",
+  "extra_skills": [
+    "python-performance",
+    "etl-data-processing"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "multiprocessing",
+    "processpoolexecutor",
+    "pickling",
+    "spawn",
+    "shared-memory",
+    "pandas",
+    "chunking"
+  ],
+  "summary": "Using multiple processes to get real parallelism for CPU-bound Python: `Process`, `Pool` and `ProcessPoolExecutor`, what pickling means for arguments and results, start methods (spawn on Windows/macOS, fork vs forkserver on Linux), shared memory, and splitting pandas work into chunks across worker processes.",
+  "why_md": "- The GIL means threads can't speed up CPU-bound Python (parsing, regex, `apply`, n-grams, feature computation); processes can.\n- It's a common gap: knowing *when* processes beat threads, and what they cost (startup, pickling, memory), is a staple senior interview question.\n- Developing on Windows means **spawn** semantics — missing `if __name__ == \"__main__\"` or lambdas as tasks fail immediately.\n- AI pre-processing (tokenising, chunking documents, computing features) is CPU-bound and benefits directly.",
+  "details_md": "### Why processes\nEach process has its own interpreter and GIL, so CPU-bound Python code runs truly in parallel across cores. The price: process startup, no shared Python objects (data is copied), and every argument/result is **pickled** across a pipe.\n\n### APIs\n- `multiprocessing.Process(target=f, args=...)` — manual control.\n- `multiprocessing.Pool` — `map`, `imap_unordered`, `starmap`, `chunksize=`; `maxtasksperchild` recycles workers to cap memory growth.\n- `concurrent.futures.ProcessPoolExecutor` — same interface as `ThreadPoolExecutor` (`submit`, `map`, `as_completed`), easy to swap; supports `max_tasks_per_child` (3.11+). Usually the default choice.\n\n### Pickling\nTasks must be picklable: functions are pickled **by reference** (module + qualified name), so they must be importable top-level functions — not lambdas, nested functions or bound methods of unpicklable objects. Arguments and return values must pickle too: DB connections, locks, open files and boto3 clients can't be sent; create them **inside** the worker (e.g. a pool `initializer`). Big arguments are expensive: pass a file path / S3 key / row range rather than a 2 GB DataFrame.\n\n### Start methods\n- **spawn** (default on Windows and macOS): a fresh interpreter re-imports your main module; anything at module top level runs again in every child. Hence the mandatory `if __name__ == \"__main__\":` guard and the rule that workers must be importable.\n- **fork** (historically Linux default): child gets a copy-on-write copy of the parent — fast, but forking a process with threads or open connections (psycopg2, boto3) is unsafe.\n- **forkserver**: forks from a clean server process; becoming the Linux default in recent Python versions.\nSet explicitly with `multiprocessing.get_context(\"spawn\")` for consistent behaviour across dev (Windows) and prod (Linux container).\n\n### Shared state\nPrefer passing data in and returning results. When you must share: `multiprocessing.shared_memory.SharedMemory` (raw buffers, e.g. a NumPy array without copying), `Value`/`Array`, or a `Manager` (proxy objects; slow). Coordinate across separate *machines/containers* with the database (e.g. `FOR UPDATE SKIP LOCKED`), not multiprocessing.\n\n### Chunking pandas work\nSplit a big frame into ~N_cores × (2-4) chunks (or better, have each worker read its own file/partition), process with a top-level function, `pd.concat` results. Only worthwhile when per-chunk compute dominates pickling cost — vectorised pandas ops are already C-speed; the win is for row-wise `apply`, regex, text processing, or per-file parsing. Watch memory: each worker holds its own copy.\n\n### When it's a bad idea\nI/O-bound work (threads/asyncio are cheaper), tiny tasks (overhead dominates), ECS tasks with 1 vCPU (no cores to use), and work that's already vectorised.",
+  "code_md": "```python\n# parse_reports.py - CPU-heavy parsing of many files in parallel\nimport os\nfrom concurrent.futures import ProcessPoolExecutor, as_completed\nfrom pathlib import Path\nimport pandas as pd\n\ndef parse_one(path: str) -> pd.DataFrame:       # top-level -> picklable by reference\n    df = pd.read_csv(path, dtype=\"string\")\n    df[\"sku\"] = df[\"sku\"].str.extract(r\"([A-Z0-9]{10})\")   # CPU-heavy regex\n    return df\n\ndef main(folder: str) -> pd.DataFrame:\n    files = [str(p) for p in Path(folder).glob(\"*.csv\")]\n    frames = []\n    workers = min(len(files), os.cpu_count() or 1)\n    with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=50) as ex:\n        futs = {ex.submit(parse_one, f): f for f in files}   # send paths, not data\n        for fut in as_completed(futs):\n            frames.append(fut.result())\n    return pd.concat(frames, ignore_index=True)\n\nif __name__ == \"__main__\":       # REQUIRED with spawn (Windows/macOS)\n    print(len(main(\"reports/\")))\n```\n\n```python\n# Chunk a DataFrame for a row-wise CPU-bound transform; per-worker DB connection\nimport multiprocessing as mp\nimport numpy as np\n\n_conn = None\ndef init_worker(dsn):                 # runs once per worker process\n    global _conn\n    import psycopg2\n    _conn = psycopg2.connect(dsn)     # connections are never pickled/shared\n\ndef score_chunk(chunk):\n    chunk = chunk.copy()\n    chunk[\"ngrams\"] = chunk[\"review\"].map(extract_ngrams)  # slow pure-Python work\n    return chunk\n\nif __name__ == \"__main__\":\n    ctx = mp.get_context(\"spawn\")    # same behaviour on Windows and Linux\n    chunks = np.array_split(df, ctx.cpu_count() * 3)\n    with ctx.Pool(initializer=init_worker, initargs=(DSN,)) as pool:\n        result = pd.concat(pool.map(score_chunk, chunks))\n```",
+  "use_cases_md": "- Extracting n-grams from millions of review texts across all cores.\n- Parsing a backlog of hundreds of marketplace report files in parallel, one file per task.\n- Row-wise `apply` with complex Python logic on a large DataFrame, chunked across workers.\n- Pre-computing text features/token counts for an AI pipeline before embedding.\n- Not a use case: calling SP-API or S3 for 10k objects — that's I/O-bound; use threads/asyncio.",
+  "mistakes_md": "- **No `__main__` guard on Windows**: children re-run the pool creation → `RuntimeError` about bootstrapping. Fix: guard + `main()`.\n- **Lambdas/nested functions as tasks**: `PicklingError`. Fix: top-level functions (use `functools.partial` for parameters).\n- **Passing huge DataFrames to each task**: pickling dominates, memory multiplies. Fix: pass paths/keys/ranges; workers load their own data.\n- **Sharing a DB connection/boto3 client** created in the parent. Fix: create per worker in an `initializer`.\n- **Using fork after starting threads/connection pools**: deadlocks or corrupted connections. Fix: spawn/forkserver, or create resources after forking.\n- **Parallelising already-vectorised pandas ops**: slower due to overhead. Fix: profile first.\n- **More workers than vCPUs** in a container. Fix: size to `os.cpu_count()`/task CPU allocation.",
+  "best_practices_md": "- Use processes only for CPU-bound work you've profiled.\n- Default to `ProcessPoolExecutor`; use `Pool.imap_unordered(chunksize=...)` for many small items.\n- Keep tasks coarse-grained; send small descriptors, return compact results.\n- Create unpicklable resources in workers via `initializer`.\n- Set the start method explicitly; always guard with `__main__`.\n- Recycle workers (`max_tasks_per_child`) for leaky libraries.\n- Match worker count to available CPUs in the container.",
+  "my_context_md": "The repo audit lists **multiprocessing as not used at all**, so this is a genuine gap. The most natural candidate is `ECSAmazonReviewRatingPostgres/UpdateNgrams.py`: nltk n-gram extraction over review text is pure-Python, CPU-bound work that threads can't speed up. A second candidate is backfilling many files through the `ECSMarketplaceDataUpload` processors (one file per process). Before doing either, check the ECS task's vCPU allocation — with 1 vCPU there's nothing to gain. Note that coordination *between* ECS tasks is already handled by `SELECT … FOR UPDATE SKIP LOCKED` in `ForcesightJobSchedulerAndRunner`; multiprocessing only parallelises within one task.",
+  "revision_notes_md": "- Processes = separate GILs → real CPU parallelism; threads don't help CPU-bound Python.\n- Cost: startup + pickling args/results + memory per worker.\n- Tasks must be top-level importable functions; no lambdas; no connections/locks/clients as args.\n- spawn (Windows/macOS default) re-imports main → `if __name__ == '__main__'` mandatory.\n- fork is unsafe with threads/open connections; forkserver is a safer Linux option.\n- Create resources in workers via `initializer`.\n- Send paths/keys, not big DataFrames; coarse tasks; `chunksize` for many small items.\n- `max_tasks_per_child` recycles workers.\n- Profile first; vectorised pandas often beats parallel `apply`.",
+  "exercises_md": "1. Take a pure-Python n-gram function, run it over 200k review strings serially, with `ThreadPoolExecutor`, and with `ProcessPoolExecutor`; record wall times and explain the results.\n2. Write a script that parses every CSV in a folder in parallel (one file per task) and concatenates results; run it on Windows to confirm the `__main__` guard is needed.\n3. Use a pool `initializer` to open one psycopg2 connection per worker and insert each worker's results; verify connections aren't passed from the parent.\n4. Experiment with `Pool.imap_unordered(f, items, chunksize=k)` for k in 1, 10, 100, 1000 on 100k small items and plot the timing.",
+  "related": [
+    "python-threading-gil",
+    "py-threading-patterns",
+    "py-performance",
+    "pandas-cleaning-performance",
+    "py-modules-packages"
+  ],
+  "flashcards": [
+    {
+      "front": "Why must worker functions be top-level for multiprocessing?",
+      "back": "Functions are pickled by reference (module + qualified name); the child must import them. Lambdas and nested functions can't be looked up that way."
+    },
+    {
+      "front": "What does the spawn start method do?",
+      "back": "Starts a fresh interpreter for each worker and re-imports the main module; default on Windows/macOS. Requires the `__main__` guard and picklable tasks."
+    },
+    {
+      "front": "How do you give each worker its own DB connection?",
+      "back": "Pass an `initializer` (and `initargs`) to Pool/ProcessPoolExecutor that creates the connection in a module global inside the worker."
+    },
+    {
+      "front": "When does multiprocessing make pandas slower?",
+      "back": "When the operation is already vectorised or tasks are small: pickling the chunks and results costs more than the compute saved."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which workload benefits most from `ProcessPoolExecutor` rather than `ThreadPoolExecutor`?",
+      "options": [
+        "Downloading 10k S3 objects",
+        "Running 500 SELECT queries",
+        "Pure-Python n-gram extraction over 5M reviews",
+        "Calling a rate-limited REST API"
+      ],
+      "answer_index": 2,
+      "explanation": "CPU-bound Python is limited by the GIL in threads; the others are I/O-bound."
+    },
+    {
+      "type": "mcq",
+      "prompt": "On Windows, a script creates a `Pool` at module top level without a `__main__` guard. What happens?",
+      "options": [
+        "Each child re-imports the module and tries to start its own pool, raising a RuntimeError about bootstrapping",
+        "It works the same as on Linux",
+        "Python silently falls back to threads",
+        "Pickling of the pool fails with TypeError"
+      ],
+      "answer_index": 0,
+      "explanation": "Spawn re-imports the main module in each child; the guard prevents re-running the pool creation."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To run setup code (like opening a DB connection) once in each worker process, pass a function as the `____` argument of `Pool` or `ProcessPoolExecutor`.",
+      "answers": [
+        "initializer"
+      ],
+      "explanation": "Used with `initargs=(...)`."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To share a large NumPy buffer between processes without copying, use `multiprocessing.____.SharedMemory`.",
+      "answers": [
+        "shared_memory"
+      ],
+      "explanation": "`from multiprocessing import shared_memory` (3.8+)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import pickle\n\ndef double(x):\n    return x * 2\n\nrestored = pickle.loads(pickle.dumps(double))\nprint(restored is double, restored(21))\ntry:\n    pickle.dumps(lambda x: x * 2)\nexcept Exception as e:\n    print(type(e).__name__)",
+      "answers": [
+        "True 42\nPicklingError"
+      ],
+      "explanation": "Functions pickle by reference (module + name), so unpickling returns the same function object. A lambda has no importable name, so pickling fails — the same reason it can't be a multiprocessing task."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def split_even(seq, n):\n    k, r = divmod(len(seq), n)\n    out, start = [], 0\n    for i in range(n):\n        end = start + k + (1 if i < r else 0)\n        out.append(seq[start:end])\n        start = end\n    return out\n\nparts = split_even(list(range(10)), 4)\nprint([len(p) for p in parts])\nprint(parts[-1])",
+      "answers": [
+        "[3, 3, 2, 2]\n[8, 9]"
+      ],
+      "explanation": "10 = 4*2 + 2, so the first two chunks get one extra item — the same idea as `np.array_split`."
+    },
+    {
+      "type": "debug",
+      "prompt": "This parallel loader fails on Windows and is slow on Linux. What's wrong and how do you fix it?",
+      "code": "import psycopg2, pandas as pd\nfrom concurrent.futures import ProcessPoolExecutor\n\nconn = psycopg2.connect(DSN)\ndf = pd.read_csv(\"all_reviews.csv\")          # 3 GB\n\nwith ProcessPoolExecutor() as ex:\n    results = list(ex.map(lambda i: process(df, conn, i), range(1000)))",
+      "answer": "Problems:\n- No `if __name__ == \"__main__\":` guard: with spawn each child re-imports the module, re-reading the 3 GB CSV and re-creating the pool.\n- A lambda is not picklable.\n- The whole DataFrame and a psycopg2 connection are passed to each of 1000 tasks; connections can't be pickled and copying 3 GB per task is enormous.\n\n```python\n_conn = None\ndef init(dsn):\n    global _conn\n    _conn = psycopg2.connect(dsn)\n\ndef process_part(path):          # top-level, takes a small descriptor\n    part = pd.read_csv(path)\n    ...  # compute + write with _conn\n    return len(part)\n\nif __name__ == \"__main__\":\n    paths = split_into_files(\"all_reviews.csv\", n=32)\n    with ProcessPoolExecutor(initializer=init, initargs=(DSN,)) as ex:\n        total = sum(ex.map(process_part, paths))\n```",
+      "rubric": [
+        "Missing __main__ guard (spawn re-imports module)",
+        "Lambda / connection are not picklable",
+        "Passing the full DataFrame to every task is costly — pass small descriptors",
+        "Create the connection per worker via initializer"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the trade-offs between fork and spawn start methods.",
+      "answer": "`fork` clones the parent process: startup is fast and the child inherits already-loaded modules and data copy-on-write, so large read-only data is cheap to share. But it copies only the calling thread, so locks held by other threads (logging, DB drivers, boto3 internals) may be stuck forever in the child, and inherited sockets/connections get shared by two processes, corrupting protocol state. `spawn` starts a clean interpreter and re-imports the main module: slower startup and everything must be pickled or re-loaded, and the `__main__` guard is required, but it's safe and behaves the same on every OS (it's the default on Windows and macOS). `forkserver` is a middle ground on Linux. For services with threads and DB pools, prefer spawn/forkserver, and create resources inside workers.",
+      "rubric": [
+        "fork: fast, copy-on-write, inherits state",
+        "fork unsafe with threads/locks/open connections",
+        "spawn: clean interpreter, re-imports main, needs pickling + guard, default on Windows/macOS"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "When would you use multiprocessing instead of threads or asyncio?",
+      "difficulty": "medium",
+      "answer_md": "When the bottleneck is CPU executing Python bytecode: parsing, regex, row-wise `apply`, text processing, feature computation. The GIL means only one thread executes bytecode at a time, so threads give no speedup there; processes each have their own interpreter.\n\nNot for I/O-bound work: waiting on DB/HTTP/S3 releases the GIL, so threads or asyncio are cheaper (no pickling, shared memory, less RAM).\n\nBefore reaching for processes: profile, try vectorising (pandas/NumPy run in C and often release the GIL), and check the container actually has multiple vCPUs. Then use coarse tasks (one file or chunk per task), pass descriptors not data, create connections per worker, and guard with `__main__`."
+    },
+    {
+      "question": "How would you parallelise a slow pandas `apply` over 10M rows?",
+      "difficulty": "hard",
+      "answer_md": "1. **Profile and vectorise first**: replace `apply` with column ops, `.str` methods, `np.where`, `merge` for lookups. This is often a 10-100x win alone.\n2. If logic is irreducibly Python, **chunk** the frame (`np.array_split(df, cpu*3)`) or better have each worker read its own partition (file, row range, or SQL `WHERE id % N = k`) to avoid pickling the big frame.\n3. Map a **top-level** function over chunks with `ProcessPoolExecutor`/`Pool.imap` and `pd.concat` results.\n4. Return only needed columns to minimise pickling back.\n5. Mind memory: each worker holds its chunk plus intermediates; set workers to the vCPUs actually available.\n6. Measure end-to-end; if pickling dominates, the chunks are too small or the work too cheap.\n\nFor bigger-than-memory data, consider pushing aggregation into PostgreSQL or using a columnar engine instead."
+    },
+    {
+      "question": "What can and can't be passed to a worker process?",
+      "difficulty": "easy",
+      "answer_md": "Anything picklable: built-in types, dataclasses, DataFrames, NumPy arrays, top-level functions and classes (by reference — the worker must be able to import them).\n\nNot picklable or not meaningful to pass: lambdas and nested functions, generators, open files and sockets, DB connections and cursors, `threading.Lock`, boto3 clients/sessions, objects holding any of those.\n\nPattern: pass small descriptors (path, S3 key, ID range, config dict) and create heavyweight/unpicklable resources inside the worker, typically in an `initializer` that stores them in a module global. Also remember that large picklable objects are *copied* to each worker — expensive in both time and memory."
+    }
+  ]
+}

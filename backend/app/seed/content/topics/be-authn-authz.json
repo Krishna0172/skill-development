@@ -1,0 +1,155 @@
+{
+  "slug": "be-authn-authz",
+  "title": "Authentication and authorization for backend APIs",
+  "skill": "authentication",
+  "extra_skills": [
+    "web-security",
+    "fastapi",
+    "database-design"
+  ],
+  "category": "Backend",
+  "difficulty": "advanced",
+  "tags": [
+    "authentication",
+    "authorization",
+    "oauth2",
+    "pkce",
+    "argon2",
+    "rbac",
+    "multi-tenancy"
+  ],
+  "summary": "Authentication proves who the caller is (sessions, tokens, OAuth2); authorization decides what they may do (RBAC, ABAC, tenant isolation). A solid backend hashes passwords with argon2/bcrypt, uses standard OAuth2 flows (authorization code + PKCE for users, client credentials for services), and enforces `org_id` isolation on every query so one seller can never see another's data.",
+  "why_md": "- In a multi-tenant SaaS, a missing `org_id` filter is a data breach, not a bug.\n- OAuth2 is everywhere: marketplace APIs (Amazon LWA), Google, internal service auth, and LLM tool integrations.\n- Interviews routinely ask sessions vs JWT, password storage and OAuth flows.\n- AI products add new authz questions: which documents may this user's RAG query retrieve?",
+  "details_md": "### Sessions vs tokens\n- **Server sessions**: random session ID in an `HttpOnly; Secure; SameSite` cookie, session data in Postgres/Redis. Easy revocation; needs a store; CSRF protection for cookie auth.\n- **Bearer tokens** (opaque or JWT): `Authorization: Bearer ...`. JWTs are self-contained and verifiable without a DB lookup, but hard to revoke — keep access tokens short-lived (5-15 min) and use refresh tokens (stored, rotatable) for renewal.\n\n### Password storage\nNever encrypt or plain-hash passwords. Use a slow, salted, memory-hard KDF: **argon2id** (`argon2-cffi`) or **bcrypt**. Verify with the library's constant-time check, and rehash when parameters change (`needs_rehash`). Rate-limit login attempts.\n\n### OAuth2 flows\n- **Authorization code + PKCE** (users, incl. SPAs/mobile): client creates a random `code_verifier`, sends `code_challenge = BASE64URL(SHA256(verifier))` to the authorize endpoint; the user logs in and the app receives a `code` at its redirect URI; it exchanges `code + verifier` for tokens. PKCE stops intercepted codes from being redeemed. Validate `state` against CSRF.\n- **Client credentials**: service-to-service; client ID + secret → access token, no user.\n- **Refresh token grant**: long-lived refresh token → new access token. This is what an app does when it keeps calling a marketplace API on a seller's behalf.\nOpenID Connect adds an ID token (who the user is) on top of OAuth2 (what the app may access).\n\n### Authorization models\n- **RBAC**: roles → permissions (`admin` can `reports:delete`). Simple, coarse.\n- **ABAC/policies**: decisions use attributes of user, resource and context (`user.org_id == report.org_id and report.status != 'locked'`).\n- Check permissions in a dependency/service, not just in the UI.\n\n### Multi-tenant isolation\nDerive `org_id` from the authenticated token, **never** from a request parameter the client controls. Every query filters by it (repository scoped to the tenant), composite indexes start with `org_id`, and return 404 (not 403) for other tenants' resources to avoid leaking existence. Postgres **Row-Level Security** (`CREATE POLICY ... USING (org_id = current_setting('app.org_id')::int)`) adds defense in depth.",
+  "code_md": "```python\nfrom argon2 import PasswordHasher\nfrom argon2.exceptions import VerifyMismatchError\n\nph = PasswordHasher()                       # argon2id with sane defaults\n\ndef register(conn, email: str, password: str):\n    with conn.cursor() as cur:\n        cur.execute(\"INSERT INTO users(email, pw_hash) VALUES (%s, %s)\", (email, ph.hash(password)))\n\ndef login(conn, email: str, password: str) -> int | None:\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT id, pw_hash FROM users WHERE email = %s\", (email,))\n        row = cur.fetchone()\n    if row is None:\n        ph.hash(password)                    # equalize timing for unknown emails\n        return None\n    try:\n        ph.verify(row[1], password)\n    except VerifyMismatchError:\n        return None\n    if ph.check_needs_rehash(row[1]):\n        ...                                  # store ph.hash(password)\n    return row[0]\n```\n\n```python\nfrom typing import Annotated\nfrom fastapi import Depends, HTTPException\n\nROLE_PERMS = {\"viewer\": {\"reports:read\"}, \"admin\": {\"reports:read\", \"reports:delete\"}}\n\ndef current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> User:\n    claims = verify_access_token(token)      # signature, exp, aud, iss\n    return User(id=int(claims[\"sub\"]), org_id=claims[\"org_id\"], role=claims[\"role\"])\n\ndef require(perm: str):\n    def checker(user: Annotated[User, Depends(current_user)]) -> User:\n        if perm not in ROLE_PERMS.get(user.role, set()):\n            raise HTTPException(403, \"forbidden\")\n        return user\n    return checker\n\n@app.delete(\"/reports/{report_id}\")\ndef delete_report(report_id: int, user: Annotated[User, Depends(require(\"reports:delete\"))], conn: Conn):\n    with conn.cursor() as cur:               # org_id from the token, never from the request\n        cur.execute(\"DELETE FROM reports WHERE id = %s AND org_id = %s RETURNING id\",\n                    (report_id, user.org_id))\n        if cur.fetchone() is None:\n            raise HTTPException(404, \"report not found\")   # don't reveal other tenants' data\n```",
+  "use_cases_md": "- Seller dashboard: authorization-code login, short-lived access token, `org_id` claim scoping every query.\n- Internal cron service calling the reports API with client credentials.\n- Storing a seller's marketplace refresh token (encrypted) and exchanging it for access tokens before each SP-API call.\n- RBAC for 'analyst can view, admin can delete uploads'.\n- RAG chat: retrieval filtered by `org_id` so the LLM never sees another seller's documents.",
+  "mistakes_md": "- **Taking `org_id` from the query string/body**: any user can read other tenants. Derive from the token.\n- **SHA-256/MD5 password hashes** (even salted): far too fast to brute-force. Use argon2id/bcrypt.\n- **Long-lived JWTs with no revocation**: a leaked token works for days. Short expiry + refresh tokens.\n- **Authorization only in the UI** (hiding buttons): APIs must enforce.\n- **Skipping `state`/PKCE** in OAuth redirects: CSRF and code interception.\n- **Logging tokens or Authorization headers**.\n- **Returning 403 for other tenants' IDs**: confirms they exist; return 404.",
+  "best_practices_md": "- Use a vetted library/IdP (Cognito, Auth0, Keycloak) instead of writing OAuth servers.\n- argon2id or bcrypt; constant-time verify; rehash on parameter change.\n- Access tokens 5-15 min; rotate refresh tokens; store them encrypted.\n- Validate JWT `exp`, `aud`, `iss`, and pin the algorithm.\n- Tenant-scoped repositories + composite indexes `(org_id, ...)`; consider RLS.\n- Centralize permission checks in dependencies; deny by default.\n- Audit-log security-relevant actions.",
+  "my_context_md": "`ECSInventoryPriceTracking/app/fetchers/spapi.py` implements the client side of an OAuth refresh-token flow: it exchanges a stored LWA refresh token for access tokens and refreshes them before they expire. `ECSAmazonBankStatementPostgres/AwsSignature.py` (hand-written SigV4 with hmac/hashlib) is request signing — another way to authenticate API calls. `GetLlmData` tracks per-org cost and chat sessions, so it's already multi-tenant: check that every query there filters on the org from the authenticated context. You haven't implemented auth server-side (JWT issuing, password hashing) yet — that's the gap this topic closes.",
+  "revision_notes_md": "- AuthN = who; AuthZ = what they may do.\n- Sessions: cookie + server store, easy revoke; JWT: stateless, short-lived + refresh.\n- Passwords: argon2id/bcrypt, salted, slow; constant-time verify.\n- Auth code + PKCE: challenge = BASE64URL(SHA256(verifier)); `state` vs CSRF.\n- Client credentials: service-to-service, no user.\n- OIDC = identity layer (ID token) on OAuth2.\n- RBAC roles→permissions; ABAC attribute policies.\n- `org_id` from token, filter every query, 404 for foreign resources, RLS as backup.",
+  "exercises_md": "1. Implement register/login with `argon2-cffi` in a small FastAPI app; add a login rate limit.\n2. Write a script that performs the PKCE math: generate a verifier, compute the S256 challenge, and verify it against RFC 7636's example values.\n3. Build a `require(perm)` dependency with an RBAC map and tests for allowed/forbidden/other-tenant cases.\n4. Enable Postgres RLS on a `reports` table with a policy on `current_setting('app.org_id')` and prove a query without the setting returns no rows.",
+  "related": [
+    "jwt-authentication",
+    "web-security-owasp",
+    "be-dependency-injection",
+    "rest-api-design",
+    "database-normalization",
+    "ai-security"
+  ],
+  "flashcards": [
+    {
+      "front": "PKCE code_challenge (S256)?",
+      "back": "BASE64URL-encode (no padding) the SHA-256 of the code_verifier."
+    },
+    {
+      "front": "OAuth2 flow for service-to-service calls with no user?",
+      "back": "Client credentials grant."
+    },
+    {
+      "front": "Why argon2id/bcrypt instead of SHA-256 for passwords?",
+      "back": "They're deliberately slow (and argon2 memory-hard) with built-in salts, making brute force expensive."
+    },
+    {
+      "front": "Where must `org_id` for tenant filtering come from?",
+      "back": "The authenticated identity (token/session), never a client-supplied parameter."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What does PKCE protect against in the authorization code flow?",
+      "options": [
+        "Password reuse across sites",
+        "SQL injection in the callback",
+        "An attacker who intercepts the authorization code redeeming it for tokens",
+        "Expired refresh tokens"
+      ],
+      "answer_index": 2,
+      "explanation": "Without the original code_verifier, an intercepted code can't be exchanged."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An endpoint `GET /reports?org_id=7` returns reports for org 7 after checking the user is logged in. What's the vulnerability?",
+      "options": [
+        "Any authenticated user can read any organization's reports by changing org_id (broken object-level authorization)",
+        "Query params are not encrypted by HTTPS",
+        "It should use POST",
+        "No vulnerability if the user is logged in"
+      ],
+      "answer_index": 0,
+      "explanation": "Tenant scope must come from the token; trusting a client-supplied org_id is an IDOR/BOLA flaw."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The OAuth2 grant used when a backend keeps calling an API on a seller's behalf after the access token expires is the ____ token grant.",
+      "answers": [
+        "refresh",
+        "refresh_token"
+      ],
+      "explanation": "The refresh token is exchanged for a new access token without user interaction."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A user who is logged in but lacks permission for an action should receive HTTP status ____.",
+      "answers": [
+        "403",
+        "403 forbidden"
+      ],
+      "explanation": "401 means not authenticated; 403 means authenticated but not allowed."
+    },
+    {
+      "type": "output",
+      "prompt": "This computes a PKCE S256 code challenge using the example verifier from RFC 7636. What does it print?",
+      "code": "import base64, hashlib, hmac\n\nverifier = \"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk\"\ndigest = hashlib.sha256(verifier.encode(\"ascii\")).digest()\nchallenge = base64.urlsafe_b64encode(digest).rstrip(b\"=\").decode()\nprint(challenge)\nprint(len(challenge))\nprint(hmac.compare_digest(challenge, \"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\"))\n",
+      "answers": [
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\n43\nTrue"
+      ],
+      "explanation": "SHA-256 gives 32 bytes; base64url without '=' padding is 43 characters. The result matches RFC 7636's example, compared in constant time."
+    },
+    {
+      "type": "debug",
+      "prompt": "Review this password storage code. What's wrong and what should replace it?",
+      "code": "import hashlib\n\ndef hash_password(pw: str) -> str:\n    return hashlib.sha256((\"static-salt\" + pw).encode()).hexdigest()\n\ndef check(pw: str, stored: str) -> bool:\n    return hash_password(pw) == stored\n",
+      "answer": "- SHA-256 is **fast**: GPUs try billions per second, so leaked hashes are cracked quickly.\n- A **static salt** means identical passwords have identical hashes and one precomputed table covers all users.\n- `==` comparison isn't constant-time (minor, but use the library's verify).\n\nUse a password KDF with per-password random salt and tunable cost:\n```python\nfrom argon2 import PasswordHasher\nfrom argon2.exceptions import VerifyMismatchError\nph = PasswordHasher()\n\ndef hash_password(pw): return ph.hash(pw)      # salt + params embedded in the hash\n\ndef check(pw, stored):\n    try:\n        return ph.verify(stored, pw)\n    except VerifyMismatchError:\n        return False\n```\n(bcrypt is an acceptable alternative.)",
+      "rubric": [
+        "Fast hash enables brute force",
+        "Static salt instead of unique per-password salt",
+        "Use argon2id/bcrypt with library verify",
+        "Constant-time comparison / embedded params"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd guarantee tenant isolation in a multi-tenant Postgres-backed API.",
+      "answer": "1. **Identity → tenant**: `org_id` comes from the verified token/session, injected via a dependency; never from client parameters.\n2. **Scoped data access**: a repository constructed with `org_id` adds `WHERE org_id = %s` to every query, including updates/deletes (`... AND org_id = %s RETURNING id`); no raw queries bypass it.\n3. **Schema**: `org_id` on every tenant table, composite indexes/unique constraints starting with `org_id`.\n4. **Defense in depth**: Postgres Row-Level Security with `SET app.org_id` per transaction, so a forgotten filter returns nothing.\n5. **Responses**: 404 for foreign IDs; tests that try cross-tenant access for every endpoint.\n6. Same for caches (keys include org_id), S3 prefixes and vector search filters.",
+      "rubric": [
+        "org_id derived from authenticated identity",
+        "Every query filtered via tenant-scoped repository",
+        "RLS or other defense in depth",
+        "Tests/404 behavior and caches/S3 also scoped"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Sessions or JWTs for a first-party web dashboard backed by one API? Justify.",
+      "answer": "For a single first-party web app, **server-side sessions** (HttpOnly Secure SameSite cookie + Redis/Postgres store) are usually simpler and safer: instant revocation (logout, ban), no token in JavaScript reach, small cookie. Add CSRF protection (SameSite + CSRF token for unsafe methods). JWTs shine when many services must verify identity without a shared store or for third-party/mobile clients; then use short-lived access tokens plus revocable refresh tokens.",
+      "rubric": [
+        "Sessions: easy revocation, HttpOnly cookie",
+        "CSRF consideration for cookies",
+        "JWT benefits for distributed/mobile clients, with short expiry + refresh"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Walk through the OAuth2 authorization code flow with PKCE.",
+      "difficulty": "medium",
+      "answer_md": "1. Client generates a random `code_verifier` (43-128 chars) and `code_challenge = BASE64URL(SHA256(verifier))`, plus a random `state`.\n2. Redirects the user to the authorization server's `/authorize` with `response_type=code`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`, `code_challenge_method=S256`.\n3. User authenticates and consents.\n4. Authorization server redirects to `redirect_uri?code=...&state=...`. The client checks `state` matches (CSRF protection).\n5. Client POSTs to `/token` with `grant_type=authorization_code`, `code`, `redirect_uri`, `client_id` and the **`code_verifier`**.\n6. Server hashes the verifier, compares with the stored challenge, and returns an access token (and refresh token / ID token with OIDC).\nPKCE ensures that someone who intercepts the code (malicious app, logs) can't redeem it without the verifier, which never left the client. It's now recommended for all clients, including confidential ones."
+    },
+    {
+      "question": "How would you implement roles and permissions so they don't become a mess of if-statements?",
+      "difficulty": "hard",
+      "answer_md": "Model **permissions** as strings like `reports:read`, `uploads:delete`, and **roles** as named sets of permissions (stored in tables `roles`, `role_permissions`, `user_roles` scoped by org). Endpoints declare what they need — `Depends(require(\"uploads:delete\"))` — instead of checking roles. Deny by default. For rules that depend on the resource (owner can edit their draft, nobody can edit a locked report), add policy functions in the service layer: `can_edit(user, report) -> bool`, combining RBAC with attributes (ABAC). Keep all authorization logic in one module with tests per permission. Include permissions (or role) in the token only if they're small and short-lived; otherwise look them up and cache per request. For larger systems, a policy engine (OPA/Cedar-style) externalizes the rules."
+    }
+  ]
+}

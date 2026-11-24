@@ -1,0 +1,125 @@
+{
+  "slug": "retries-backoff-idempotency",
+  "title": "Retries, Backoff & Idempotency",
+  "skill": "rest-api-integration",
+  "extra_skills": [
+    "error-handling",
+    "system-design",
+    "transactions-concurrency"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "retries",
+    "exponential-backoff",
+    "jitter",
+    "idempotency",
+    "resilience",
+    "rate-limiting",
+    "deadlocks"
+  ],
+  "summary": "Network calls and database writes fail transiently - timeouts, 503s, rate limits, deadlocks - and often succeed on a second try. Retry only those transient errors, wait longer each time (exponential backoff) with randomness (jitter), and stop after a few attempts. Retrying is only safe if the operation is idempotent - doing it twice must not double-charge, double-insert or double-send.",
+  "details_md": "### What to retry\n**Retry**: connection errors, timeouts, HTTP 429 (honour `Retry-After`), 502/503/504, sometimes 500; database deadlocks (`40P01`), serialization failures (`40001`), dropped connections; AWS throttling (`ThrottlingException`, `ProvisionedThroughputExceededException`).\n**Don't retry**: 400/401/403/404/422 and validation errors - they'll fail identically; programming errors (`KeyError`, `TypeError`).\n\n### Exponential backoff with jitter\nDelay grows as `base * 2^attempt`, capped at a maximum. Without jitter, many clients that failed together retry together (thundering herd), hammering a recovering service in synchronised waves. **Full jitter** picks a random delay in `[0, min(cap, base * 2^attempt)]` and spreads load best. Always bound retries by attempts *and* total time.\n\n### Where to retry\n- Retry at **one layer**. If the HTTP client, your function and the job runner each retry 3 times, one failure becomes 27 calls.\n- Respect the caller's deadline; a retry that finishes after the user's request timed out is wasted work.\n- Use **circuit breakers** for dependencies that are down: after N failures, fail fast for a cooldown period instead of piling on.\n- Async work often gets retries for free from the platform: asynchronous Lambda invocations retry failed events twice by default (then go to a DLQ/on-failure destination); SQS redelivers messages after the visibility timeout. That means **at-least-once** delivery - so handlers must be idempotent.\n\n### Idempotency\nAn operation is idempotent if repeating it has the same effect as doing it once.\n- **Naturally idempotent**: `SET status = 'Completed'`, `PUT`, `DELETE`, upserts keyed on a natural key.\n- **Not idempotent**: `INSERT` without a unique key, `UPDATE stock = stock - 1`, \"send email\", \"charge card\".\n\nTechniques:\n1. **Natural unique keys + upserts**: `INSERT ... ON CONFLICT (id, orgid) DO NOTHING` or `DO UPDATE` - reprocessing a file yields the same rows.\n2. **Idempotency keys**: the client sends a unique key per logical operation; the server records `key -> result` (unique constraint) and returns the stored result on duplicates. Payment APIs work this way.\n3. **Conditional updates / state machines**: `UPDATE jobs SET status='Processing' WHERE id=$1 AND status='Pending'` - only one worker wins; check `rowcount`.\n4. **Deduplication tables** for event consumers (store processed message IDs, with the side effect in the same transaction).\n5. **Set absolute values** instead of increments where possible.\n\n### Database deadlocks\nPostgreSQL detects deadlocks and aborts one transaction with `DeadlockDetected`. The fix is to retry the **whole transaction** (after rollback) with backoff - not just the failed statement. Reduce frequency by touching rows in a consistent order (e.g. sort batch rows by primary key before upserting) and keeping transactions short. Distributed setups like Citus can see more lock contention across shards when concurrent batches overlap.\n\n### Timeouts are part of the design\nEvery network call needs a timeout (`requests` has none by default!). Use separate connect/read timeouts, e.g. `timeout=(3.05, 30)`. A call without a timeout can hang a worker forever, which no retry policy can fix.",
+  "code_md": "```python\n# Generic retry helper with full jitter and a retryable-error predicate\nimport random, time, logging\nlog = logging.getLogger(__name__)\n\ndef retry_call(fn, *, attempts=5, base=0.5, cap=20.0, is_retryable=lambda e: True):\n    for attempt in range(attempts):\n        try:\n            return fn()\n        except Exception as e:\n            if attempt == attempts - 1 or not is_retryable(e):\n                raise\n            delay = random.uniform(0, min(cap, base * 2 ** attempt))   # full jitter\n            log.warning(\"attempt %d failed (%s); retrying in %.2fs\", attempt + 1, e, delay)\n            time.sleep(delay)\n```\n\n```python\n# requests: session-level retries for idempotent calls + explicit timeouts\nimport requests\nfrom requests.adapters import HTTPAdapter\nfrom urllib3.util.retry import Retry\n\nretry = Retry(\n    total=5,\n    backoff_factor=0.5,                       # 0.5, 1, 2, 4 ... seconds\n    status_forcelist=[429, 500, 502, 503, 504],\n    allowed_methods={\"GET\", \"PUT\", \"DELETE\"},  # not POST unless idempotency key is used\n    respect_retry_after_header=True,\n)\nsession = requests.Session()\nsession.mount(\"https://\", HTTPAdapter(max_retries=retry))\n\nresp = session.get(\"https://api.example.com/orders\", params={\"page\": 1}, timeout=(3.05, 30))\nresp.raise_for_status()\n```\n\n```python\n# Retrying a whole PostgreSQL transaction on deadlock (psycopg2)\nimport random, time\nfrom psycopg2 import errors\nfrom psycopg2.extras import execute_batch\n\nUPSERT = '''\nINSERT INTO orders (id, orgid, status, amount)\nVALUES (%s, %s, %s, %s)\nON CONFLICT (id, orgid) DO UPDATE\nSET status = COALESCE(EXCLUDED.status, orders.status),\n    amount = COALESCE(EXCLUDED.amount, orders.amount)\n'''\n\ndef upsert_orders(conn, rows, attempts=5):\n    rows = sorted(rows, key=lambda r: (r[0], r[1]))   # consistent lock order reduces deadlocks\n    for attempt in range(attempts):\n        try:\n            with conn:                                   # commit or rollback\n                with conn.cursor() as cur:\n                    execute_batch(cur, UPSERT, rows, page_size=1000)\n            return\n        except (errors.DeadlockDetected, errors.SerializationFailure):\n            if attempt == attempts - 1:\n                raise\n            time.sleep(random.uniform(0, 0.2 * 2 ** attempt))  # transaction already rolled back\n```\n\n```sql\n-- Idempotency-key table: the unique constraint makes duplicates detectable\nCREATE TABLE idempotency_keys (\n    key         text PRIMARY KEY,\n    request_hash text NOT NULL,\n    response    jsonb,\n    created_at  timestamptz NOT NULL DEFAULT now()\n);\n-- First request: INSERT ... ON CONFLICT (key) DO NOTHING RETURNING key;\n-- If nothing returned -> duplicate: return stored response (or 409 if still in progress).\n```",
+  "use_cases_md": "- Calling marketplace/OMS/payment/logistics APIs that rate-limit or fail intermittently.\n- Database batch writes under concurrency (deadlocks, serialization failures).\n- AWS SDK calls under throttling (boto3 has built-in retry modes: `standard`, `adaptive`).\n- Event consumers (SQS, async Lambda, webhooks) that receive duplicates by design.\n- Payment and order creation APIs that must never double-execute.",
+  "mistakes_md": "- **Retrying non-idempotent operations** (POST create, charge, send) - duplicates. Fix: idempotency keys or natural-key upserts first.\n- **Retrying everything** including 4xx/validation errors. Fix: a retryable-error predicate.\n- **Fixed delays without jitter** - synchronised retry storms. Fix: exponential backoff + full jitter, capped.\n- **Retrying a single statement after a deadlock** - the whole transaction was aborted. Fix: roll back and replay the entire transaction.\n- **No timeouts** on HTTP calls - hung workers. Fix: always `timeout=(connect, read)`.\n- **Retry amplification across layers** (SDK + code + queue). Fix: retry at one layer, budget the rest.\n- **Infinite retries** on poison messages. Fix: max attempts, then dead-letter queue + alert.",
+  "best_practices_md": "- Classify errors explicitly: retryable vs permanent.\n- Use exponential backoff with full jitter, a max delay and a max total duration; honour `Retry-After`.\n- Design every handler that might run twice (queues, async invocations, webhooks) to be idempotent.\n- Use natural keys + `ON CONFLICT`, conditional updates, or idempotency-key tables.\n- Log each retry with attempt number and reason; emit metrics on retry counts.\n- Prefer battle-tested tools: `urllib3.Retry`, `tenacity`, boto3 retry config, SQS DLQs.",
+  "my_context_md": "- Your ECSMarketplaceDataUpload orders upsert already has a deadlock-retry loop around `ON CONFLICT DO UPDATE ... COALESCE(EXCLUDED.col, table.col)` on Citus - sorting rows by key before `execute_batch` and adding jittered backoff are the standard refinements.\n- Your upserts are idempotent by design: inventory uses `ON CONFLICT (id, orgid) DO NOTHING` and orders use `DO UPDATE`, so reprocessing the same report doesn't duplicate rows - which is what makes retries safe.\n- You invoke the downstream profitability Lambda asynchronously with boto3; asynchronous Lambda invocations are retried by the platform on failure, so that function must tolerate running twice for the same upload.\n- Your integrations with Unicommerce, EasyEcom, OmsGuru and payment/logistics providers (PayU, Easebuzz, Shiprocket, Shippigo) are where 429s, timeouts and `Retry-After` handling apply; remember `requests` has no default timeout.",
+  "related": [
+    "rest-api-design",
+    "python-exceptions",
+    "postgres-upsert",
+    "transactions-isolation",
+    "message-queues",
+    "aws-lambda-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "Formula for exponential backoff with full jitter?",
+      "back": "`sleep(random.uniform(0, min(cap, base * 2**attempt)))`"
+    },
+    {
+      "front": "Which HTTP status codes are usually retryable?",
+      "back": "429 (honour Retry-After), 502, 503, 504, and connection errors/timeouts (sometimes 500)."
+    },
+    {
+      "front": "What must you retry after a PostgreSQL deadlock?",
+      "back": "The whole transaction (after rollback), not just the failing statement."
+    },
+    {
+      "front": "What's an idempotency key?",
+      "back": "A client-generated unique ID per logical operation; the server stores key->result and returns the stored result for duplicates."
+    },
+    {
+      "front": "Why does `requests` need an explicit timeout?",
+      "back": "It has no default timeout - a stalled connection can block forever."
+    },
+    {
+      "front": "What delivery guarantee do SQS and async Lambda invocations give?",
+      "back": "At-least-once - duplicates are possible, so handlers must be idempotent."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which operation is safe to retry blindly?",
+      "options": [
+        "POST /payments without a key",
+        "UPDATE stock SET qty = qty - 1",
+        "INSERT ... ON CONFLICT (id, orgid) DO NOTHING",
+        "Sending a confirmation email"
+      ],
+      "answer_index": 2,
+      "explanation": "The upsert on a natural key yields the same final state no matter how many times it runs."
+    },
+    {
+      "question": "Why add jitter to exponential backoff?",
+      "options": [
+        "To make retries faster",
+        "To desynchronise clients so they don't retry in waves",
+        "It's required by HTTP",
+        "To avoid needing timeouts"
+      ],
+      "answer_index": 1,
+      "explanation": "Clients that failed together would otherwise retry together, overwhelming the recovering service."
+    },
+    {
+      "question": "A call returns HTTP 422. What should the retry policy do?",
+      "options": [
+        "Fail immediately - the request is invalid and will fail again",
+        "Retry with backoff",
+        "Retry forever",
+        "Retry once without delay"
+      ],
+      "answer_index": 0,
+      "explanation": "4xx validation errors are permanent for the same input."
+    },
+    {
+      "question": "Your function retries 3x, the HTTP client retries 3x, and the queue redelivers 3x. Worst case calls for one failing request?",
+      "options": [
+        "3",
+        "9",
+        "6",
+        "27"
+      ],
+      "answer_index": 3,
+      "explanation": "Retries multiply across layers (3 x 3 x 3). Retry at one layer."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you design a robust client for a flaky third-party API?",
+      "difficulty": "medium",
+      "answer_md": "1. **Timeouts** on every call (`timeout=(3, 30)`), so nothing hangs.\n2. **Classify errors**: retry connection errors, timeouts, 429, 502/503/504; never 400/401/403/404/422.\n3. **Backoff**: exponential with full jitter, capped (e.g. max 20 s per wait, 5 attempts, 2 min total). Honour `Retry-After` on 429/503.\n4. **Rate limiting** client-side (token bucket or a semaphore) to stay under the provider's quota rather than discovering it via 429s.\n5. **Idempotency**: only auto-retry GET/PUT/DELETE or POSTs carrying an idempotency key the provider supports; otherwise reconcile (look up whether the order was created) before retrying.\n6. **Circuit breaker** for prolonged outages: fail fast and queue work for later.\n7. **Observability**: log attempts with correlation IDs, metrics for latency/error rate/retries, alert on sustained failures.\n8. **Pagination & partial failure**: checkpoint progress (last cursor) so a failed sync resumes instead of restarting.\n\n```python\nsession.mount(\"https://\", HTTPAdapter(max_retries=Retry(\n    total=5, backoff_factor=0.5, status_forcelist=[429, 502, 503, 504],\n    allowed_methods={\"GET\"}, respect_retry_after_header=True)))\n```"
+    },
+    {
+      "question": "How would you make a message/event consumer idempotent?",
+      "difficulty": "hard",
+      "answer_md": "Queues (SQS standard), async Lambda invocations, webhooks and Kafka consumers deliver **at least once**, so the same event can arrive twice - or be processed twice if the worker crashes after doing the work but before acknowledging.\n\nStrategies, best first:\n1. **Make the effect naturally idempotent**: upserts keyed on business identifiers (`ON CONFLICT (id, orgid) DO UPDATE`), setting absolute values instead of increments, `PUT`-style writes.\n2. **Dedup table in the same transaction** as the side effect:\n```sql\nBEGIN;\nINSERT INTO processed_events (event_id) VALUES ($1) ON CONFLICT DO NOTHING;\n-- if 0 rows inserted -> duplicate: COMMIT and return\nUPDATE inventory SET qty = qty - $2 WHERE sku = $3;\nCOMMIT;\n```\nBecause both happen atomically, a crash can't leave \"work done but not recorded\".\n3. **Conditional state transitions**: `UPDATE uploads SET status='Processing' WHERE id=$1 AND status='Pending'` - check `rowcount`; only one consumer proceeds.\n4. **External side effects** (emails, payments): pass an idempotency key derived from the event ID to the provider, or record \"sent\" before/after with an outbox pattern.\n\nPlus: max receive count + dead-letter queue for poison messages, and alerts on DLQ depth."
+    },
+    {
+      "question": "Explain why deadlocks happen in batch upserts and how to handle them.",
+      "difficulty": "hard",
+      "answer_md": "A deadlock occurs when two transactions each hold a lock the other needs. In batch upserts: transaction A upserts rows (1, 2) in that order while B upserts (2, 1). A locks row 1, B locks row 2, then A waits for 2 and B waits for 1. PostgreSQL's deadlock detector (after `deadlock_timeout`, default 1 s) aborts one with `ERROR: deadlock detected` (SQLSTATE `40P01`). `INSERT ... ON CONFLICT DO UPDATE` takes row locks on conflicting rows, so concurrent overlapping batches (e.g. two uploads for the same org touching the same orders) are prone to it; distributed setups like Citus add cross-shard coordination.\n\nHandling:\n1. **Retry the whole transaction** with jittered backoff - the aborted transaction has rolled back entirely.\n2. **Consistent lock ordering**: sort rows by the conflict key before writing, so all transactions acquire locks in the same order - this eliminates most deadlocks.\n3. **Deduplicate within a batch**: a single `INSERT ... ON CONFLICT DO UPDATE` statement can't affect the same row twice (`cardinality violation`).\n4. **Smaller transactions** hold locks for less time; but each must still be safe to retry (idempotent).\n5. **Serialise conflicting work**: e.g. process one upload per org at a time via a queue or advisory lock (`pg_advisory_xact_lock(orgid)`).\n6. Monitor `pg_stat_database.deadlocks` and log retries."
+    }
+  ]
+}

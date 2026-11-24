@@ -1,0 +1,94 @@
+{
+  "slug": "valid-brackets",
+  "title": "Check balanced brackets",
+  "category": "problem-solving",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "dsa",
+  "concepts": [
+    "stack",
+    "matching pairs"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "A templating step builds JSON payloads from strings, and a malformed template once produced a payload with an unclosed bracket. Write a quick pre-flight check.\n\nImplement:\n\n```python\ndef is_balanced(s: str) -> bool:\n```\n\nReturn `True` if every `(`, `[` and `{` is closed by the matching `)`, `]`, `}` in the correct order. **All other characters are ignored.** An empty string is balanced.",
+  "examples": [
+    {
+      "input": "s = '()[]{}'",
+      "output": "True"
+    },
+    {
+      "input": "s = '([)]'",
+      "output": "False",
+      "explanation": "The ']' closes '(' — wrong order."
+    },
+    {
+      "input": "s = '{\"items\": [1, (2)]}'",
+      "output": "True",
+      "explanation": "Non-bracket characters are ignored."
+    }
+  ],
+  "hints": [
+    "The most recently opened bracket must be the first one closed. Which data structure is last-in, first-out?",
+    "Push opening brackets onto a list. On a closing bracket, the top of the stack must be its partner.",
+    "Map closers to openers: `pairs = {')': '(', ']': '[', '}': '{'}`. Fail if the stack is empty or the top doesn't match; at the end, the stack must be empty."
+  ],
+  "starter_code": "def is_balanced(s: str) -> bool:\n    # your code here\n    ...\n",
+  "solution_code": "def is_balanced(s: str) -> bool:\n    pairs = {\")\": \"(\", \"]\": \"[\", \"}\": \"{\"}\n    openers = set(pairs.values())\n    stack = []\n    for ch in s:\n        if ch in openers:\n            stack.append(ch)\n        elif ch in pairs:\n            if not stack or stack.pop() != pairs[ch]:\n                return False\n    return not stack\n",
+  "solution_md": "Classic stack. Opening brackets are pushed; each closing bracket must match the top of the stack. Two failure modes are easy to miss:\n\n1. A closer with an **empty** stack (`\")(\"`) — check `not stack` before popping.\n2. Leftover openers at the end (`\"((\"`) — return `not stack`, not `True`.\n\n- **Time:** O(n)\n- **Space:** O(n) worst case\n\n**Caveat for real JSON:** brackets inside string literals (`{\"note\": \"smile :)\"}`) would fool this check. For actual payloads, just `json.loads` and catch `json.JSONDecodeError` — this exercise is about the stack technique.",
+  "tests": {
+    "function": "is_balanced",
+    "cases": [
+      {
+        "args": [
+          "()[]{}"
+        ],
+        "kwargs": {},
+        "expected": true
+      },
+      {
+        "args": [
+          "([)]"
+        ],
+        "kwargs": {},
+        "expected": false
+      },
+      {
+        "args": [
+          "{[]}"
+        ],
+        "kwargs": {},
+        "expected": true
+      },
+      {
+        "args": [
+          ""
+        ],
+        "kwargs": {},
+        "expected": true
+      },
+      {
+        "args": [
+          "(("
+        ],
+        "kwargs": {},
+        "expected": false
+      },
+      {
+        "args": [
+          ")("
+        ],
+        "kwargs": {},
+        "expected": false
+      },
+      {
+        "args": [
+          "{\"items\": [1, (2)]}"
+        ],
+        "kwargs": {},
+        "expected": true
+      }
+    ]
+  }
+}

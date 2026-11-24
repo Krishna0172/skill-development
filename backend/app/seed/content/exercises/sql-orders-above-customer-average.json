@@ -1,0 +1,67 @@
+{
+  "slug": "sql-orders-above-customer-average",
+  "title": "Orders above the customer's own average (correlated subquery)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "medium",
+  "skill": "sql-subqueries",
+  "concepts": [
+    "correlated subquery",
+    "scalar subquery",
+    "AVG",
+    "window AVG() OVER alternative"
+  ],
+  "related_topics": [
+    "sql-subqueries",
+    "sql-window-functions"
+  ],
+  "problem_md": "Customer success wants to spot *unusually large* orders: orders whose value is higher than **that same customer's\naverage order value**. Guest orders (`customer_id IS NULL`) have no customer and must be ignored.\n\n```sql\nCREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  customer_id  INTEGER,          -- NULL = guest checkout\n  order_date   TEXT NOT NULL,\n  total_amount REAL NOT NULL\n);\n```\n\n> Money columns are `REAL` in this sandbox (they would be `NUMERIC(12,2)` in production PostgreSQL). Dates are ISO `'YYYY-MM-DD'` text.\n\n**Task.** Return `order_id`, `customer_id`, `total_amount`, `customer_avg` (the customer's average\n`total_amount` across all of their orders, rounded to 2 decimals) for orders **strictly greater** than that\naverage. Order by `order_id`.",
+  "examples": [
+    {
+      "input": "customer 4 has orders 100, 250, 400 (average 250)",
+      "output": "order_id | customer_id | total_amount | customer_avg\n9        | 4           | 400          | 250",
+      "explanation": "Order 8 equals the average, so it is not strictly greater. Customer 2 has a single order, which can never exceed its own average."
+    }
+  ],
+  "hints": [
+    "For each outer row you need an aggregate over *other rows of the same customer* - a subquery that references the outer query.",
+    "`WHERE o.total_amount > (SELECT AVG(i.total_amount) FROM orders i WHERE i.customer_id = o.customer_id)`.",
+    "Use the same correlated subquery (wrapped in ROUND) in the SELECT list for `customer_avg`. Guest rows drop out on their own: `i.customer_id = NULL` is never true."
+  ],
+  "starter_code": "-- Write your query here\nSELECT o.order_id, o.customer_id, o.total_amount\nFROM orders o\n",
+  "solution_code": "SELECT o.order_id,\n       o.customer_id,\n       o.total_amount,\n       ROUND((SELECT AVG(i.total_amount)\n              FROM orders i\n              WHERE i.customer_id = o.customer_id), 2) AS customer_avg\nFROM orders o\nWHERE o.total_amount > (SELECT AVG(i.total_amount)\n                        FROM orders i\n                        WHERE i.customer_id = o.customer_id)\nORDER BY o.order_id;",
+  "solution_md": "**Correlated subquery.** The inner `SELECT AVG(...) ... WHERE i.customer_id = o.customer_id` references the outer\nrow, so it is (logically) re-evaluated for every order. It is also a *scalar* subquery - it returns exactly one\nvalue - which is why it can sit in both `SELECT` and `WHERE`.\n\n- Customer 1's average is (1000 + 2000 + 3000 + 1500) / 4 = 1875, so orders 2 and 3 qualify.\n- Order 8 (250) equals customer 4's average: `>` excludes it.\n- Guest order 10: `i.customer_id = NULL` is UNKNOWN for every row, the subquery's `AVG` is NULL, and\n  `5000 > NULL` is not true - so it disappears without any explicit filter. (Being explicit with\n  `AND o.customer_id IS NOT NULL` is still good for readability.)\n\n**Window-function alternative** (one pass, usually faster on large tables, no repeated subquery):\n\n```sql\nSELECT order_id, customer_id, total_amount, ROUND(customer_avg, 2) AS customer_avg\nFROM (\n  SELECT o.*, AVG(total_amount) OVER (PARTITION BY customer_id) AS customer_avg\n  FROM orders o\n  WHERE customer_id IS NOT NULL\n) t\nWHERE total_amount > customer_avg\nORDER BY order_id;\n```\n\nNote you cannot reference a window function in `WHERE` directly - hence the derived table/CTE.\n\n**Performance.** PostgreSQL may execute the correlated version as a nested loop calling the subplan per row;\nan index on `orders (customer_id)` (ideally `INCLUDE (total_amount)` for index-only scans) keeps each probe cheap.\nFor big tables the window or a pre-aggregated CTE (`GROUP BY customer_id` joined back) is the safer choice.",
+  "tests": {
+    "schema_sql": "CREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  customer_id  INTEGER,          -- NULL = guest checkout\n  order_date   TEXT NOT NULL,\n  total_amount REAL NOT NULL\n);\n\nINSERT INTO orders VALUES\n (1, 1,'2024-01-05',1000.00),\n (2, 1,'2024-01-20',2000.00),\n (3, 1,'2024-02-02',3000.00),\n (4, 2,'2024-02-03', 500.00),\n (5, 3,'2024-02-10', 800.00),\n (6, 3,'2024-02-11', 800.00),\n (7, 4,'2024-02-12', 100.00),\n (8, 4,'2024-02-15', 250.00),\n (9, 4,'2024-03-01', 400.00),\n (10,NULL,'2024-03-02',5000.00),\n (11,1,'2024-03-05',1500.00);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "order_id",
+        "customer_id",
+        "total_amount",
+        "customer_avg"
+      ],
+      "rows": [
+        [
+          2,
+          1,
+          2000,
+          1875
+        ],
+        [
+          3,
+          1,
+          3000,
+          1875
+        ],
+        [
+          9,
+          4,
+          400,
+          250
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

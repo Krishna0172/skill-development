@@ -1,0 +1,54 @@
+{
+  "slug": "python-typing",
+  "why_md": "Type hints are documentation the tooling checks: mypy/pyright catch None-handling and wrong-argument bugs before production, and FastAPI/Pydantic turn the same hints into runtime validation and API schemas. In AI work, typed models define structured LLM outputs and tool schemas. Interviewers increasingly expect fluent modern typing (`X | None`, generics, Protocol).",
+  "revision_notes_md": "- Hints are not enforced at runtime; checkers (mypy, pyright) enforce them.\n- Modern syntax: `list[int]`, `dict[str, Any]`, `int | None` (3.10+).\n- Accept abstract (`Iterable`, `Mapping`, `Sequence`), return concrete.\n- `Literal[\"Processing\", \"Completed\", \"Error\"]` for fixed string values.\n- `TypedDict` for dict-shaped rows; dataclass/Pydantic for objects.\n- `Protocol` = structural typing (duck typing checked statically).\n- `TypeVar` / PEP 695 `def first[T](xs: list[T]) -> T` for generics.\n- `Callable[..., R]`, `ParamSpec` to type decorators.",
+  "exercises_md": "1. Add full annotations to one processor module, run `mypy --strict` on it, and fix every error without using `Any` more than twice.\n2. Define a `Protocol` `RowWriter` with `write(rows: Sequence[Mapping[str, object]]) -> int`, and type a processor against it; make a fake writer that satisfies it without inheritance.",
+  "my_context_md": "Only 24% of functions in the work repo are type-annotated, so this is a listed gap. The `@dataclass` config in `ECSInventoryPriceTracking/app/fetchers/spapi.py` is already typed by construction - extending that discipline to the ECSMarketplaceDataUpload processors (e.g. a `Literal` type for upload statuses) is a practical next step.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "The modern (3.10+) way to write Optional[int] is `int ____ None`.",
+      "answers": [
+        "|"
+      ],
+      "explanation": "PEP 604 union syntax."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To type an argument by the methods it has rather than its class (structural typing), define a typing.____ class.",
+      "answers": [
+        "Protocol"
+      ],
+      "explanation": "Protocol enables static duck typing."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from typing import get_type_hints, Literal\n\ndef set_status(upload_id: int, status: Literal[\"ok\", \"error\"]) -> None:\n    print(upload_id, status)\n\nset_status(\"7\", \"done\")\nprint(get_type_hints(set_status)[\"return\"])",
+      "answers": [
+        "7 done\n<class 'NoneType'>"
+      ],
+      "explanation": "Annotations aren't enforced at runtime, so a str id and invalid status print fine; `-> None` is stored as NoneType."
+    },
+    {
+      "type": "debug",
+      "prompt": "mypy reports an error on the last line. What is it and how do you fix it?",
+      "code": "def find_sku(rows: list[dict[str, str]], sku: str) -> dict[str, str] | None:\n    for r in rows:\n        if r[\"sku\"] == sku:\n            return r\n    return None\n\nrow = find_sku(rows, \"ABC\")\nprint(row[\"price\"])",
+      "answer": "`row` is `dict[str, str] | None`; indexing `None` would crash at runtime, so mypy flags it. Narrow the type first:\n\n```python\nrow = find_sku(rows, \"ABC\")\nif row is None:\n    raise LookupError(\"sku ABC not found\")\nprint(row[\"price\"])\n```",
+      "rubric": [
+        "Return type includes None, so indexing is unsafe",
+        "Narrow with an `is None` check (raise/return/default)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between static type checking and runtime validation, using FastAPI/Pydantic as an example.",
+      "answer": "Static checking (mypy/pyright) reads annotations without running code and catches internal mistakes - passing an `int | None` where `int` is required. Python itself ignores annotations at runtime. Runtime validation (Pydantic, which FastAPI uses) also reads annotations but checks actual incoming data - JSON from clients or LLM output - coercing or rejecting it with errors. You need both: validation at the system edges, static checking inside the codebase.",
+      "rubric": [
+        "Annotations aren't enforced by the interpreter",
+        "Static checkers catch code-level bugs before running",
+        "Pydantic validates external data at runtime from the same hints"
+      ]
+    }
+  ]
+}

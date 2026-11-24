@@ -1,0 +1,146 @@
+{
+  "slug": "ai-numpy-for-ml",
+  "title": "NumPy for ML: arrays, broadcasting, vectorisation",
+  "skill": "numpy",
+  "extra_skills": [
+    "ml-math-stats"
+  ],
+  "category": "AI",
+  "difficulty": "beginner",
+  "tags": [
+    "numpy",
+    "broadcasting",
+    "vectorisation",
+    "dtypes",
+    "axis",
+    "random-seed"
+  ],
+  "summary": "NumPy is the array engine under pandas, scikit-learn and (conceptually) PyTorch. This topic covers ndarrays, dtypes, shapes, broadcasting, vectorised operations, axis-wise reductions, reproducible randomness, and moving data from pandas into the arrays models consume.",
+  "why_md": "- scikit-learn models take and return NumPy arrays; PyTorch tensors mirror the NumPy API almost 1:1.\n- Vectorised code is 10-100x faster than Python loops — the difference between a 2-second and a 3-minute feature job.\n- Broadcasting and `axis` bugs silently produce wrong numbers instead of errors.\n- Interviewers test shape reasoning: \"what is the shape of `X.mean(axis=0)`?\"",
+  "details_md": "### ndarray basics\nAn `ndarray` is a contiguous block of memory with a single **dtype** and a **shape**. Because elements are typed and packed, operations run in compiled C loops instead of the Python interpreter. `int64`, `float64`, `float32` and `bool` are the dtypes you'll meet most; `object` dtype (e.g. strings from pandas) loses all the speed.\n\n### dtypes matter\n`float32` halves memory versus `float64` and is the standard for embeddings and neural nets. Integer arrays overflow silently (`np.int8(127) + 1` wraps). Mixed operations upcast: `int + float → float`.\n\n### Vectorisation\nReplace `for` loops with whole-array expressions: `revenue = qty * price` operates on a million rows at once. Boolean masks filter: `prices[prices > 1000]`. `np.where(cond, a, b)` is a vectorised if/else.\n\n### Broadcasting\nWhen shapes differ, NumPy aligns them from the right; a dimension is compatible if equal or 1, and size-1 dims are stretched (without copying). So `(1000, 5) - (5,)` subtracts a per-column mean from every row. `(1000,) - (1000, 1)` however broadcasts to `(1000, 1000)` — a classic silent bug.\n\n### Axis operations\n`axis=0` reduces **down the rows** (one result per column); `axis=1` reduces **across columns** (one result per row). For a `(n_samples, n_features)` matrix, `X.mean(axis=0)` is the per-feature mean used for standardisation. `keepdims=True` keeps the reduced axis as size 1, so the result broadcasts back cleanly.\n\n### Randomness and reproducibility\nUse the Generator API: `rng = np.random.default_rng(42)`; then `rng.normal(...)`, `rng.permutation(...)`. Seeding makes train/test splits and experiments repeatable. Avoid the legacy global `np.random.seed`.\n\n### From pandas to NumPy\n`df[cols].to_numpy(dtype=np.float32)` gives the feature matrix `X`; `df['target'].to_numpy()` gives `y`. Column order matters — the model only sees positions, so keep the column list fixed between training and serving.",
+  "code_md": "```python\nimport numpy as np\nimport pandas as pd\n\ndf = pd.DataFrame({\"qty\": [3, 1, 5, 2], \"price\": [250.0, 999.0, 120.0, 480.0],\n                   \"rating\": [4.1, 3.8, 4.6, 4.0]})\nX = df[[\"qty\", \"price\", \"rating\"]].to_numpy(dtype=np.float32)   # (4, 3)\n\n# Standardise every column with broadcasting: (4,3) - (3,) / (3,)\nmu = X.mean(axis=0)          # per-feature mean, shape (3,)\nsd = X.std(axis=0)\nX_std = (X - mu) / sd\nprint(X_std.mean(axis=0).round(6))   # ~[0, 0, 0]\n\n# Vectorised business logic instead of a row loop\nrevenue = X[:, 0] * X[:, 1]\ndiscounted = np.where(revenue > 1000, revenue * 0.9, revenue)\n```\n\n```python\n# Reproducible shuffle + split with the Generator API\nrng = np.random.default_rng(42)\nidx = rng.permutation(len(X))\ncut = int(0.75 * len(X))\ntrain_idx, test_idx = idx[:cut], idx[cut:]\n\n# Row-wise L2 normalisation of embeddings with keepdims\nemb = rng.normal(size=(1000, 384)).astype(np.float32)\nemb /= np.linalg.norm(emb, axis=1, keepdims=True)   # (1000,384) / (1000,1)\n```",
+  "use_cases_md": "- Building `X`/`y` matrices from cleaned pandas marketplace data for scikit-learn.\n- Standardising features and normalising embeddings.\n- Vectorised revenue/fees/discount calculations over millions of order rows.\n- Batch similarity scoring of embeddings (`Q @ D.T`).\n- Reproducible sampling for experiments and test fixtures.",
+  "mistakes_md": "- **Python loops over arrays** — kills performance; use vectorised expressions.\n- **Broadcasting a (n,) against (n,1)** — produces an (n, n) matrix silently. Check `.shape`.\n- **Wrong axis** — `X.mean()` (scalar) or `axis=1` when you meant per-feature `axis=0`.\n- **object dtype from pandas** — strings or mixed types make `to_numpy()` slow and break models; convert/encode first.\n- **Legacy global seed** shared across libraries — use `default_rng(seed)` and pass the generator around.\n- **Integer overflow** with small int dtypes on sums.",
+  "best_practices_md": "- Print `.shape` and `.dtype` at every pipeline boundary while developing.\n- Use `float32` for model inputs/embeddings unless you need float64 precision.\n- Use `keepdims=True` when the result must broadcast back.\n- One `rng = np.random.default_rng(SEED)` per experiment.\n- Keep a fixed, versioned feature column list when converting from pandas.",
+  "my_context_md": "The processors in `ECSMarketplaceDataUpload` use pandas `groupby`/`apply` on marketplace reports; many `apply(lambda row: ...)` calls can become vectorised column arithmetic or `np.where`, which is exactly the NumPy mental model. When he starts training models, `df.to_numpy()` on those cleaned frames is the hand-off point to scikit-learn.",
+  "revision_notes_md": "- ndarray = one dtype + shape + contiguous memory.\n- float32 for ML inputs/embeddings.\n- Vectorise; masks `a[a > x]`; `np.where` for if/else.\n- Broadcasting: align from the right; dims equal or 1.\n- `(n,) - (n,1)` → `(n,n)` trap.\n- axis=0 → per column; axis=1 → per row.\n- `keepdims=True` to broadcast back.\n- `rng = np.random.default_rng(42)`.\n- `df[cols].to_numpy(dtype=np.float32)`; fix column order.",
+  "exercises_md": "1. Find one `df.apply(lambda row: ...)` in a marketplace processor-style script and rewrite it with vectorised NumPy/pandas; time both with `%timeit` on 1M rows.\n2. Implement `standardise(X)` and `min_max(X)` with broadcasting; assert shapes.\n3. Reproduce the `(n,) - (n,1)` bug deliberately, then write an assertion that would have caught it.\n4. Write a reproducible `train_test_split(X, y, test_size, seed)` using only `default_rng`.",
+  "related": [
+    "ai-math-linear-algebra",
+    "pandas-essentials",
+    "ai-data-preprocessing",
+    "ai-scikit-learn",
+    "py-performance"
+  ],
+  "flashcards": [
+    {
+      "front": "For X of shape (n_samples, n_features), what is the shape of X.mean(axis=0)?",
+      "back": "(n_features,) — one mean per column."
+    },
+    {
+      "front": "Broadcasting rule?",
+      "back": "Compare shapes from the right; each dimension must be equal or 1; size-1 dims are stretched."
+    },
+    {
+      "front": "Modern way to get reproducible random numbers?",
+      "back": "rng = np.random.default_rng(seed); then rng.normal(), rng.permutation(), etc."
+    },
+    {
+      "front": "Why float32 for embeddings?",
+      "back": "Half the memory and faster on most hardware; precision loss is negligible for similarity search and NN inputs."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "a has shape (1000,) and b has shape (1000, 1). What is the shape of a - b?",
+      "options": [
+        "(1000,)",
+        "(1000, 1)",
+        "(1000, 1000)",
+        "It raises an error"
+      ],
+      "answer_index": 2,
+      "explanation": "Aligned from the right: (1, 1000) vs (1000, 1) → both stretch to (1000, 1000). A common silent bug."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which call computes one mean per ROW of a 2-D array X?",
+      "options": [
+        "X.mean(axis=1)",
+        "X.mean(axis=0)",
+        "X.mean()",
+        "X.mean(axis=-2)"
+      ],
+      "answer_index": 0,
+      "explanation": "axis=1 collapses the column dimension, leaving one value per row."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Passing ____=True to a reduction like X.sum(axis=1) keeps the reduced dimension with size 1 so the result broadcasts back against X.",
+      "answers": [
+        "keepdims"
+      ],
+      "explanation": "Shape becomes (n, 1) instead of (n,)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "rng = np.random.____(42) creates a seeded random Generator.",
+      "answers": [
+        "default_rng"
+      ],
+      "explanation": "The modern Generator API; avoid the legacy global np.random.seed."
+    },
+    {
+      "type": "output",
+      "prompt": "Broadcasting by hand in plain Python: what does this print?",
+      "code": "rows = [[1, 2, 3], [4, 5, 6]]\ncol_means = [sum(c) / len(c) for c in zip(*rows)]\ncentered = [[v - m for v, m in zip(r, col_means)] for r in rows]\nprint(col_means)\nprint(centered)",
+      "answers": [
+        "[2.5, 3.5, 4.5]\n[[-1.5, -1.5, -1.5], [1.5, 1.5, 1.5]]"
+      ],
+      "explanation": "zip(*rows) iterates columns (axis=0 means). Subtracting the per-column mean from each row is what X - X.mean(axis=0) does via broadcasting."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (shape reasoning)",
+      "code": "def broadcast(s1, s2):\n    out = []\n    for a, b in zip(reversed(s1), reversed(s2)):\n        if a != b and 1 not in (a, b):\n            return \"error\"\n        out.append(max(a, b))\n    longer = s1 if len(s1) > len(s2) else s2\n    rest = list(longer[: len(longer) - len(out)])\n    return tuple(rest + out[::-1])\nprint(broadcast((32, 1, 5), (4, 5)), broadcast((3,), (4,)))",
+      "answers": [
+        "(32, 4, 5) error"
+      ],
+      "explanation": "Align from the right: 5/5 ok, 1/4 → 4, leading 32 kept → (32, 4, 5). (3,) vs (4,) are unequal and neither is 1 → error."
+    },
+    {
+      "type": "debug",
+      "prompt": "This standardisation produces wrong values (every feature ends up with mean ≠ 0). What's wrong and how do you fix it?",
+      "code": "import numpy as np\nrng = np.random.default_rng(0)\n# column 0: rating (~4), column 1: price (~1000)\nX = np.column_stack([rng.normal(4, 0.5, 500), rng.normal(1000, 300, 500)])\nX_std = (X - X.mean()) / X.std()\nprint(X_std.mean(axis=0))",
+      "answer": "`X.mean()` and `X.std()` without `axis` reduce over the **whole matrix**, giving one scalar, so each feature is centred with the global mean rather than its own. Use per-column statistics:\n\n```python\nmu = X.mean(axis=0)     # (2,)\nsd = X.std(axis=0)      # (2,)\nX_std = (X - mu) / sd   # broadcasts (500,2) with (2,)\n```\nIn a real pipeline, compute mu/sd on the training split only (or use `StandardScaler`).",
+      "rubric": [
+        "Spots missing axis=0 (global vs per-feature stats)",
+        "Shows broadcasting with per-column mean/std",
+        "Mentions fitting statistics on training data only"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a pandas-heavy developer why vectorised NumPy code is so much faster than `df.apply(lambda row: ...)`.",
+      "answer": "`apply` with a row lambda calls a Python function once per row: each call boxes values into Python objects, does dynamic type checks and goes through the interpreter — millions of times. NumPy arrays store values of one dtype contiguously in memory, so an expression like `qty * price` runs as one compiled C loop over raw numbers (often SIMD-accelerated), with no per-element Python overhead. pandas columns are backed by NumPy arrays, so column arithmetic, `np.where`, and boolean masks get the same speed. Rule: express the logic on whole columns; drop to `apply` only for logic that cannot be vectorised.",
+      "rubric": [
+        "Per-row Python function call / interpreter overhead",
+        "Contiguous typed memory and compiled C loops",
+        "pandas column ops are vectorised too; prefer them over apply"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain NumPy broadcasting with an example and a pitfall.",
+      "difficulty": "medium",
+      "answer_md": "Broadcasting lets NumPy combine arrays of different shapes without copying. Shapes are compared from the right; each pair of dimensions must be equal or one of them 1, and size-1 dims are virtually stretched.\n\nExample: `X` is `(10000, 8)` features, `mu = X.mean(axis=0)` is `(8,)`. `X - mu` aligns `(10000, 8)` with `(8,)` → each row has the column means subtracted. Row-wise normalisation needs `keepdims`: `X / np.linalg.norm(X, axis=1, keepdims=True)` → `(10000, 8) / (10000, 1)`.\n\nPitfall: `y_true` is `(n,)` and `y_pred` from a model is `(n, 1)`. `y_true - y_pred` silently becomes `(n, n)`, and an MSE computed on it is garbage. Fix with `y_pred.ravel()` and assert shapes in tests."
+    },
+    {
+      "question": "How do you make an ML experiment reproducible with respect to randomness?",
+      "difficulty": "easy",
+      "answer_md": "- Create one `rng = np.random.default_rng(SEED)` and pass it (or derived seeds) to everything that samples, rather than relying on global state.\n- Pass `random_state=SEED` to scikit-learn splitters and models (`train_test_split`, `RandomForestClassifier`, `KFold(shuffle=True)`).\n- For PyTorch, `torch.manual_seed(SEED)`; note some GPU kernels are non-deterministic unless you enable deterministic algorithms.\n- Log the seed, data snapshot and library versions with the results.\n\nReproducibility lets you tell whether a metric change came from your code change or from a different random split."
+    }
+  ]
+}

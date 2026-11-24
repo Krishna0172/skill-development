@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty, stat %}
+{% block title %}Skills{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Skills</h1><p>Proficiency on a 1–6 scale (filled dots), with your target shown as outlined dots. Classification records where the evidence comes from.</p></div>
+  <div class="actions">
+    <details class="pop"><summary class="btn">+ Add skill</summary>
+      <div class="pop-body card"><form method="post" action="/skills/new" class="body form-grid" style="min-width:280px">
+        <input name="name" placeholder="Skill name" required>
+        <input name="category" placeholder="Category" value="General">
+        <select name="track">{% for k, v in track_labels.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select>
+        <select name="classification">{% for k, v in classifications.items() %}<option value="{{ k }}" {{ 'selected' if k == 'to_learn' }}>{{ v }}</option>{% endfor %}</select>
+        <button class="btn primary">Add</button>
+      </form></div></details>
+    <a class="btn primary" href="/skills/assess">Self-assess</a>
+  </div>
+</div>
+<div class="grid g3 mb">
+  {{ stat("Skills", count) }}
+  {{ stat("Self-rated", rated ~ " / " ~ count, href="/skills/assess") }}
+  {{ stat("Below target", gaps) }}
+</div>
+<form method="get" action="/skills" class="grid g4 mb">
+  <input name="q" value="{{ q }}" placeholder="Search skills…">
+  <select name="track"><option value="">All tracks</option>{% for k, v in track_labels.items() %}<option value="{{ k }}" {{ 'selected' if k == track }}>{{ v }}</option>{% endfor %}</select>
+  <select name="classification"><option value="">Any evidence</option>{% for k, v in classifications.items() %}<option value="{{ k }}" {{ 'selected' if k == classification }}>{{ v }}</option>{% endfor %}</select>
+  <div class="row"><label class="row small"><input type="checkbox" name="archived" value="1" {{ 'checked' if archived }}> archived</label><button class="btn">Filter</button></div>
+</form>
+{% if not groups %}{{ empty("No skills match") }}{% endif %}
+{% for cat, rows in groups %}
+  <section class="card mb">
+    <header><h2>{{ cat }}</h2><span class="tiny faint">{{ rows|length }}</span></header>
+    <div class="flush table-wrap"><table class="table">
+      {% for r in rows %}
+        <tr>
+          <td style="width:28%"><a href="/skills/{{ r.id }}">{{ r.name }}</a>{% if r.is_archived %} <span class="badge">archived</span>{% endif %}</td>
+          <td>{{ badge(r.classification, kind="classification") }}</td>
+          <td>{{ dots(r.proficiency, r.target_proficiency) }}</td>
+          <td>{{ badge(r.status) }}</td>
+          <td class="small muted num">{% if r.stats.topics_total %}{{ r.stats.topics_done }}/{{ r.stats.topics_total }} topics{% endif %}</td>
+          <td class="small muted num">{% if r.stats.hours %}{{ r.stats.hours|hours }}{% endif %}</td>
+          <td class="small faint" style="max-width:260px">{{ r.next_action[:90] }}</td>
+        </tr>
+      {% endfor %}
+    </table></div>
+  </section>
+{% endfor %}
+{% endblock %}

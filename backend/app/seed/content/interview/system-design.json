@@ -1,0 +1,150 @@
+[
+  {
+    "slug": "sd-file-ingestion-pipeline-many-formats",
+    "category": "system-design",
+    "difficulty": "hard",
+    "skill": "system-design",
+    "question": "Design a pipeline that ingests marketplace reports (orders, returns, settlements, inventory, ads) in 100+ different formats from many channels, uploaded by thousands of sellers.",
+    "answer_md": "**Flow.** Upload API -> S3 (raw, immutable) -> `fs_upload` row -> queue (SQS) -> workers -> PostgreSQL ->\npost-load jobs (reconciliation, summaries).\n\n**1. Accept and store raw.** The API issues a pre-signed S3 URL so large files never pass through the app servers.\nOn completion, create `fs_upload` (org, channel, report_type, s3_key, sha256, status) and enqueue a message.\nKeeping the raw file means you can always re-process after a bug fix.\n\n**2. Detect the format.** Seller-selected `(channel, report_type)` plus header sniffing. A registry maps a\nformat signature (required headers, sheet name) to a **parser config**.\n\n**3. Parsers as configuration, not 100 scripts.** Most formats differ only in column names, date formats and\nnumber formats. Express each as a declarative mapping\n(`{\"Order ID\": \"order_ref\", \"Order Date\": {\"field\": \"order_date\", \"format\": \"%d-%m-%Y\"}}`) consumed by one generic\nengine; use a registry/dispatcher of small custom functions only for truly odd formats. Version the configs - a\nmarketplace changing columns means adding `v2`, not editing `v1`.\n\n**4. Normalize to a canonical model.** All channels map to the same `orders` / `order_items` / `settlement_lines`\nschema; validate each row (types, required fields, enums) and collect row-level errors instead of failing the file.\n\n**5. Load idempotently.** Batched `INSERT ... ON CONFLICT` on natural keys `(org_id, channel, order_ref)`, commits\nper batch, progress + heartbeat on `fs_upload`.\n\n**6. Workers.** Stream-parse (CSV readers, `openpyxl` read-only) in containers (ECS) for big files, Lambda for small\nones. Scale workers on queue depth; cap concurrency to protect the database. DLQ after N failures.\n\n**7. Observability.** Per-format success/failure rates, rows rejected by reason, processing time, queue age.\nAlert when a format suddenly fails for many sellers - usually the marketplace changed the report.\n\n**Trade-offs to mention:** schema-on-read (store raw JSONB, transform later) is more flexible but pushes complexity\nto queries; strict canonical models give clean analytics but need mapping work for every new format.",
+    "tags": [
+      "ingestion",
+      "etl",
+      "s3",
+      "queues",
+      "idempotency",
+      "registry-pattern"
+    ]
+  },
+  {
+    "slug": "sd-rate-limiter",
+    "category": "system-design",
+    "difficulty": "medium",
+    "skill": "system-design",
+    "question": "Design a rate limiter for your public API: each API key gets 100 requests per minute, and the API runs on multiple servers.",
+    "answer_md": "**Where:** in an API gateway or middleware, before expensive work. Return **429 Too Many Requests** with\n`Retry-After` and `X-RateLimit-Limit/Remaining/Reset` headers so clients can back off.\n\n**Algorithms:**\n\n| algorithm | idea | trade-off |\n|---|---|---|\n| fixed window | counter per key per minute (`key:12:05`) | simple; allows 2x burst across a window boundary |\n| sliding window log | store each request timestamp, count last 60 s | exact; memory O(requests) |\n| sliding window counter | weighted mix of current and previous window | good accuracy, O(1) memory |\n| token bucket | bucket of N tokens refilled at rate r; request takes a token | allows controlled bursts; most common |\n\n**Shared state.** With several servers, an in-memory counter per server lets a client get N x 100. Keep counters in\n**Redis**: fast, atomic, with TTLs. Fixed window in Redis:\n\n```python\ndef allow(redis, api_key: str, limit=100) -> bool:\n    window = int(time.time() // 60)\n    k = f\"rl:{api_key}:{window}\"\n    count = redis.incr(k)            # atomic across servers\n    if count == 1:\n        redis.expire(k, 61)\n    return count <= limit\n```\n\nFor a token bucket, use a small Lua script so read-refill-decrement is atomic (no race between two servers).\n\n**Failure modes.** If Redis is down, decide: **fail open** (allow traffic, risk overload) or **fail closed**\n(reject, risk outage). Most APIs fail open with a local in-memory fallback limit. Keep the check under ~1 ms; it runs\non every request.\n\n**Extras:** different limits per plan/endpoint (expensive export endpoints get lower limits), per-IP limits for\nunauthenticated endpoints like login, and global limits to protect the database. Clients of *your* integrations\n(marketplace APIs) need the mirror image: a client-side token bucket plus exponential backoff with jitter on 429.",
+    "tags": [
+      "rate-limiting",
+      "redis",
+      "token-bucket",
+      "api"
+    ]
+  },
+  {
+    "slug": "sd-idempotent-payment-webhooks",
+    "category": "system-design",
+    "difficulty": "medium",
+    "skill": "system-design",
+    "question": "How do you design a payment-gateway webhook endpoint so events are processed exactly once, even though the gateway retries and may deliver duplicates or out of order?",
+    "answer_md": "Webhooks are **at-least-once**: timeouts and network errors cause retries, so duplicates are normal. Aim for\n**exactly-once effect**.\n\n**1. Verify, persist, acknowledge.** Verify the HMAC signature over the raw body (`hmac.compare_digest`), then insert\nthe event into an inbox table and return 200 fast (well under the gateway's timeout):\n\n```sql\nINSERT INTO webhook_events (provider, event_id, type, payload, status)\nVALUES (%s, %s, %s, %s, 'RECEIVED')\nON CONFLICT (provider, event_id) DO NOTHING\nRETURNING id;\n```\n\nThe **unique constraint** is the dedupe - not a \"SELECT first\" check, which races under concurrent deliveries. No\nrow returned means duplicate: still return 200 so the gateway stops retrying.\n\n**2. Process asynchronously.** A worker (polling with `FOR UPDATE SKIP LOCKED`, or via SQS) applies the event and\nmarks it `PROCESSED` in the **same transaction**, so a crash can't leave \"applied but not marked\".\n\n**3. Make effects idempotent too.** Store payments as rows keyed by gateway transaction id (`UNIQUE`) and derive\ntotals with `SUM`, never `paid = paid + amount`. Replaying an event is then harmless.\n\n**4. Out-of-order events.** Store facts, derive state. If you keep a status column, only advance it when the\nevent's timestamp is newer (`WHERE last_event_at < %s`), or use a state machine that rejects backwards transitions.\n\n**5. Responses.** Bad signature -> 401; malformed -> 400 (no point retrying); DB down -> 5xx (please retry);\nduplicate -> 200.\n\n**6. Safety net.** Alert on old unprocessed events, keep payloads for replay after bug fixes, and run a daily\nreconciliation against the gateway's settlement report - webhooks are the fast path, reports are the source of\ntruth.",
+    "tags": [
+      "webhooks",
+      "idempotency",
+      "payments",
+      "postgresql"
+    ]
+  },
+  {
+    "slug": "sd-job-queue-with-retries",
+    "category": "system-design",
+    "difficulty": "medium",
+    "skill": "message-queues",
+    "question": "Design a background job system for report processing with retries, backoff and dead-lettering. When would you use PostgreSQL as the queue versus SQS?",
+    "answer_md": "**Core properties:** durable jobs, at-least-once execution, retries with backoff, a dead-letter queue (DLQ) for\npoison jobs, visibility of status, and idempotent handlers (because at-least-once means a job can run twice).\n\n**Option A - PostgreSQL table as queue** (good up to hundreds of jobs/second, no new infrastructure):\n\n```sql\nCREATE TABLE jobs (\n  id BIGSERIAL PRIMARY KEY, kind TEXT, payload JSONB,\n  status TEXT DEFAULT 'queued', attempts INT DEFAULT 0, max_attempts INT DEFAULT 5,\n  run_after TIMESTAMPTZ DEFAULT now(), locked_until TIMESTAMPTZ, last_error TEXT);\nCREATE INDEX ON jobs (run_after) WHERE status = 'queued';\n\n-- worker claims a job\nUPDATE jobs SET status = 'running', attempts = attempts + 1, locked_until = now() + interval '15 min'\nWHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND run_after <= now()\n            ORDER BY run_after FOR UPDATE SKIP LOCKED LIMIT 1)\nRETURNING *;\n```\n\n`SKIP LOCKED` lets many workers dequeue without blocking each other. On failure:\n`status='queued', run_after = now() + backoff(attempts)` (e.g. `2^attempts` minutes + jitter), or `status='dead'`\nonce `attempts >= max_attempts`. A sweeper re-queues `running` jobs whose `locked_until` passed (crashed worker).\nBonus: enqueueing can happen **in the same transaction** as the business write (transactional outbox).\n\n**Option B - SQS:** managed, scales massively, built-in visibility timeout (message reappears if not deleted),\n`maxReceiveCount` -> DLQ, Lambda/ECS consumers. Set the visibility timeout above max processing time; standard\nqueues may deliver duplicates and out of order (FIFO queues add ordering + dedupe with throughput limits).\nDelayed retries via `ChangeMessageVisibility`.\n\n**Choose** Postgres when volume is moderate and you value transactional enqueue and SQL visibility; SQS when volume\nis high, consumers are Lambda, or you want to decouple from DB load.\n\n**Always:** idempotent handlers, classify errors (retry transient 5xx/timeouts; don't retry validation errors),\nalert on DLQ depth and oldest-message age, and provide a \"redrive\" tool to replay dead jobs after a fix.",
+    "tags": [
+      "queues",
+      "sqs",
+      "retries",
+      "postgresql",
+      "skip-locked"
+    ]
+  },
+  {
+    "slug": "sd-caching-dashboard-api",
+    "category": "system-design",
+    "difficulty": "medium",
+    "skill": "caching-redis",
+    "question": "Your seller dashboard API (revenue by channel, top SKUs, return rates) is slow and hammers PostgreSQL. Design a caching strategy.",
+    "answer_md": "**First, measure.** Find the slow endpoints and queries (`pg_stat_statements`, `EXPLAIN ANALYZE`). Sometimes an index\nor a **pre-aggregated summary table** (`daily_channel_sales` refreshed after each ingestion) fixes it without a\ncache, and it is always correct. Caching is for what remains.\n\n**Cache-aside with Redis** (most common):\n\n```python\ndef get_dashboard(org_id: int, period: str):\n    key = f\"dash:v3:{org_id}:{period}\"\n    cached = redis.get(key)\n    if cached:\n        return json.loads(cached)\n    data = compute_dashboard(org_id, period)          # the expensive SQL\n    redis.set(key, json.dumps(data), ex=300)          # TTL 5 min\n    return data\n```\n\n**Key design.** Always include `org_id` (tenant isolation - never serve one seller another's data), all parameters\nthat change the result, and a version prefix (`v3`) so a code change can't read old-shaped data.\n\n**Invalidation** - the hard part:\n- **TTL** bounds staleness; fine when \"up to 5 minutes old\" is acceptable.\n- **Event-based:** dashboard data only changes when an upload finishes, so the ingestion worker deletes\n  `dash:*:{org_id}:*` (or bumps a per-org version number stored in Redis and included in keys) on completion. This\n  gives fresh data right after an upload plus long TTLs otherwise.\n\n**Stampede protection.** When a hot key expires, many requests recompute at once. Use a short lock (`SET NX`) so one\nrequest recomputes while others serve the stale value, or add TTL jitter.\n\n**Other layers:** HTTP caching (`Cache-Control`, `ETag`) for browsers; precomputing popular dashboards after\ningestion (write-through); in-process LRU caches for static lookups (channel list).\n\n**Pitfalls:** caching per-user data under a shared key, unbounded key growth (always set TTLs), treating the cache as\na source of truth, and caching errors/empty results without short TTLs. Track hit rate and Redis memory.",
+    "tags": [
+      "caching",
+      "redis",
+      "cache-aside",
+      "invalidation",
+      "dashboards"
+    ]
+  },
+  {
+    "slug": "sd-multi-tenant-data-isolation",
+    "category": "system-design",
+    "difficulty": "medium",
+    "skill": "database-design",
+    "question": "Your SaaS stores data for thousands of sellers in one PostgreSQL database. How do you guarantee one seller can never see another seller's data?",
+    "answer_md": "**Tenancy models:**\n\n| model | isolation | cost / ops |\n|---|---|---|\n| shared tables with `org_id` column | logical | cheapest, simplest to operate; most SaaS start here |\n| schema per tenant | stronger | migrations x N schemas; painful at thousands |\n| database per tenant | strongest | expensive; for big/enterprise or regulated tenants |\n\nFor thousands of sellers, **shared tables + `org_id`** is the norm. Then enforce isolation in layers:\n\n**1. Schema.** `org_id NOT NULL` on every tenant table; include it in unique constraints\n(`UNIQUE (org_id, channel, order_ref)`) and as the **leading column of indexes** - good for both isolation and\nperformance. Composite foreign keys `(org_id, order_id)` stop a child row pointing at another tenant's parent.\n\n**2. Application.** Derive `org_id` from the authenticated session/token, **never** from a request parameter. Funnel\nall data access through a repository layer that requires `org_id`:\n\n```python\ndef get_order(conn, org_id: int, order_id: int):\n    return conn.execute(\n        \"SELECT * FROM orders WHERE org_id = %s AND order_id = %s\", (org_id, order_id)\n    ).fetchone()\n```\n\nFetching by id alone (`/orders/123`) is the classic IDOR bug.\n\n**3. Database: Row-Level Security** as a safety net:\n\n```sql\nALTER TABLE orders ENABLE ROW LEVEL SECURITY;\nCREATE POLICY tenant_isolation ON orders\n  USING (org_id = current_setting('app.org_id')::bigint);\n-- per request/transaction:\nSET LOCAL app.org_id = '42';\n```\n\nEven a query that forgets the filter returns only that tenant's rows. Caveats: the app must connect as a non-owner\nrole (owners bypass RLS unless `FORCE ROW LEVEL SECURITY`), and with connection pooling use `SET LOCAL` inside a\ntransaction so the setting doesn't leak to the next request.\n\n**4. Everything else:** cache keys, S3 prefixes (`s3://bucket/org/42/...`), background jobs and logs carry `org_id`.\nAdd automated tests that log in as tenant A and try to read tenant B's resources. Watch for noisy neighbours -\na huge seller can need its own partition or database later.",
+    "tags": [
+      "multi-tenancy",
+      "postgresql",
+      "row-level-security",
+      "security"
+    ]
+  },
+  {
+    "slug": "sd-scaling-postgres-writes",
+    "category": "system-design",
+    "difficulty": "hard",
+    "skill": "database-design",
+    "question": "Ingestion load is growing and PostgreSQL write throughput has become the bottleneck (high CPU/IO during uploads, slow upserts). How do you scale writes?",
+    "answer_md": "**Measure first:** `pg_stat_statements` (which statements dominate), wait events in `pg_stat_activity` (IO, locks,\nWAL), checkpoint frequency, index count per table, connection count.\n\n**1. Make each write cheaper (biggest wins, no new infra):**\n- **Batch**: `execute_values` / multi-row `INSERT`, or `COPY` into an unlogged/temp staging table and then one\n  `INSERT ... SELECT ... ON CONFLICT`. Row-by-row with a commit per row is the classic bottleneck.\n- **Fewer, right-sized transactions**: commit every few thousand rows, not per row and not one giant transaction.\n- **Drop unused indexes**: every index is extra write work (check `pg_stat_user_indexes.idx_scan = 0`).\n- **Avoid no-op updates**: `DO UPDATE ... WHERE (t.col1, t.col2) IS DISTINCT FROM (EXCLUDED.col1, EXCLUDED.col2)`\n  skips rewriting identical rows (each UPDATE writes a new row version + WAL).\n- Tune `fillfactor` for HOT updates, `max_wal_size`/checkpoints, autovacuum on hot tables.\n\n**2. Control concurrency.** More parallel writers isn't always faster: lock contention and deadlocks on the same\nkeys. Cap workers, sort batches by key, use a connection pooler (PgBouncer / RDS Proxy).\n\n**3. Separate reads from writes.** Move dashboards/exports to read replicas so the primary only serves writes.\n\n**4. Partitioning** (declarative, e.g. by month or by `org_id` hash): smaller indexes that fit in memory, faster\nvacuum, cheap archiving by detaching old partitions. It helps maintenance and locality more than raw insert rate.\n\n**5. Vertical scaling:** faster storage (provisioned IOPS), more RAM/CPU - often the cheapest short-term fix.\n\n**6. Sharding** (by `org_id`, e.g. Citus or application-level routing) when one primary can't keep up. Big\ncomplexity jump: cross-shard queries, rebalancing, migrations - do it last.\n\n**7. Buffering/smoothing:** a queue in front of writes absorbs spikes (end-of-month uploads); workers drain at a rate\nthe database can sustain. Not everything belongs in OLTP: raw report rows can stay in S3, with only normalized\ndata loaded.",
+    "tags": [
+      "postgresql",
+      "scaling",
+      "write-throughput",
+      "partitioning",
+      "batching"
+    ]
+  },
+  {
+    "slug": "sd-audit-log-design",
+    "category": "system-design",
+    "difficulty": "medium",
+    "skill": "database-design",
+    "question": "Design an audit log that records who changed what (orders, prices, settings) and when, for compliance and debugging.",
+    "answer_md": "**Requirements:** who (user/service, org), what (entity + id), action, before/after values, when, from where\n(request id, IP), and it must be **append-only** and queryable (\"show the history of order 123\", \"what did user X\nchange yesterday\").\n\n**Schema:**\n\n```sql\nCREATE TABLE audit_log (\n  id           BIGSERIAL PRIMARY KEY,\n  org_id       BIGINT NOT NULL,\n  actor_type   TEXT NOT NULL,          -- user | service | system\n  actor_id     TEXT NOT NULL,\n  action       TEXT NOT NULL,          -- create | update | delete | login ...\n  entity_type  TEXT NOT NULL,\n  entity_id    TEXT NOT NULL,\n  changes      JSONB,                  -- {\"price\": {\"old\": 499, \"new\": 449}}\n  request_id   TEXT,\n  occurred_at  TIMESTAMPTZ NOT NULL DEFAULT now()\n);\nCREATE INDEX ON audit_log (org_id, entity_type, entity_id, occurred_at DESC);\nCREATE INDEX ON audit_log (org_id, actor_id, occurred_at DESC);\n```\n\nStore only the **diff** of changed fields - full snapshots bloat quickly.\n\n**How to capture:**\n1. **Application-level** (service layer writes the audit row in the **same transaction** as the change): knows the\n   real user and intent; risk: code paths that bypass it.\n2. **Database triggers**: catch every change including manual SQL fixes; but only know the DB user unless the app\n   sets `SET LOCAL app.user_id = ...` that the trigger reads.\n3. **Change data capture** (logical replication / Debezium) into a separate store: no write overhead on hot paths,\n   eventual consistency.\n\nA hybrid is common: app-level for business actions, triggers for sensitive tables.\n\n**Immutability:** the app role gets `INSERT`/`SELECT` only (no `UPDATE`/`DELETE`); optionally hash-chain rows\n(each row stores a hash of the previous) to detect tampering; ship copies to S3 with object lock for compliance.\n\n**Scale and retention:** partition by month, keep 12-24 months hot, archive older partitions to S3. Bulk ingestion\nshouldn't write one audit row per imported order; log one row per upload (`fs_upload` id, row counts) instead.\n\n**Privacy:** don't store passwords/tokens; mask PII in `changes`.",
+    "tags": [
+      "audit-log",
+      "postgresql",
+      "compliance",
+      "triggers",
+      "jsonb"
+    ]
+  },
+  {
+    "slug": "sd-async-report-export",
+    "category": "system-design",
+    "difficulty": "medium",
+    "skill": "system-design",
+    "question": "Sellers want to export up to 5 million orders as CSV from the dashboard. The current synchronous endpoint times out and spikes database load. Design the export feature.",
+    "answer_md": "**Make it asynchronous.** Long work doesn't belong in an HTTP request (load balancer and Lambda/API Gateway\ntimeouts are ~30-60 s).\n\n**Flow:**\n1. `POST /exports` with filters -> validate, create an `exports` row (`queued`), enqueue a job, return **202** with\n   the export id.\n2. A worker streams rows from the database and writes the CSV (gzip) to S3 using **multipart upload**, updating\n   progress (`rows_written`).\n3. On completion: status `ready`, generate a **pre-signed S3 URL** (expires in e.g. 24 h), notify by email/in-app.\n4. `GET /exports/{id}` returns status, progress, and the download URL when ready.\n\n**Streaming, not loading.** Never `fetchall()` 5M rows. Use a psycopg2 **server-side (named) cursor** with\n`itersize`, or keyset pagination in chunks of 10k (`WHERE order_id > last_id ORDER BY order_id LIMIT 10000`), and\nwrite each chunk out. Memory stays constant. PostgreSQL's `COPY (SELECT ...) TO STDOUT WITH CSV HEADER` is the\nfastest path:\n\n```python\nwith conn.cursor() as cur, open(tmp_path, \"wb\") as f:\n    cur.copy_expert(\n        cur.mogrify(\"COPY (SELECT ... FROM orders WHERE org_id = %s AND order_date BETWEEN %s AND %s) \"\n                    \"TO STDOUT WITH CSV HEADER\", (org_id, start, end)).decode(),\n        f)\n```\n\n**Protect the primary.** Run exports against a **read replica**, limit concurrent exports per org and globally, and\nuse a statement timeout.\n\n**Idempotency and reuse.** Hash the normalized filters; if an identical export finished recently, return it instead\nof recomputing. Retries overwrite the same S3 key, so they're safe.\n\n**Housekeeping:** S3 lifecycle rule deletes exports after 7 days; record who exported what (audit - it's bulk data\naccess); enforce `org_id` in the query and in the S3 key prefix.\n\n**Very large/regular exports:** offer scheduled exports or a direct S3/warehouse integration rather than repeated\n5M-row downloads.",
+    "tags": [
+      "async-processing",
+      "s3",
+      "exports",
+      "streaming",
+      "postgresql"
+    ]
+  },
+  {
+    "slug": "sd-inventory-sync-across-channels",
+    "category": "system-design",
+    "difficulty": "hard",
+    "skill": "system-design",
+    "question": "A seller sells the same SKU on Myntra, Nykaa, Blinkit and Zepto from one warehouse stock. Design inventory sync so stock stays accurate across channels and overselling is minimized.",
+    "answer_md": "**Model.** One source of truth per `(org_id, warehouse_id, sku)`: `on_hand`, `reserved`, and\n`available = on_hand - reserved - safety_buffer`. Each channel gets an **allocated** quantity pushed to it.\n\n**Inbound events:** orders from each channel (API polling, webhooks or reports), returns, cancellations,\nwarehouse receipts/adjustments. **Outbound:** stock updates pushed to each channel's API.\n\n**Reserving stock atomically.** When an order arrives, decrement in one statement so concurrent orders can't both\ntake the last unit:\n\n```sql\nUPDATE stock\nSET reserved = reserved + %(qty)s\nWHERE org_id = %(org)s AND sku = %(sku)s\n  AND on_hand - reserved >= %(qty)s\nRETURNING on_hand - reserved AS available;\n```\n\nNo row returned -> insufficient stock -> flag the order (oversold) for the seller. Record each reservation in a\nledger table keyed by `(channel, order_ref, sku)` with a unique constraint, so a duplicate order event doesn't\nreserve twice. Cancellations/returns release via the same ledger.\n\n**Pushing to channels.** Every change to `available` enqueues a \"sync SKU X\" job (dedupe/coalesce: if 20 orders hit\nthe same SKU in a minute, push once with the latest value). Workers respect each channel's rate limits with backoff,\nand push **absolute values** (\"available = 7\"), never deltas, so retries and reordering are harmless.\n\n**Accepting imperfection.** Channel order feeds lag (minutes for APIs, hours for reports), so overselling can't be\nfully eliminated. Mitigations:\n- **Safety buffer** per SKU (hold back 1-2 units, more for fast movers).\n- **Allocation strategies**: split low stock across channels or prioritize high-margin channels instead of\n  advertising the full quantity everywhere.\n- Fast paths (webhooks) for quick-commerce channels where speed matters most.\n\n**Reconciliation.** Periodically pull each channel's reported inventory and compare to what you pushed; correct\ndrift. Alert on oversell rate, sync lag per channel, and failed pushes. Everything keyed and filtered by `org_id`.",
+    "tags": [
+      "inventory",
+      "concurrency",
+      "idempotency",
+      "queues",
+      "consistency"
+    ]
+  }
+]

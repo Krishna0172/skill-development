@@ -1,0 +1,173 @@
+{
+  "slug": "be-git-basics",
+  "title": "Git basics: save, branch, share",
+  "skill": "git",
+  "extra_skills": [],
+  "category": "Tools",
+  "difficulty": "beginner",
+  "tags": [
+    "git",
+    "version-control",
+    "branch",
+    "merge",
+    "gitignore"
+  ],
+  "summary": "Git records snapshots of your project so you can go back, compare, and work in parallel on branches. This topic teaches the first-day commands: init, add, commit, branch, merge, remote and .gitignore, from zero.",
+  "why_md": "- Every team uses Git; you cannot work on a backend without it.\n- It is your safety net: any change can be undone.\n- Branches let you build a feature without breaking the working code.\n- Interviews and code reviews assume you can branch, commit cleanly and resolve a merge.",
+  "details_md": "### The idea\nWithout version control you end up with `app_final_v2_REAL.py`. Git instead stores a history of **commits**. A commit is a snapshot of your files plus a message and a pointer to the previous commit. You can jump to any commit, compare two, or undo one.\n\n### The three places\n1. **Working directory**: the files you edit.\n2. **Staging area (index)**: the changes you chose to include in the next commit.\n3. **Repository (.git folder)**: the saved history.\n\nThe flow is: edit -> `git add` (stage) -> `git commit` (save).\n\n### First commands\n- `git init` turns the current folder into a repository.\n- `git status` shows what changed. Run it constantly.\n- `git add file.py` stages one file; `git add .` stages everything changed in the folder.\n- `git commit -m \"Add order endpoint\"` saves the staged snapshot.\n- `git log --oneline` shows history.\n- `git diff` shows unstaged changes; `git diff --staged` shows what will be committed.\n\n### Branches\nA **branch** is just a movable label pointing at a commit. The default branch is usually `main`. Create a branch to work safely:\n- `git switch -c feature/login` creates and moves to it.\n- Commit as usual; `main` is untouched.\n- `git switch main` goes back.\n\n### Merging\nWhen the feature is ready: `git switch main` then `git merge feature/login`. If both branches changed different lines, Git combines them automatically. If both changed the *same* lines you get a **merge conflict**: Git marks the file with `<<<<<<<`, `=======`, `>>>>>>>`; you edit the file to the final version, `git add` it and `git commit`.\n\n### Remotes\nA **remote** is a copy of the repo on a server such as GitHub.\n- `git clone <url>` copies one.\n- `git remote add origin <url>` links your local repo.\n- `git push -u origin main` uploads your commits.\n- `git pull` downloads and merges others' commits; `git fetch` downloads without merging.\n\n### .gitignore\nA file listing patterns Git must not track: virtual environments, caches, secrets.\n```\n.venv/\n__pycache__/\n*.pyc\n.env\n```\nIgnoring only works for files not yet committed; if a secret was already committed, ignoring it later does not erase it from history.\n\n### Under the hood\nGit stores content as objects identified by a hash of their content. A commit object points to a tree (the folder snapshot) and its parent commit(s). Because the hash depends on content and parents, history cannot be silently altered.",
+  "code_md": "```bash\n# 1) First repository\nmkdir shop-api && cd shop-api\ngit init\necho \"print('hello')\" > app.py\ngit add app.py\ngit commit -m \"Initial commit\"\ngit log --oneline\n```\n\n```bash\n# 2) Feature branch and merge\ngit switch -c feature/health-check\necho \"# health endpoint\" >> app.py\ngit add app.py && git commit -m \"Add health check\"\ngit switch main\ngit merge feature/health-check\ngit branch -d feature/health-check     # clean up\n```\n\n```bash\n# 3) .gitignore and a remote\nprintf \".venv/\\n__pycache__/\\n.env\\n\" > .gitignore\ngit add .gitignore && git commit -m \"Add gitignore\"\ngit remote add origin https://github.com/you/shop-api.git\ngit push -u origin main\n```",
+  "use_cases_md": "- One branch per feature or bug fix, then a pull request for review.\n- Reverting a bad deployment by checking out the last good commit.\n- Keeping `.env` files with passwords out of the repository.\n- Collaborating: each developer pushes branches to a shared GitHub remote.",
+  "mistakes_md": "- **Committing secrets** (`.env`, API keys): ignored files only protect future commits. Rotate any leaked key.\n- **Giant 'update' commits**: hard to review or undo. Commit small, logical changes with clear messages.\n- **Working directly on `main`**: use a branch.\n- **`git add .` blindly**: you may stage junk. Check `git status` and `git diff --staged` first.\n- **Panicking at conflicts**: a conflict is just two edits to the same lines; pick the right result and commit.\n- **Forgetting to pull** before pushing, causing rejected pushes.",
+  "best_practices_md": "- Write messages in the imperative: 'Add retry to payment client'.\n- One logical change per commit.\n- Create `.gitignore` before the first commit.\n- `git status` before every add/commit.\n- Pull often to keep your branch close to `main`.\n- Never commit credentials.",
+  "my_context_md": "",
+  "revision_notes_md": "- Three areas: working dir, staging, repository.\n- `init`, `status`, `add`, `commit`, `log --oneline`, `diff`.\n- Branch = movable label on a commit; `switch -c name` creates one.\n- `merge` combines branches; conflicts are resolved by editing markers, `add`, `commit`.\n- Remote: `clone`, `remote add origin`, `push -u`, `pull`, `fetch`.\n- `.gitignore` stops tracking new files only.\n- Commit small, message in imperative.",
+  "exercises_md": "1. Create a repo, make three commits and read them with `git log --oneline`.\n2. Make a branch, change the same line of a file on `main` and on the branch, then merge and resolve the conflict.\n3. Add a `.env` file, a `.venv/` folder and `__pycache__/`; write a `.gitignore` so `git status` stays clean.\n4. Create a new empty repo on GitHub, push your local repo and clone it into another folder.",
+  "related": [
+    "git-workflow",
+    "github-actions-ci",
+    "be-git-advanced"
+  ],
+  "flashcards": [
+    {
+      "front": "What are Git's three areas?",
+      "back": "Working directory, staging area (index), repository (.git)."
+    },
+    {
+      "front": "What does `git add` do?",
+      "back": "Stages changes so they are included in the next commit."
+    },
+    {
+      "front": "What is a branch?",
+      "back": "A movable pointer/label to a commit, letting you develop in parallel."
+    },
+    {
+      "front": "fetch vs pull?",
+      "back": "fetch downloads remote commits only; pull = fetch + merge."
+    },
+    {
+      "front": "Does adding a file to .gitignore remove it from history?",
+      "back": "No, it only stops tracking untracked files; committed secrets stay in history."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which command saves the staged snapshot?",
+      "options": [
+        "git add",
+        "git commit",
+        "git push",
+        "git status"
+      ],
+      "answer_index": 1,
+      "explanation": "commit records staged changes."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does `git switch -c feature/x` do?",
+      "options": [
+        "Deletes branch x",
+        "Merges x",
+        "Creates branch x and moves to it",
+        "Pushes x"
+      ],
+      "answer_index": 2,
+      "explanation": "-c creates the branch."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Safest response after accidentally committing a password to a public repo?",
+      "options": [
+        "Add it to .gitignore",
+        "Delete the file in a new commit",
+        "Rotate the password",
+        "Do nothing"
+      ],
+      "answer_index": 2,
+      "explanation": "History still has it, so the secret must be rotated."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The command to download remote commits AND merge them is git ____.",
+      "answers": [
+        "pull"
+      ],
+      "explanation": "pull = fetch + merge."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A file named ____ lists patterns that Git should not track.",
+      "answers": [
+        ".gitignore",
+        "gitignore"
+      ],
+      "explanation": "The .gitignore file."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from fnmatch import fnmatch\nfiles = ['app.py', 'app.pyc', 'x.pyc.bak', 'notes.txt']\nprint([f for f in files if fnmatch(f, '*.pyc')])",
+      "answers": [
+        "['app.pyc']"
+      ],
+      "explanation": "Only names ending in .pyc match."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from fnmatch import fnmatch\nprint(fnmatch('.env', '.env'), fnmatch('.env.local', '.env'), fnmatch('.env.local', '.env*'))",
+      "answers": [
+        "True False True"
+      ],
+      "explanation": "Exact pattern matches only the exact name; the wildcard also matches the suffix."
+    },
+    {
+      "type": "debug",
+      "prompt": "You run `git commit -m \"Add endpoint\"` and Git says 'nothing added to commit but untracked files present'. Why and how to fix?",
+      "code": "$ git status\nUntracked files:\n  orders.py\n$ git commit -m \"Add endpoint\"\nnothing added to commit but untracked files present",
+      "answer": "The new file was never staged. Run `git add orders.py` (check with `git status`), then commit again.",
+      "rubric": [
+        "Identify that the file is untracked/unstaged",
+        "git add then commit",
+        "Mention git status to verify"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between the working directory, the staging area and the repository.",
+      "answer": "The working directory holds the files you edit. The staging area is a draft of the next commit where you select changes with git add. The repository is the saved history of commits in .git. Staging lets you commit only part of your work.",
+      "rubric": [
+        "Working dir = edits",
+        "Staging = next commit draft",
+        "Repository = history"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is a merge conflict and how do you resolve one?",
+      "answer": "A conflict happens when two branches changed the same lines (or one deleted a file the other edited), so Git cannot choose automatically. Git inserts markers `<<<<<<<`, `=======`, `>>>>>>>`. Edit the file to the correct final content, remove the markers, `git add` the file and finish with `git commit`.",
+      "rubric": [
+        "Same lines changed on both branches",
+        "Markers in the file",
+        "Edit, add, commit"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between git merge and git pull?",
+      "difficulty": "easy",
+      "answer_md": "`git merge` joins another local branch into your current one. `git pull` first runs `git fetch` to download the remote's new commits and then merges them into your current branch. If you want to inspect changes before merging, fetch first and merge manually."
+    },
+    {
+      "question": "What is HEAD?",
+      "difficulty": "easy",
+      "answer_md": "HEAD is a pointer to the commit/branch you currently have checked out. Normally it points to a branch name, which points to a commit. 'Detached HEAD' means HEAD points directly at a commit, so new commits belong to no branch and can be lost unless you create a branch."
+    },
+    {
+      "question": "How do you undo the last commit but keep the changes?",
+      "difficulty": "medium",
+      "answer_md": "`git reset --soft HEAD~1` removes the commit and keeps changes staged; `git reset HEAD~1` (mixed) keeps them unstaged in the working directory. If the commit was already pushed to a shared branch, prefer `git revert <sha>`, which adds a new commit that cancels it without rewriting history."
+    }
+  ]
+}

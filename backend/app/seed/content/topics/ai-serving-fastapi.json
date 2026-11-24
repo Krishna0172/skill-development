@@ -1,0 +1,151 @@
+{
+  "slug": "ai-serving-fastapi",
+  "title": "Serving LLM & RAG endpoints with FastAPI",
+  "skill": "ai-production",
+  "extra_skills": [
+    "fastapi",
+    "python-asyncio",
+    "pydantic"
+  ],
+  "category": "AI",
+  "difficulty": "advanced",
+  "tags": [
+    "fastapi",
+    "streaming",
+    "sse",
+    "async",
+    "timeouts",
+    "background-tasks"
+  ],
+  "summary": "An LLM endpoint is an I/O-bound proxy to a slow, rate-limited upstream: validate the request with Pydantic, call the model with an async client and explicit timeouts, stream tokens to the client, and move heavy work such as document ingestion out of the request path.",
+  "why_md": "- FastAPI + Pydantic is the default stack for Python AI services and appears in most GenAI job descriptions.\n- LLM calls take seconds; without async, streaming and timeouts a service stalls under modest load.\n- Your existing async httpx experience transfers directly.",
+  "details_md": "### Request validation\nDefine request/response models with Pydantic v2: max question length, allowed enums (mode: `sql | docs`), optional `session_id`. FastAPI rejects invalid input with 422 before you spend tokens. Identity (`user_id`, `org_id`) comes from an auth dependency, not the body.\n\n### Async clients\nModel calls are network I/O, so use `async def` endpoints with an **async client** (the provider's async SDK or `httpx.AsyncClient`), created once at startup (lifespan) and reused for connection pooling. Calling a *blocking* SDK inside `async def` blocks the event loop for every request — either use the async variant, a sync `def` endpoint (FastAPI runs it in a threadpool), or `run_in_threadpool`. psycopg2 is blocking too: use a sync dependency, a threadpool, or an async driver.\n\n### Timeouts and limits\nSet connect/read timeouts on the client and an overall deadline (`asyncio.wait_for` / `asyncio.timeout`). Return a clear error (504 or a structured fallback) instead of hanging. Limit concurrency to the provider's rate limits with an `asyncio.Semaphore` and retry 429/5xx with backoff — but not past the request deadline.\n\n### Streaming\nUsers perceive latency as time to first token. Stream using `StreamingResponse` with an async generator, usually in **Server-Sent Events** format (`data: {...}\\n\\n`, `text/event-stream`). Considerations: errors mid-stream must be sent as an event (status 200 already went out); detect client disconnects (`await request.is_disconnected()`) to stop paying for tokens; record the full answer, tokens and cost after the stream ends; disable proxy buffering.\n\n### Background ingestion\nEmbedding a 200-page PDF doesn't belong in a request. Accept the upload (or S3 key), create a job row, return `202 Accepted` with a job id, and process in a worker. FastAPI's `BackgroundTasks` is fine for small fire-and-forget work in the same process; durable or heavy jobs need a queue/worker (SQS, a Postgres job table with SKIP LOCKED, Celery).\n\n### Deployment shape\nRun with uvicorn workers (or gunicorn+uvicorn workers); tune worker count to CPU, but since the work is I/O-bound, one async worker handles many concurrent streams.",
+  "code_md": "```python\n# FastAPI LLM endpoint: validated input, shared async client, timeout, SSE streaming.\nimport asyncio, json\nfrom contextlib import asynccontextmanager\nfrom typing import Literal\nimport httpx\nfrom fastapi import FastAPI, Depends, Request\nfrom fastapi.responses import StreamingResponse\nfrom pydantic import BaseModel, Field\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    app.state.llm = httpx.AsyncClient(base_url=LLM_URL, timeout=httpx.Timeout(30, connect=5))\n    app.state.sem = asyncio.Semaphore(20)          # respect provider rate limits\n    yield\n    await app.state.llm.aclose()\n\napp = FastAPI(lifespan=lifespan)\n\nclass AskIn(BaseModel):\n    question: str = Field(min_length=3, max_length=2000)\n    mode: Literal[\"sql\", \"docs\"] = \"docs\"\n    session_id: int | None = None\n\n@app.post(\"/ask/stream\")\nasync def ask_stream(body: AskIn, request: Request, user=Depends(current_user)):\n    async def events():\n        parts = []\n        try:\n            async with request.app.state.sem:\n                async for delta in stream_model(request.app.state.llm, body, user):  # provider-specific\n                    if await request.is_disconnected():\n                        break                                   # stop paying for tokens\n                    parts.append(delta)\n                    yield f\"data: {json.dumps({'delta': delta})}\\n\\n\"\n        except (httpx.TimeoutException, httpx.HTTPStatusError):\n            yield f\"data: {json.dumps({'error': 'upstream_unavailable'})}\\n\\n\"\n        finally:\n            await save_message(user, body.session_id, \"\".join(parts))     # history + tokens + cost\n        yield \"data: [DONE]\\n\\n\"\n    return StreamingResponse(events(), media_type=\"text/event-stream\",\n                             headers={\"X-Accel-Buffering\": \"no\"})\n```\n\n```python\n# Ingestion: accept fast, process in a worker.\nfrom fastapi import status\n\nclass IngestIn(BaseModel):\n    s3_key: str = Field(pattern=r\"^uploads/[\\w\\-/]+\\.pdf$\")\n\n@app.post(\"/documents\", status_code=status.HTTP_202_ACCEPTED)\nasync def ingest(body: IngestIn, user=Depends(current_user)):\n    job_id = await create_ingest_job(user.org_id, body.s3_key)   # INSERT ... RETURNING id\n    return {\"job_id\": job_id, \"status\": \"pending\"}             # worker claims with SKIP LOCKED\n```",
+  "use_cases_md": "- **Streaming analytics chat**: SSE endpoint that streams the summary while SQL results are stored.\n- **RAG Q&A over seller policies** with retrieval + generation in one async endpoint and a 20s deadline.\n- **Bulk document ingestion**: 202 + job id, progress polled via `/documents/{job_id}`.\n- **Internal classification endpoint** (sync JSON response) for review sentiment or category tagging.",
+  "mistakes_md": "- **Blocking SDK call inside `async def`** – freezes the event loop; every request waits.\n- **No timeouts** – a hung upstream holds connections and workers indefinitely.\n- **New HTTP client per request** – no connection reuse, slower, socket exhaustion.\n- **Ingesting documents inside the request** – timeouts behind load balancers; use a job + worker.\n- **Ignoring client disconnects while streaming** – you keep generating (and paying) for nobody.\n- **Trusting `org_id` from the request body**.",
+  "best_practices_md": "- Pydantic models for every request/response; limits on lengths.\n- One shared async client from lifespan; explicit timeouts; semaphore for concurrency.\n- Stream long answers via SSE; handle errors as events and log final usage after the stream.\n- Offload heavy/durable work to workers; return 202 + job id.\n- Health/readiness endpoints that don't call the model on every probe.\n- Return consistent error shapes; map upstream errors to 502/503/504.",
+  "my_context_md": "`ECSInventoryPriceTracking/app/fetchers/spapi.py` already uses an async httpx client with token refresh, `asyncio.Lock` request pacing and rate-limit header handling — the same toolkit an LLM endpoint needs (shared async client, pacing to provider limits, timeouts). `GetLlmData`/`ECSLlmQueryProcess` are Flask; a FastAPI version would gain Pydantic validation on the chat payload and native async streaming. Note psycopg2 is blocking: in async endpoints, wrap DB calls in a threadpool or use sync `def` dependencies.",
+  "revision_notes_md": "- LLM endpoints are I/O-bound: async def + async client.\n- Blocking call in async def = event loop stalls; use async SDK or threadpool.\n- Shared client via lifespan; httpx.Timeout(connect, read); overall deadline with wait_for/asyncio.timeout.\n- Semaphore to cap concurrent upstream calls; backoff on 429/5xx within deadline.\n- Stream with StreamingResponse + SSE (`data: ...\\n\\n`, text/event-stream).\n- Mid-stream errors -> send error event; check is_disconnected.\n- Save message, tokens, cost after stream completes.\n- Heavy ingestion -> 202 + job id + worker.",
+  "exercises_md": "1. Build `/ask` (JSON) and `/ask/stream` (SSE) with a fake async model generator; test both with `httpx.AsyncClient` + ASGI transport in pytest.\n2. Add a 2-second deadline and a test where the fake model sleeps 5 seconds; assert a 504 or fallback.\n3. Load-test with 50 concurrent streams and compare a blocking `time.sleep` fake vs `asyncio.sleep` fake.\n4. Implement `/documents` returning 202 and a Postgres-backed worker that processes jobs with SKIP LOCKED.",
+  "related": [
+    "fastapi-essentials",
+    "server-sent-events",
+    "python-asyncio",
+    "be-background-tasks",
+    "be-pydantic-validation",
+    "ai-llm-apis"
+  ],
+  "flashcards": [
+    {
+      "front": "Why must LLM endpoints avoid blocking calls in async def?",
+      "back": "A blocking call stalls the event loop so all concurrent requests wait; use an async client or run blocking code in a threadpool."
+    },
+    {
+      "front": "SSE message format?",
+      "back": "Lines like `data: <payload>` terminated by a blank line (`\\n\\n`), content type text/event-stream."
+    },
+    {
+      "front": "How do you report an error after streaming has started?",
+      "back": "Send it as an SSE event (status 200 already sent), then close the stream; log it server-side."
+    },
+    {
+      "front": "Pattern for heavy document ingestion?",
+      "back": "Create job row, return 202 + job id, process in a worker (queue or SKIP LOCKED job table), expose a status endpoint."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Inside an `async def` FastAPI endpoint you call a synchronous LLM SDK that takes 5s. What happens under load?",
+      "options": [
+        "FastAPI automatically runs it in a thread",
+        "The event loop is blocked and all requests on that worker stall",
+        "It becomes async automatically",
+        "Only that request is slow; others are unaffected"
+      ],
+      "answer_index": 1,
+      "explanation": "FastAPI only threadpools sync `def` endpoints; blocking inside async def blocks the loop."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which metric does streaming primarily improve?",
+      "options": [
+        "Total tokens generated",
+        "Cost per request",
+        "Time to first token / perceived latency",
+        "Eval accuracy"
+      ],
+      "answer_index": 2,
+      "explanation": "Total generation time is similar; users see output immediately."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Server-Sent Events responses use the media type text/____.",
+      "answers": [
+        "event-stream"
+      ],
+      "explanation": "text/event-stream."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "For long document ingestion, the API should return HTTP status ____ Accepted with a job id.",
+      "answers": [
+        "202"
+      ],
+      "explanation": "202 signals the work is queued, not done."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this timeout-with-fallback code print?",
+      "code": "import asyncio\n\nasync def fake_llm(prompt, delay):\n    await asyncio.sleep(delay)\n    return f\"answer to {prompt}\"\n\nasync def answer(prompt, delay, timeout=0.5):\n    try:\n        return await asyncio.wait_for(fake_llm(prompt, delay), timeout)\n    except TimeoutError:\n        return \"fallback: try again\"\n\nasync def main():\n    results = await asyncio.gather(answer(\"q1\", 0.0), answer(\"q2\", 2.0), answer(\"q3\", 0.01))\n    for r in results:\n        print(r)\n\nasyncio.run(main())\n",
+      "answers": [
+        "answer to q1\nfallback: try again\nanswer to q3"
+      ],
+      "explanation": "q2 sleeps 2s which exceeds the 0.5s deadline; asyncio.wait_for raises TimeoutError (an alias of asyncio.TimeoutError since 3.11). gather preserves input order."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this SSE generator print?",
+      "code": "import asyncio, json\n\nasync def tokens():\n    for t in [\"Sales \", \"were \", \"120\"]:\n        await asyncio.sleep(0)\n        yield t\n\nasync def sse():\n    async for t in tokens():\n        yield f\"data: {json.dumps({'delta': t})}\\n\\n\"\n    yield \"data: [DONE]\\n\\n\"\n\nasync def main():\n    chunks = [c async for c in sse()]\n    print(len(chunks))\n    print(repr(chunks[0]))\n    print(chunks[-1].strip())\n\nasyncio.run(main())\n",
+      "answers": [
+        "4\n'data: {\"delta\": \"Sales \"}\\n\\n'\ndata: [DONE]"
+      ],
+      "explanation": "Three delta events plus the [DONE] sentinel = 4 chunks; each event ends with a blank line."
+    },
+    {
+      "type": "debug",
+      "prompt": "This endpoint is slow under load and sometimes hangs forever. What's wrong and how do you fix it?",
+      "code": "import requests\n\n@app.post(\"/ask\")\nasync def ask(body: dict):\n    r = requests.post(LLM_URL, json={\"prompt\": body[\"question\"]})\n    return r.json()\n",
+      "answer": "- `requests` is **blocking** inside `async def` -> blocks the event loop.\n- **No timeout** -> hangs forever if the upstream stalls.\n- New connection per request; no validation (`dict` body), no auth/org.\n\n```python\nclass AskIn(BaseModel):\n    question: str = Field(min_length=3, max_length=2000)\n\n@app.post(\"/ask\")\nasync def ask(body: AskIn, request: Request, user=Depends(current_user)):\n    client: httpx.AsyncClient = request.app.state.llm      # shared, created in lifespan\n    try:\n        r = await client.post(\"/generate\", json={\"prompt\": body.question},\n                              timeout=httpx.Timeout(20, connect=5))\n        r.raise_for_status()\n    except httpx.TimeoutException:\n        raise HTTPException(504, \"model timeout\")\n    return r.json()\n```",
+      "rubric": [
+        "Blocking requests call in async endpoint",
+        "Missing timeout",
+        "Use shared async client",
+        "Validate input with Pydantic"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would build a production streaming chat endpoint in FastAPI.",
+      "answer": "Pydantic request model with limits; auth dependency provides user/org; load trimmed history; shared async client from lifespan with connect/read timeouts and a semaphore for concurrency. Return `StreamingResponse` of an async generator emitting SSE `data:` events; check disconnects; send errors as events; finally persist the full assistant message with token counts and cost and return a `[DONE]` sentinel. Disable proxy buffering. Heavy or durable work goes to background workers.",
+      "rubric": [
+        "Validation + auth-derived identity",
+        "Async client, timeouts, concurrency limit",
+        "SSE streaming with error events and disconnect handling",
+        "Persist usage/history after stream"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you handle the LLM provider's rate limits in a FastAPI service?",
+      "difficulty": "medium",
+      "answer_md": "Several layers. Inside one process, an `asyncio.Semaphore` caps concurrent upstream calls; across replicas, a shared limiter (Redis token bucket) or per-replica quotas sized to the account limit. On 429/5xx, retry with exponential backoff + jitter, honouring `Retry-After` headers, but never past the request's overall deadline. Queue non-interactive work (batch summarisation) separately so it can't starve interactive traffic. Read rate-limit response headers to adapt pacing — the same approach as pacing SP-API calls with an asyncio.Lock. Expose metrics for 429 counts and queue wait time."
+    },
+    {
+      "question": "When is FastAPI's BackgroundTasks not enough?",
+      "difficulty": "medium",
+      "answer_md": "BackgroundTasks run in the same process after the response is sent. They're fine for small, losable work (send a notification, write an analytics row). They're not enough when the work is heavy (CPU-bound parsing, embedding thousands of chunks), long-running, must survive restarts/deploys, needs retries, or must scale independently of the API. Then use a durable queue/worker: SQS + ECS worker, a Postgres job table claimed with `FOR UPDATE SKIP LOCKED`, or Celery/RQ. The API creates the job, returns 202 with a job id, and exposes a status endpoint."
+    }
+  ]
+}

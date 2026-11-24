@@ -1,0 +1,125 @@
+{
+  "slug": "web-security-owasp",
+  "title": "Web and API Security: OWASP Top 10 for Backend Developers",
+  "skill": "security",
+  "extra_skills": [
+    "authentication",
+    "api-development",
+    "backend-architecture"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "security",
+    "owasp",
+    "sql-injection",
+    "access-control",
+    "ssrf",
+    "secrets",
+    "idor"
+  ],
+  "summary": "The OWASP Top 10 is the standard list of the most critical web application security risks: broken access control, injection, misconfiguration, vulnerable dependencies and so on. For a backend developer, most of it comes down to a few habits: check authorization on every object, never build queries or commands from strings, keep secrets out of code, validate input at the boundary, and log security-relevant events.",
+  "details_md": "### The list (2021 edition, still the most widely cited)\n1. **A01 Broken Access Control**: users acting outside their permissions, e.g. **IDOR** (changing `/orders/123` to `/orders/124` returns another tenant's order), missing function-level checks, CORS misconfiguration.\n2. **A02 Cryptographic Failures**: sensitive data unencrypted in transit or at rest, weak hashing (MD5/SHA-1 for passwords), hard-coded keys.\n3. **A03 Injection**: SQL, NoSQL, OS command, LDAP injection, and XSS, all caused by mixing untrusted data into code or queries.\n4. **A04 Insecure Design**: missing threat modelling and business-logic flaws (no rate limit on OTP checks, negative quantities accepted).\n5. **A05 Security Misconfiguration**: debug mode in production, default credentials, verbose error pages, public S3 buckets, permissive security groups.\n6. **A06 Vulnerable and Outdated Components**: unpatched libraries and base images.\n7. **A07 Identification and Authentication Failures**: weak passwords, credential stuffing, broken session/token handling.\n8. **A08 Software and Data Integrity Failures**: unsigned updates, insecure deserialization (`pickle.loads` on untrusted data), compromised CI/CD.\n9. **A09 Security Logging and Monitoring Failures**: attacks go unnoticed; no audit trail.\n10. **A10 Server-Side Request Forgery (SSRF)**: the server fetches a URL controlled by an attacker, reaching internal services or the cloud metadata endpoint (`169.254.169.254`).\n\nThe **2025 update** keeps Broken Access Control at #1, moves Security Misconfiguration up, broadens outdated components into **Software Supply Chain Failures**, folds SSRF into access control, and adds **Mishandling of Exceptional Conditions** (failing open, leaking details in errors). The underlying habits are the same.\n\n### Backend defences that cover most of it\n- **Authorization on every request and every object**: verify the authenticated principal owns the resource (`WHERE id = %s AND orgid = %s`), deny by default, centralise checks. Authentication (who you are) is not authorization (what you may do). See also the OWASP **API Security Top 10**, where Broken Object Level Authorization is #1.\n- **Parameterised queries** everywhere; whitelist dynamic identifiers; never `shell=True` with user input; avoid `eval`/`pickle` on untrusted data.\n- **Input validation** at the boundary with schemas (Pydantic): types, ranges, lengths, allowed values. Validate **files** too: size, type by magic bytes (not just extension), zip-bomb limits on archives.\n- **Output encoding** to prevent XSS (template auto-escaping, React escapes by default; avoid `dangerouslySetInnerHTML`), plus a Content-Security-Policy.\n- **Secrets management**: AWS Secrets Manager/SSM Parameter Store, IAM roles instead of keys, nothing in Git or Docker images, and rotation.\n- **Passwords**: hash with **Argon2id** or **bcrypt** (never plain SHA-256); rate-limit and lock out login attempts; MFA.\n- **Transport and storage**: TLS everywhere, encryption at rest (S3, RDS, DynamoDB defaults), least-privilege IAM.\n- **SSRF**: allowlist outbound hosts/schemes, resolve and block private IP ranges, enforce IMDSv2 on EC2, don't follow redirects blindly.\n- **Dependencies**: pin, scan (`pip-audit`, Dependabot, ECR image scanning), patch regularly.\n- **Errors**: generic messages to clients, details only in server logs; never return stack traces.\n- **Logging**: log authentication failures, access denials and admin actions with user/tenant IDs; never log passwords, tokens or full presigned URLs.\n- **HTTP hardening**: HSTS, `X-Content-Type-Options: nosniff`, strict CORS (no `*` with credentials), CSRF protection for cookie-based auth, rate limiting.",
+  "code_md": "```python\n# 1) Injection: parameterise values, whitelist identifiers\nfrom psycopg2 import sql\n\n# BAD: string formatting\ncur.execute(f\"SELECT * FROM orders WHERE awb = '{awb}'\")      # awb = \"' OR '1'='1\"\n\n# GOOD: values as parameters\ncur.execute(\"SELECT * FROM orders WHERE awb = %s AND orgid = %s\", (awb, orgid))\n\n# Dynamic sort column: whitelist + sql.Identifier\nALLOWED_SORT = {\"order_date\", \"total\", \"status\"}\ncol = sort_by if sort_by in ALLOWED_SORT else \"order_date\"\ncur.execute(sql.SQL(\"SELECT id, total FROM orders WHERE orgid = %s ORDER BY {} DESC\")\n            .format(sql.Identifier(col)), (orgid,))\n\n# OS commands: list args, no shell\nimport subprocess\nsubprocess.run([\"unzip\", \"-q\", path, \"-d\", out_dir], check=True)   # never shell=True with input\n```\n\n```python\n# 2) Broken access control (IDOR): always scope by the caller's tenant\nfrom fastapi import Depends, FastAPI, HTTPException\n\napp = FastAPI()\n\n@app.get(\"/orders/{order_id}\")\ndef get_order(order_id: int, user=Depends(current_user)):          # auth dependency\n    with conn.cursor() as cur:\n        cur.execute(\n            \"SELECT id, status, total FROM orders WHERE id = %s AND orgid = %s\",\n            (order_id, user.orgid),                                  # ownership check in the query\n        )\n        row = cur.fetchone()\n    if row is None:\n        raise HTTPException(status_code=404)                        # 404, not 403: don't confirm existence\n    return {\"id\": row[0], \"status\": row[1], \"total\": str(row[2])}\n```\n\n```python\n# 3) SSRF-safe download of a URL you were given\nimport ipaddress, socket\nfrom urllib.parse import urlparse\nimport requests\n\nALLOWED_HOST_SUFFIXES = (\".s3.ap-south-1.amazonaws.com\", \".s3.amazonaws.com\")\n\ndef safe_fetch(url: str) -> bytes:\n    u = urlparse(url)\n    if u.scheme != \"https\" or not (u.hostname or \"\").endswith(ALLOWED_HOST_SUFFIXES):\n        raise ValueError(\"URL not allowed\")\n    for info in socket.getaddrinfo(u.hostname, 443):\n        ip = ipaddress.ip_address(info[4][0])\n        if ip.is_private or ip.is_loopback or ip.is_link_local:   # blocks 169.254.169.254 etc.\n            raise ValueError(\"internal address blocked\")\n    r = requests.get(url, timeout=(5, 60), allow_redirects=False)\n    r.raise_for_status()\n    if len(r.content) > 50 * 1024 * 1024:\n        raise ValueError(\"file too large\")\n    return r.content\n```\n\n```python\n# 4) Passwords, secrets and safe errors\nfrom argon2 import PasswordHasher                      # pip install argon2-cffi\nimport boto3, json, logging\n\nph = PasswordHasher()\nhashed = ph.hash(\"user-password\")                     # salted, memory-hard\nph.verify(hashed, \"user-password\")                    # raises VerifyMismatchError on failure\n\nsecret = json.loads(boto3.client(\"secretsmanager\").get_secret_value(\n    SecretId=\"prod/db\")[\"SecretString\"])              # not in code, env files or images\n\nlog = logging.getLogger(__name__)\ntry:\n    process_upload(upload_id)\nexcept Exception:\n    log.exception(\"upload failed\", extra={\"upload_id\": upload_id})   # details in logs only\n    raise HTTPException(status_code=500, detail=\"Processing failed\")  # generic message to client\n```",
+  "use_cases_md": "- Reviewing an API endpoint before release: authz per object, input validation, error handling.\n- Designing multi-tenant data access so tenant isolation is enforced in every query.\n- Handling file uploads and URL downloads safely (type/size checks, SSRF protections).\n- Setting up secrets management and least-privilege IAM for Lambdas and ECS tasks.\n- Preparing for security questions in backend interviews.",
+  "mistakes_md": "- **Trusting IDs from the client without ownership checks** (IDOR): cross-tenant data leaks. Scope every query by the caller's tenant/user.\n- **String-built SQL or shell commands**: injection. Parameterise; use argument lists; whitelist identifiers.\n- **Secrets in code, `.env` committed to Git, or Docker images**: they live forever in history. Use a secrets manager and IAM roles; rotate anything leaked.\n- **Fast hashes for passwords** (MD5/SHA-256): GPU-crackable. Use Argon2id or bcrypt.\n- **Returning stack traces or SQL errors to clients**: reveals internals. Generic errors outward, details in logs.\n- **Fetching arbitrary URLs server-side**: SSRF to the metadata service or internal APIs. Allowlist hosts, block private ranges, disable redirects.\n- **`CORS: *` with credentials, or overly broad IAM (`s3:*` on `*`)**: misconfiguration. Least privilege everywhere.\n- **Logging tokens, passwords or full presigned URLs**: logs become a credential store. Redact.\n- **Unpinned, unscanned dependencies**: known CVEs in production. Pin and scan in CI.",
+  "best_practices_md": "- Deny by default; enforce authorization centrally and test it (including \"user A can't read B's data\" tests).\n- Validate all input with schemas at the boundary; treat files and third-party data as untrusted.\n- Parameterised queries only; no `eval`, `pickle` or `shell=True` on untrusted data.\n- Secrets in Secrets Manager/SSM, accessed via IAM roles; nothing sensitive in repos or images.\n- Least-privilege IAM per function/task; private S3 buckets with Block Public Access.\n- TLS everywhere; encryption at rest on by default.\n- Dependency and image scanning in CI; regular patching.\n- Security logging with alerting; redact sensitive fields.",
+  "my_context_md": "Several of these risks show up in your existing work. Your raw-SQL code with psycopg2 is protected from SQL injection only if every value goes through `%s` parameters; table or column names chosen at runtime need `psycopg2.sql.Identifier` plus a whitelist. Your data is multi-tenant, with keys like `(id, orgid)`, so filtering by `orgid` in every query is your main defence against broken access control between organisations. `read_and_validate()` downloads files from presigned URLs; if those URLs ever come from an external request, validating that the host is S3 protects against SSRF, and the size/type checks plus ZIP handling should guard against oversized or malicious archives. Authentication is a listed gap (you haven't implemented auth), so the access-control and password-hashing parts are the areas to study.",
+  "related": [
+    "jwt-authentication",
+    "s3-presigned-urls",
+    "psycopg2-essentials",
+    "rest-api-design",
+    "github-actions-ci",
+    "fastapi-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "#1 risk in the OWASP Top 10 (2021 and 2025)?",
+      "back": "Broken Access Control, e.g. IDOR: accessing another user's/tenant's object by changing an ID."
+    },
+    {
+      "front": "How do you prevent SQL injection with dynamic column names?",
+      "back": "Whitelist allowed names and compose with `psycopg2.sql.Identifier`; values always via %s parameters."
+    },
+    {
+      "front": "What is SSRF and the classic AWS target?",
+      "back": "Server-Side Request Forgery: making the server fetch attacker-chosen URLs, e.g. the instance metadata endpoint 169.254.169.254 to steal credentials."
+    },
+    {
+      "front": "Correct password hashing algorithms?",
+      "back": "Argon2id (preferred) or bcrypt (scrypt is also acceptable); never plain MD5/SHA."
+    },
+    {
+      "front": "Authentication vs authorization?",
+      "back": "Authentication: who you are. Authorization: what you're allowed to do or access."
+    },
+    {
+      "front": "Why return 404 instead of 403 for another tenant's object?",
+      "back": "To avoid confirming that the resource exists (prevents enumeration)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "`GET /api/orders/5012` returns another company's order when the ID is changed. Which category?",
+      "options": [
+        "Broken Access Control (IDOR)",
+        "Injection",
+        "Cryptographic Failure",
+        "SSRF"
+      ],
+      "answer_index": 0,
+      "explanation": "The server didn't check that the object belongs to the caller."
+    },
+    {
+      "question": "Which is safe in Python?",
+      "options": [
+        "cur.execute(\"... WHERE id = %s\" % user_id)",
+        "cur.execute(f\"... WHERE id = {user_id}\")",
+        "cur.execute(\"... WHERE id = %s\", (user_id,))",
+        "cur.execute(\"... WHERE id = \" + str(user_id))"
+      ],
+      "answer_index": 2,
+      "explanation": "Only passing parameters separately lets the driver handle them safely."
+    },
+    {
+      "question": "A service downloads any URL a client sends. Which control best mitigates SSRF?",
+      "options": [
+        "Longer timeouts",
+        "Allowlisting hosts and blocking private/link-local IPs",
+        "Gzip compression",
+        "Logging the full URL"
+      ],
+      "answer_index": 1,
+      "explanation": "Restrict destinations; also disable redirects and use IMDSv2."
+    },
+    {
+      "question": "Best place to store a production database password for an ECS task?",
+      "options": [
+        "Hard-coded in settings.py",
+        "In the Dockerfile ENV",
+        "A committed .env file",
+        "AWS Secrets Manager, injected via the task definition's secrets"
+      ],
+      "answer_index": 3,
+      "explanation": "Secrets Manager/SSM with IAM-controlled access keeps secrets out of code and images."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you prevent broken access control in a multi-tenant API?",
+      "difficulty": "medium",
+      "answer_md": "Principles: **deny by default**, and **authorize every object access** on the server using the authenticated identity, never IDs or roles supplied by the client.\n\nPractical layers:\n1. **Derive the tenant from the token/session**, not from request parameters. `orgid` comes from the verified JWT/session, never from `?orgid=`.\n2. **Scope every query** by tenant: `WHERE id = %s AND orgid = %s`. A missing row returns 404.\n3. **Centralise checks**: a dependency/middleware that resolves the current user and permissions, plus repository functions that *require* an `orgid` argument, so it's hard to write an unscoped query.\n4. **Function-level authorization**: admin endpoints check roles explicitly.\n5. **Defence in depth**: PostgreSQL **row-level security** (`CREATE POLICY ... USING (orgid = current_setting('app.orgid')::int)`) so even a buggy query can't cross tenants.\n6. **Tests**: automated tests asserting that user A gets 404 for B's resources, for every endpoint.\n7. **Logging and alerting** on repeated 403/404 patterns (enumeration attempts).\n\nUnguessable IDs (UUIDs) help against enumeration but are **not** access control on their own."
+    },
+    {
+      "question": "Explain SQL injection and how you defend against it beyond parameterised queries.",
+      "difficulty": "easy",
+      "answer_md": "SQL injection occurs when untrusted input is concatenated into a SQL statement and changes its structure:\n```python\ncur.execute(f\"SELECT * FROM users WHERE email = '{email}'\")\n# email = \"x' OR '1'='1' --\"  -> returns all users\n```\n\nPrimary defence: **parameterised queries** (`cur.execute(\"... WHERE email = %s\", (email,))`), where the driver sends or escapes values so they can never become SQL syntax.\n\nBeyond that:\n- **Identifiers** (table/column names, ORDER BY direction) can't be parameters: whitelist them and use `psycopg2.sql.Identifier`.\n- **Least-privilege DB users**: the app's role can't `DROP` tables or read other schemas; separate read-only roles for reporting.\n- **ORMs/query builders** reduce raw string SQL, though `text()` and raw queries still need parameters.\n- **Input validation** (types, lengths, formats) narrows what reaches the database.\n- **Avoid dynamic SQL in stored procedures** (`EXECUTE` with concatenation; use `format()` with `%I`/`%L` or `USING`).\n- **Error handling**: don't expose DB errors to clients, since they help attackers refine payloads.\n- **Code review and static analysis** (e.g. Bandit, Semgrep) flag string-built queries."
+    },
+    {
+      "question": "What is SSRF and how would you protect a service that downloads files from URLs?",
+      "difficulty": "hard",
+      "answer_md": "**Server-Side Request Forgery**: an attacker makes your server send requests to destinations they choose. Because the server sits inside your network with its own credentials, the attacker can reach internal APIs, databases' HTTP interfaces, or the cloud **metadata endpoint** `http://169.254.169.254/` to steal IAM role credentials (the Capital One breach in 2019 involved this).\n\nProtections for a URL-downloading service:\n1. **Allowlist** scheme (`https` only) and host (e.g. only your S3 bucket domains). Better still, accept an **S3 key** instead of a URL and generate the presigned URL server-side.\n2. **Resolve DNS and block private, loopback, link-local and metadata ranges** (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, IPv6 equivalents). Check the resolved IP the connection actually uses, to defeat DNS rebinding.\n3. **Disable redirects** (`allow_redirects=False`) or re-validate each hop.\n4. **Use IMDSv2** (session tokens) on EC2 so simple GETs can't read credentials. On ECS/Fargate, task role credentials are served from `169.254.170.2`, which the link-local block also covers; Lambda keeps credentials in environment variables, so other internal endpoints are the main SSRF targets there.\n5. **Network egress controls**: security groups or NAT rules limiting outbound destinations.\n6. **Limits**: timeouts, maximum size, content-type and magic-byte checks.\n7. **Least-privilege roles**, so even stolen credentials can do little."
+    }
+  ]
+}

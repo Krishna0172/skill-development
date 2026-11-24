@@ -1,0 +1,190 @@
+{
+  "slug": "be-databases-orm-concepts",
+  "title": "Relational vs NoSQL and the ORM idea",
+  "skill": "database-design",
+  "extra_skills": [
+    "sqlalchemy"
+  ],
+  "category": "Backend",
+  "difficulty": "beginner",
+  "tags": [
+    "sql",
+    "nosql",
+    "orm",
+    "sqlalchemy",
+    "database"
+  ],
+  "summary": "Databases store your application's data durably. This topic explains tables and relations, how NoSQL stores differ, what an ORM does, and how to decide between raw SQL and an ORM, starting from zero with a runnable sqlite3 example.",
+  "why_md": "- Almost every backend reads and writes a database; choosing and using it well matters more than any framework.\n- 'SQL vs NoSQL' and 'what is an ORM' are classic interview questions.\n- Understanding the ORM idea makes SQLAlchemy and Django models less magical.\n- Knowing when to drop to raw SQL keeps performance problems solvable.",
+  "details_md": "### What is a database?\nA program that stores data safely on disk and lets you query it quickly, with guarantees if the server crashes or two users write at once.\n\n### Relational databases (SQL)\nData lives in **tables** with fixed **columns** (like a spreadsheet with types). Each row is one record. A **primary key** uniquely identifies a row. A **foreign key** points to a row in another table, creating a **relation**: `orders.customer_id -> customers.id`. You query with SQL and combine tables with `JOIN`. They offer **ACID transactions**: Atomic (all or nothing), Consistent (rules like foreign keys hold), Isolated (concurrent users do not see half-done work), Durable (committed data survives a crash). Examples: PostgreSQL, MySQL, SQLite.\n\n### NoSQL\nA family of stores that give up some relational features for flexibility or scale:\n- **Document** (MongoDB): JSON-like documents, flexible shape.\n- **Key-value** (Redis, DynamoDB): get/put by key, extremely fast and scalable.\n- **Wide-column** (Cassandra) and **graph** (Neo4j) for special workloads.\nTrade-offs: easier horizontal scaling and schema flexibility, but typically weaker joins and multi-row transactions, and you design around the queries you will run.\n\nHow to choose: structured data with relations and money involved -> relational. Simple lookups at huge scale, or very variable documents -> NoSQL. PostgreSQL's JSONB also covers many 'flexible document' needs.\n\n### What is an ORM?\nObject-Relational Mapper: a library that maps tables to Python classes and rows to objects, and generates SQL for you.\n```python\nuser = session.get(User, 1)      # SELECT ... WHERE id = 1\nuser.email = \"a@b.com\"           # tracked change\nsession.commit()                 # UPDATE users SET email=... WHERE id=1\n```\nBenefits: less repetitive SQL, type-friendly code, protection against SQL injection through parameters, migrations tooling, portability across databases. Costs: an abstraction that can hide inefficient queries (the **N+1 problem**: one query for 100 orders, then 100 more for each order's customer), a learning curve, and complex reports that are awkward to express.\n\n### Raw SQL vs ORM\n- Use the **ORM** for ordinary create/read/update/delete, relationships, and apps where maintainability and speed of development matter.\n- Use **raw SQL** (or the ORM's SQL expression layer) for analytics, window functions, CTEs, bulk upserts, performance-critical queries and database-specific features.\nMost real projects mix both. Either way, always use **parameters**, never string-formatting values into SQL.\n\n### Under the hood\nDrivers (psycopg2, sqlite3) send SQL text to the database. The ORM sits on top: it builds the SQL, sends it through the driver, and turns result rows back into objects. A *session* tracks which objects changed and flushes the changes in a transaction on commit.",
+  "code_md": "```python\n# 1) Plain SQL with sqlite3 (standard library): tables, relation, join\nimport sqlite3\ncon = sqlite3.connect(\":memory:\")\ncon.executescript('''\nCREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\nCREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id), total REAL);\n''')\ncon.execute(\"INSERT INTO customers (name) VALUES (?)\", (\"Asha\",))   # parameters, not f-strings\ncon.execute(\"INSERT INTO orders (customer_id, total) VALUES (?, ?)\", (1, 99.5))\nrows = con.execute(\"SELECT c.name, o.total FROM orders o JOIN customers c ON c.id = o.customer_id\").fetchall()\nprint(rows)    # [('Asha', 99.5)]\n```\n\n```python\n# 2) The same idea with an ORM (SQLAlchemy 2.0)\nfrom sqlalchemy import ForeignKey, create_engine, select\nfrom sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, Session\n\nclass Base(DeclarativeBase): pass\n\nclass Customer(Base):\n    __tablename__ = \"customers\"\n    id: Mapped[int] = mapped_column(primary_key=True)\n    name: Mapped[str]\n    orders: Mapped[list[\"Order\"]] = relationship(back_populates=\"customer\")\n\nclass Order(Base):\n    __tablename__ = \"orders\"\n    id: Mapped[int] = mapped_column(primary_key=True)\n    customer_id: Mapped[int] = mapped_column(ForeignKey(\"customers.id\"))\n    total: Mapped[float]\n    customer: Mapped[Customer] = relationship(back_populates=\"orders\")\n\nengine = create_engine(\"sqlite://\")\nBase.metadata.create_all(engine)\nwith Session(engine) as s:\n    s.add(Customer(name=\"Asha\", orders=[Order(total=99.5)]))\n    s.commit()\n    print(s.scalars(select(Order).where(Order.total > 50)).all())\n```",
+  "use_cases_md": "- Customers/orders/payments: relational with foreign keys and transactions.\n- Session cache or rate-limit counters: key-value store (Redis).\n- Product catalogue with very different attributes per category: JSONB column or a document store.\n- CRUD admin endpoints via an ORM; nightly revenue reports via raw SQL with window functions.",
+  "mistakes_md": "- **Choosing NoSQL because it is trendy**, then needing joins and transactions.\n- **N+1 queries** from lazy-loaded relationships: use eager loading (`selectinload`, `joinedload`) and watch the SQL log.\n- **Building SQL with f-strings**: SQL injection and quoting bugs. Use parameters.\n- **Assuming the ORM removes the need to know SQL**: you still need indexes and query plans.\n- **Fighting the ORM** for a complex report instead of writing raw SQL.\n- **Loading whole tables** into memory with `.all()` on big result sets.",
+  "best_practices_md": "- Start with PostgreSQL unless there is a clear reason not to.\n- Always parameterise queries.\n- Turn on SQL logging in development to see what the ORM sends.\n- Mix ORM for CRUD and raw SQL for heavy queries; keep raw SQL in one repository layer.\n- Use migrations (Alembic) for schema changes.\n- Index foreign keys and frequent filters.",
+  "my_context_md": "",
+  "revision_notes_md": "- Relational: tables, rows, primary/foreign keys, JOINs, ACID.\n- NoSQL families: document, key-value, wide-column, graph; trade joins/transactions for scale or flexibility.\n- ORM maps tables to classes and rows to objects, generates SQL.\n- Session tracks changes; commit flushes them in a transaction.\n- N+1 problem = one query per related row; fix with eager loading.\n- ORM for CRUD; raw SQL for analytics, CTEs, bulk upserts, tuned queries.\n- Always use bound parameters.",
+  "exercises_md": "1. Recreate the sqlite3 customers/orders example and add a query for total spend per customer with GROUP BY.\n2. Add a third table `order_items` and write the join that lists each order with its items.\n3. Model the same two tables in SQLAlchemy and turn on `echo=True` to read the generated SQL.\n4. Write a loop that triggers the N+1 problem, count the queries, then fix it with `selectinload`.",
+  "related": [
+    "sqlalchemy-essentials",
+    "database-normalization",
+    "sql-joins",
+    "psycopg2-essentials",
+    "dynamodb-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "What do the letters in ACID stand for?",
+      "back": "Atomicity, Consistency, Isolation, Durability."
+    },
+    {
+      "front": "What is a foreign key?",
+      "back": "A column referencing the primary key of another table, enforcing a relation."
+    },
+    {
+      "front": "What is an ORM?",
+      "back": "A library mapping tables to classes and rows to objects, generating SQL for you."
+    },
+    {
+      "front": "What is the N+1 problem?",
+      "back": "One query for a list plus one extra query per item to load a relation; fix by eager loading/joins."
+    },
+    {
+      "front": "When prefer raw SQL?",
+      "back": "Analytics, window functions/CTEs, bulk upserts, performance-critical or database-specific queries."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which store type is best for simple get/set by key at huge scale?",
+      "options": [
+        "Relational",
+        "Key-value",
+        "Graph",
+        "Spreadsheet"
+      ],
+      "answer_index": 1,
+      "explanation": "Key-value stores like Redis/DynamoDB."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does the 'A' in ACID guarantee?",
+      "options": [
+        "All-or-nothing transactions",
+        "Automatic indexes",
+        "Authorization",
+        "Asynchronous writes"
+      ],
+      "answer_index": 0,
+      "explanation": "Atomicity: all statements succeed or none."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is a typical downside of ORMs?",
+      "options": [
+        "They cannot use parameters",
+        "They can hide inefficient queries such as N+1",
+        "They only work with NoSQL",
+        "They remove transactions"
+      ],
+      "answer_index": 1,
+      "explanation": "The abstraction can hide extra queries."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A nightly revenue report with window functions and CTEs is best written as:",
+      "options": [
+        "Lazy-loaded relationship loops",
+        "Raw SQL (or SQL expression layer)",
+        "A Python for-loop over all rows",
+        "A key-value lookup"
+      ],
+      "answer_index": 1,
+      "explanation": "Set-based SQL is the right tool."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A column that points to another table's primary key is a ____ key.",
+      "answers": [
+        "foreign"
+      ],
+      "explanation": "Foreign key."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The problem of running one extra query per row when loading related objects is the ____ problem.",
+      "answers": [
+        "n+1",
+        "n + 1",
+        "n plus 1"
+      ],
+      "explanation": "N+1."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ncon = sqlite3.connect(':memory:')\ncon.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')\ncon.executemany('INSERT INTO t (v) VALUES (?)', [('a',), ('b',), ('c',)])\nprint(con.execute('SELECT COUNT(*) FROM t').fetchone())\nprint(con.execute(\"SELECT v FROM t WHERE id > 1 ORDER BY id DESC\").fetchall())",
+      "answers": [
+        "(3,)\n[('c',), ('b',)]"
+      ],
+      "explanation": "COUNT returns a 1-tuple; filtered rows ordered descending."
+    },
+    {
+      "type": "output",
+      "prompt": "What happens to the data after rollback?",
+      "code": "import sqlite3\ncon = sqlite3.connect(':memory:')\ncon.execute('CREATE TABLE acct (n INTEGER)')\ncon.execute('INSERT INTO acct VALUES (100)')\ncon.commit()\ncon.execute('UPDATE acct SET n = n - 50')\ncon.rollback()\nprint(con.execute('SELECT n FROM acct').fetchone()[0])",
+      "answers": [
+        "100"
+      ],
+      "explanation": "The update was never committed, so rollback restores 100."
+    },
+    {
+      "type": "debug",
+      "prompt": "This lookup is vulnerable and breaks on names containing a quote. Fix it.",
+      "code": "name = input_name\nrows = con.execute(f\"SELECT * FROM customers WHERE name = '{name}'\").fetchall()",
+      "answer": "String formatting puts untrusted input into SQL (SQL injection, quoting errors).\n\n```python\nrows = con.execute(\"SELECT * FROM customers WHERE name = ?\", (name,)).fetchall()\n```",
+      "rubric": [
+        "SQL injection",
+        "Use bound parameters",
+        "Driver handles quoting"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain what an ORM does and one benefit and one cost.",
+      "answer": "An ORM maps tables to classes and rows to objects and generates SQL from method calls. Benefit: less boilerplate and safer parameterised queries with relationship handling. Cost: it can generate inefficient queries (N+1) and hides what the database actually runs.",
+      "rubric": [
+        "Maps tables to classes",
+        "Generates SQL",
+        "Benefit and cost named"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When would you choose a NoSQL database over PostgreSQL?",
+      "answer": "When the access pattern is simple key/document lookups at very high scale or throughput (session store, DynamoDB), when data has highly variable shape and you rarely join, or when you need built-in horizontal sharding. If you need joins, constraints and multi-row transactions, relational is usually better, and JSONB can cover flexible fields.",
+      "rubric": [
+        "Access pattern/scale",
+        "Flexible schema",
+        "Trade-off: joins and transactions"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Relational vs NoSQL: how do you decide?",
+      "difficulty": "easy",
+      "answer_md": "Start from the data and queries. If entities relate to each other and you need transactions, constraints and ad-hoc queries, use relational (PostgreSQL). If you need key-based access at massive scale or very flexible documents, a key-value/document store fits. Many systems use both: Postgres as source of truth and Redis for caching."
+    },
+    {
+      "question": "What is the N+1 problem and how do you fix it?",
+      "difficulty": "medium",
+      "answer_md": "Loading N parent rows and then lazily loading a relation for each triggers N additional queries. Fix with a JOIN or eager-loading strategies (`joinedload` for to-one, `selectinload` for collections in SQLAlchemy), and verify by logging SQL. Example: listing 100 orders with customer names should be 1-2 queries, not 101."
+    },
+    {
+      "question": "Why use parameterised queries?",
+      "difficulty": "easy",
+      "answer_md": "Parameters send values separately from the SQL text, so the database never interprets them as code. That prevents SQL injection, handles quoting and types correctly, and lets the database reuse query plans. Never build SQL with f-strings from user input; identifiers need safe composition helpers instead."
+    }
+  ]
+}

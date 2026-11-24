@@ -1,0 +1,120 @@
+{
+  "slug": "python-typing",
+  "title": "Type Hints & Static Typing",
+  "skill": "python",
+  "extra_skills": [
+    "pydantic"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "python",
+    "typing",
+    "type-hints",
+    "mypy",
+    "generics",
+    "protocols"
+  ],
+  "summary": "Type hints describe what types variables, parameters and return values should have. Python ignores them at runtime, but tools like mypy/pyright catch bugs before you run the code, editors autocomplete better, and frameworks like FastAPI and Pydantic use them to validate data. Modern syntax is simple: `list[str]`, `dict[str, int]`, `int | None`.",
+  "details_md": "### Basics (modern syntax)\n- Built-in generics: `list[int]`, `dict[str, float]`, `tuple[int, str]`, `tuple[int, ...]`, `set[str]` (3.9+).\n- Unions: `int | None` (3.10+) instead of `Optional[int]`/`Union`.\n- Abstract types from `collections.abc`: `Iterable[T]`, `Sequence[T]`, `Mapping[K, V]`, `Callable[[int], str]`, `Iterator[T]`, `Awaitable[T]`. Accept the most general type you need as a parameter, return a concrete type.\n- `Any` turns checking off; `object` means \"anything, but you can't do much with it\".\n- `Literal[\"csv\", \"xlsx\"]` restricts to specific values.\n- `Final`, `ClassVar`, `TypedDict` (typed dict shapes, e.g. JSON/Lambda events), `NamedTuple`.\n- `Self` (3.11+) for methods returning their own class.\n- `Never`/`NoReturn` for functions that always raise.\n\n### Generics (3.12 syntax)\nPEP 695 added inline type parameters:\n```python\ndef first[T](items: Sequence[T]) -> T: ...\nclass Box[T]:\n    def __init__(self, item: T): self.item = item\ntype JSON = dict[str, \"JSON\"] | list[\"JSON\"] | str | int | float | bool | None\n```\n`ParamSpec` (`**P`) captures a callable's parameters - essential for typing decorators.\n\n### Protocols and structural typing\n`Protocol` classes describe required methods; any matching class conforms without inheritance. `@runtime_checkable` allows `isinstance` checks (method presence only).\n\n### Narrowing\nType checkers narrow types after `isinstance`, `is None` checks, `in` on Literals, and custom `TypeGuard`/`TypeIs` (3.13) functions. `assert x is not None` also narrows.\n\n### Runtime behaviour\nAnnotations are stored in `__annotations__` and mostly ignored by the interpreter. Python 3.14 makes annotations lazily evaluated (PEP 649), so forward references usually no longer need quotes or `from __future__ import annotations`. Runtime consumers - Pydantic, FastAPI, dataclasses, `typing.get_type_hints` - read them to build validators and schemas. That's why in FastAPI `q: int | None = None` *does* change behaviour: it becomes an optional, int-validated query parameter.\n\n`Annotated[T, metadata]` attaches extra info that checkers ignore but frameworks use: `Annotated[int, Query(ge=1)]`, `Annotated[Session, Depends(get_db)]`.\n\n### Tooling\n- **mypy** and **pyright** (Pylance in VS Code) are the main checkers. Start with defaults, then tighten (`--strict`) module by module.\n- `reveal_type(x)` asks the checker what it inferred.\n- Untyped third-party libs use stubs (`pandas-stubs`, `types-requests`, `boto3-stubs`).\n- `# type: ignore[code]` silences a specific error - use sparingly with a reason.\n\n### Gradual typing\nYou don't need 100% coverage. Annotate public function signatures and data structures first; local variables are usually inferred. Type hints pay off most at module boundaries and in large codebases with many similar functions.",
+  "code_md": "```python\n# Everyday annotations\nfrom collections.abc import Iterable, Mapping, Callable\nfrom typing import Literal, TypedDict\n\nFileType = Literal[\"csv\", \"xlsx\", \"xls\", \"xlsb\", \"zip\"]\n\ndef total_qty(rows: Iterable[Mapping[str, int]]) -> int:\n    return sum(r.get(\"qty\", 0) for r in rows)\n\ndef find_org(org_id: int, cache: dict[int, str]) -> str | None:\n    return cache.get(org_id)\n\nname = find_org(7, {7: \"acme\"})\nif name is not None:          # narrowing: str | None -> str\n    print(name.upper())\n\nclass ApiGatewayEvent(TypedDict, total=False):   # shape of a dict payload\n    body: str\n    queryStringParameters: dict[str, str] | None\n    pathParameters: dict[str, str] | None\n```\n\n```python\n# Generics with Python 3.12 syntax + type alias\nfrom collections.abc import Callable, Sequence\n\ntype Handler = Callable[[bytes], int]\n\ndef first[T](items: Sequence[T], default: T) -> T:\n    return items[0] if items else default\n\nx: int = first([1, 2, 3], 0)       # T inferred as int\ns: str = first([], \"none\")         # T inferred as str\n\nclass Result[T]:\n    def __init__(self, value: T | None = None, error: str | None = None):\n        self.value, self.error = value, error\n```\n\n```python\n# Protocol for dependency injection\nfrom typing import Protocol\n\nclass ObjectStore(Protocol):\n    def get_bytes(self, key: str) -> bytes: ...\n\nclass LocalStore:\n    def get_bytes(self, key: str) -> bytes:\n        with open(key, \"rb\") as f:\n            return f.read()\n\ndef load(store: ObjectStore, key: str) -> int:\n    return len(store.get_bytes(key))   # any object with get_bytes() works\n```\n\n```python\n# Annotated in FastAPI: types drive validation\nfrom typing import Annotated, Literal\nfrom fastapi import FastAPI, Query\n\napp = FastAPI()\n\n@app.get(\"/orders\")\ndef list_orders(\n    org_id: int,\n    status: Literal[\"pending\", \"shipped\"] | None = None,\n    limit: Annotated[int, Query(ge=1, le=500)] = 100,\n):\n    return {\"org_id\": org_id, \"status\": status, \"limit\": limit}\n```\n\n```bash\n# Run a type checker\npip install mypy pandas-stubs types-requests\nmypy app/ --strict\n```",
+  "use_cases_md": "- Documenting function contracts across a large codebase (e.g. 150+ processors sharing a signature).\n- Catching `None` handling bugs (`str | None` forces a check).\n- Driving validation and docs in FastAPI/Pydantic.\n- Typing JSON-like dicts (`TypedDict`) such as Lambda/API Gateway events.\n- Protocols for pluggable backends and test fakes.\n- Safer refactoring: the checker flags every call site you broke.",
+  "mistakes_md": "- **Believing hints are enforced at runtime** - `def f(x: int)` happily accepts `\"7\"`. Fix: validate at boundaries (Pydantic) and run a type checker in CI.\n- **Overusing `Any`** - silently disables checks. Fix: use `object`, a Protocol or a TypeVar.\n- **Using `List`, `Dict`, `Optional` from typing in new code** - deprecated aliases. Fix: `list`, `dict`, `X | None`.\n- **Too-specific parameter types** - `def f(rows: list[dict])` rejects tuples/generators. Fix: accept `Iterable`/`Sequence`/`Mapping`.\n- **Mutable container variance surprises** - `list[int]` is not a `list[float]` for the checker. Fix: accept `Sequence[float]` (read-only, covariant).\n- **Blanket `# type: ignore`** - hides real errors. Fix: `# type: ignore[specific-code]` with a comment.",
+  "best_practices_md": "- Annotate all public function signatures and dataclass fields; let local variables be inferred.\n- Use modern syntax (3.10+ unions, 3.12 generics/`type` aliases).\n- Parameters: abstract (`Iterable`, `Mapping`); returns: concrete (`list`, `dict`).\n- Add mypy/pyright to your editor and CI; install stub packages for pandas, requests, boto3.\n- Use `Literal` and `StrEnum` for closed sets of values.\n- Prefer `TypedDict` or dataclasses over `dict[str, Any]` for structured data.",
+  "my_context_md": "- Your FastAPI downloader apps already rely on type hints at runtime: Pydantic request models and typed parameters are what FastAPI uses to validate input.\n- Your React 19 + TypeScript app and Next.js app with zod show the same idea on the frontend (static types + runtime validation at the edges) - Pydantic is Python's zod.\n- In ECSMarketplaceDataUpload, giving every report processor the same typed signature (or a Protocol) would let a checker verify all 150+ entries in `MODULE_DISPATCH`; a `TypedDict` can describe the API Gateway events you simulate in `lambda_test.py`.",
+  "related": [
+    "python-oop-dataclasses",
+    "fastapi-essentials",
+    "python-decorators",
+    "python-functions-args"
+  ],
+  "flashcards": [
+    {
+      "front": "Modern spelling of `Optional[int]`?",
+      "back": "`int | None` (Python 3.10+)."
+    },
+    {
+      "front": "Python 3.12 syntax for a generic function?",
+      "back": "`def first[T](xs: Sequence[T]) -> T: ...`"
+    },
+    {
+      "front": "What is `Annotated[int, Query(ge=1)]`?",
+      "back": "The type `int` plus metadata ignored by checkers but used by frameworks (FastAPI validation)."
+    },
+    {
+      "front": "Are type hints enforced at runtime?",
+      "back": "No - the interpreter ignores them. Checkers (mypy/pyright) and libraries (Pydantic) use them."
+    },
+    {
+      "front": "How to type a dict with known keys (like a JSON event)?",
+      "back": "`class Event(TypedDict): body: str; ...`"
+    },
+    {
+      "front": "Why accept `Sequence[float]` instead of `list[float]`?",
+      "back": "It's read-only and covariant, so `list[int]`, tuples etc. are accepted; `list` is invariant."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "What does Python do at runtime with `def f(x: int) -> str` when called as `f('a')`?",
+      "options": [
+        "Raises TypeError",
+        "Converts 'a' to int",
+        "Nothing special - the call runs",
+        "Logs a warning"
+      ],
+      "answer_index": 2,
+      "explanation": "Annotations aren't enforced by the interpreter; only static checkers or validation libraries act on them."
+    },
+    {
+      "question": "Which annotation best fits a parameter you only iterate over once?",
+      "options": [
+        "Iterable[str]",
+        "list[str]",
+        "Sequence[str]",
+        "tuple[str, ...]"
+      ],
+      "answer_index": 0,
+      "explanation": "Iterable is the most general type that supports iteration, accepting lists, generators, sets, etc."
+    },
+    {
+      "question": "Which tool lets you type a decorator so the wrapped function keeps its parameter types?",
+      "options": [
+        "TypedDict",
+        "Literal",
+        "Final",
+        "ParamSpec"
+      ],
+      "answer_index": 3,
+      "explanation": "ParamSpec captures parameter types: `def deco[**P, R](f: Callable[P, R]) -> Callable[P, R]`."
+    },
+    {
+      "question": "In FastAPI, what does `status: Literal['pending', 'shipped'] | None = None` produce?",
+      "options": [
+        "A required path parameter",
+        "An optional query parameter validated against two allowed values",
+        "A request body field",
+        "Nothing - FastAPI ignores Literal"
+      ],
+      "answer_index": 1,
+      "explanation": "Simple-typed params not in the path become query params; Literal restricts values and the default makes it optional."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Why use type hints in Python if they're not enforced?",
+      "difficulty": "easy",
+      "answer_md": "Because the value comes from **tools**, not the interpreter:\n- **Static checkers** (mypy, pyright) catch whole classes of bugs before runtime: passing `None` where a `str` is required, typos in attribute names, wrong argument order, forgotten return values.\n- **Editors** give accurate autocomplete, go-to-definition and safe renames.\n- **Documentation**: the signature `def upsert(rows: Iterable[OrderRow], *, org_id: int) -> int` tells you more than a docstring.\n- **Runtime frameworks** read them: FastAPI and Pydantic turn annotations into validation, coercion and OpenAPI schemas; dataclasses use them to find fields.\n- **Refactoring**: change a function's signature and the checker lists every broken caller.\n\nExample of a bug caught statically:\n```python\ndef get_org_name(org_id: int) -> str | None: ...\nget_org_name(7).upper()   # error: Item \"None\" has no attribute \"upper\"\n```\nThey're gradual - start with function signatures in core modules and add a checker in CI."
+    },
+    {
+      "question": "Explain Protocol vs ABC for defining interfaces.",
+      "difficulty": "medium",
+      "answer_md": "An **ABC** (`abc.ABC` + `@abstractmethod`) is **nominal**: a class must explicitly inherit from it, and Python refuses to instantiate subclasses that haven't implemented all abstract methods. ABCs can also provide shared concrete methods.\n\nA **Protocol** (`typing.Protocol`) is **structural** (\"static duck typing\"): a class conforms if it has the right methods/attributes with compatible types, no inheritance needed. Checking is done by the type checker; at runtime it's only checked if marked `@runtime_checkable`, and then only for method presence.\n\n```python\nclass Store(Protocol):\n    def put(self, key: str, data: bytes) -> None: ...\n\nclass S3Store:            # no inheritance, still a Store\n    def put(self, key: str, data: bytes) -> None: ...\n```\nUse **Protocol** for dependency injection, third-party classes you can't modify, and test fakes. Use **ABC** when you want runtime enforcement, shared base implementation (template method), or an explicit registry of implementations."
+    },
+    {
+      "question": "How does FastAPI use type hints, and what is Annotated for?",
+      "difficulty": "medium",
+      "answer_md": "FastAPI inspects the endpoint's signature (`inspect.signature` + `get_type_hints`) when the route is registered and builds a dependency/validation graph:\n- Parameters named in the path template -> **path params**.\n- Simple types (`int`, `str`, `bool`, `Literal`, `Enum`, lists of those) not in the path -> **query params**.\n- Pydantic models -> **JSON body**.\n- `Annotated[..., Depends(fn)]` -> a **dependency** whose result is injected.\nPydantic validates and coerces each value; failures produce a 422 response with detailed errors. The same info generates the OpenAPI schema and `/docs`.\n\n`Annotated[T, meta]` (PEP 593) attaches metadata to a type without changing the type for checkers:\n```python\nfrom typing import Annotated\nfrom fastapi import Depends, Query\n\nPageSize = Annotated[int, Query(ge=1, le=500)]\n\n@app.get(\"/orders\")\ndef orders(db: Annotated[Conn, Depends(get_db)], limit: PageSize = 100): ...\n```\nBenefits over `limit: int = Query(100, ge=1)`: the default stays a real default, the alias is reusable, and the function remains callable normally in tests."
+    }
+  ]
+}

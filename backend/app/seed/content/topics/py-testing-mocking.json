@@ -1,0 +1,157 @@
+{
+  "slug": "py-testing-mocking",
+  "title": "Testing ETL code: mocks, fakes and real Postgres",
+  "skill": "python-testing",
+  "extra_skills": [
+    "psycopg2",
+    "aws-s3",
+    "etl-data-processing"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "pytest",
+    "unittest.mock",
+    "monkeypatch",
+    "moto",
+    "botocore-stubber",
+    "fixtures",
+    "parametrize",
+    "coverage"
+  ],
+  "summary": "How to test backend and ETL code without fragile tests: `unittest.mock` and pytest's `monkeypatch` (and where to patch), faking boto3 with botocore's Stubber or moto, deciding between mocking psycopg2 and using a real test PostgreSQL via fixtures, `parametrize` for edge cases, testing pandas transforms with tiny DataFrames, coverage, and what is actually worth testing in a report processor.",
+  "why_md": "- ETL bugs corrupt data quietly; tests on transforms and upsert SQL are the cheapest insurance.\n- Code that creates its own boto3/psycopg2 clients is hard to test — learning to test pushes you towards better design (dependency injection).\n- Mocking SQL usually tests nothing; knowing when to use a real Postgres container is a senior signal.\n- Testing questions (mock vs fake, what to test, patch targets) are common in backend interviews.",
+  "details_md": "### Test pyramid for an ETL processor\n- **Pure transforms** (DataFrame → DataFrame, row → row): most tests here; fast, no mocks. Build 3-10 row DataFrames inline, compare with `pd.testing.assert_frame_equal`.\n- **SQL / repository code**: run against a **real PostgreSQL** (Docker / testcontainers / a local test DB). `ON CONFLICT`, `FOR UPDATE SKIP LOCKED`, JSONB operators and constraints can't be verified with mocks.\n- **External services** (S3, SES, SP-API): fake at the boundary — moto, Stubber, or an injected fake object.\n- **A few end-to-end tests**: sample file in → rows in test DB out.\n\n### unittest.mock essentials\n`Mock`/`MagicMock` record calls and return configurable values: `return_value`, `side_effect` (exception, iterable of results, or function), `assert_called_once_with(...)`, `call_args`, `call_count`. `create_autospec(cls)` / `patch(..., autospec=True)` make mocks enforce real signatures — without it, a typo like `mock.assert_called_once_wiht()` or a wrong argument count passes silently (newer versions catch some typos, but autospec is the real protection).\n\n### Where to patch\nPatch the name **where it is looked up**, not where it's defined. If `app/upload.py` does `from app.s3 import get_client`, patch `app.upload.get_client`. If it does `import boto3` and calls `boto3.client(...)` at runtime, patching `boto3.client` works. pytest's `monkeypatch.setattr(obj, \"name\", value)` / `setenv` undo themselves after the test.\n\n### boto3\n- **botocore Stubber**: attach to a real client, queue expected requests and canned responses; validates parameters against the service model. Precise, no network.\n- **moto** (`@mock_aws` in moto 5): an in-memory AWS; create a bucket, put objects, run your code unchanged. Good for S3/DynamoDB/Secrets Manager flows.\n- Simplest of all when code is injectable: pass a fake object with the 2 methods you use.\n\n### psycopg2\nMocking `cursor.execute` only proves you called it with some string. Prefer a session-scoped fixture that creates a test database/schema (from your migration or DDL), a function-scoped fixture that yields a connection inside a transaction and **rolls back** after each test for isolation. Keep mocks for error paths that are hard to trigger (e.g. `side_effect=psycopg2.errors.DeadlockDetected` to test retry logic).\n\n### parametrize and coverage\n`@pytest.mark.parametrize` turns edge cases (empty file, BOM, negative qty, unknown SKU, duplicate order IDs) into one test each. `pytest --cov=app --cov-report=term-missing` shows untested lines; use it to find untested branches (error handling), not as a target number.\n\n### What to test in a report processor\nColumn mapping/renames, type coercion, filtering rules, de-duplication, aggregation correctness, behaviour on missing/extra columns and bad rows, idempotency (running twice gives the same DB state), and upload status transitions on success/failure.",
+  "code_md": "```python\n# Pure transform test: tiny DataFrames, no mocks\nimport pandas as pd, pytest\nfrom app.processors.amazon import normalise\n\n@pytest.mark.parametrize(\"qty_in, qty_out\", [(\"3\", 3), (\"\", 0), (\"-1\", -1)])\ndef test_normalise_qty(qty_in, qty_out):\n    raw = pd.DataFrame({\"SKU\": [\"A1\"], \"Quantity\": [qty_in]})\n    out = normalise(raw)\n    assert out.loc[0, \"qty\"] == qty_out\n\ndef test_normalise_drops_duplicates():\n    raw = pd.DataFrame({\"SKU\": [\"A1\", \"A1\"], \"Quantity\": [\"1\", \"1\"]})\n    expected = pd.DataFrame({\"sku\": [\"A1\"], \"qty\": [1]})\n    pd.testing.assert_frame_equal(normalise(raw).reset_index(drop=True), expected,\n                                  check_dtype=False)\n```\n\n```python\n# conftest.py - real Postgres with per-test rollback\nimport os, psycopg2, pytest\n\n@pytest.fixture(scope=\"session\")\ndef pg_dsn():\n    dsn = os.environ.get(\"TEST_DATABASE_URL\", \"postgresql://test:test@localhost:5433/test\")\n    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:\n        cur.execute(open(\"schema.sql\").read())          # create tables once\n    return dsn\n\n@pytest.fixture\ndef conn(pg_dsn):\n    conn = psycopg2.connect(pg_dsn)\n    yield conn\n    conn.rollback()                                      # isolation between tests\n    conn.close()\n\ndef test_upsert_keeps_existing_price_when_null(conn):\n    repo = OrderRepo(conn)\n    repo.upsert([{\"order_id\": \"1\", \"price\": 10}])\n    repo.upsert([{\"order_id\": \"1\", \"price\": None}])     # COALESCE(EXCLUDED.price, t.price)\n    assert repo.get(\"1\")[\"price\"] == 10\n```\n\n```python\n# boto3: Stubber for exact calls, mock for error paths\nimport boto3, psycopg2\nfrom botocore.stub import Stubber\nfrom unittest.mock import Mock\n\ndef test_reads_report_from_s3():\n    s3 = boto3.client(\"s3\", region_name=\"ap-south-1\")\n    with Stubber(s3) as stub:\n        stub.add_response(\"get_object\", {\"Body\": FakeBody(b\"sku,qty\\nA1,3\\n\")},\n                          {\"Bucket\": \"reports\", \"Key\": \"a.csv\"})\n        assert read_report(s3, \"reports\", \"a.csv\").shape == (1, 2)\n\ndef test_retries_on_deadlock(monkeypatch):\n    writer = Mock(side_effect=[psycopg2.errors.DeadlockDetected(), 5])\n    monkeypatch.setattr(\"app.loader.time.sleep\", lambda s: None)   # no real waiting\n    assert load_with_retry(writer, rows=[...]) == 5\n    assert writer.call_count == 2\n```",
+  "use_cases_md": "- Parametrised tests for each marketplace processor's column mapping using 5-row sample DataFrames.\n- Verifying `ON CONFLICT DO UPDATE SET col = COALESCE(EXCLUDED.col, t.col)` semantics against a real Postgres.\n- Testing that two workers using `FOR UPDATE SKIP LOCKED` never claim the same job (two connections in a test).\n- moto-based test of 'download from S3 → process → write status' without AWS credentials.\n- Testing deadlock-retry logic with a mock that raises once then succeeds.",
+  "mistakes_md": "- **Patching where defined instead of where used** (`patch('app.s3.get_client')` when the module did `from app.s3 import get_client`). Fix: patch the importing module's name.\n- **Mocking SQL**: asserts strings, not behaviour. Fix: real test DB.\n- **Mocks without autospec**: wrong call signatures pass. Fix: `autospec=True` / `create_autospec`.\n- **Over-mocking**: tests mirror implementation and break on every refactor. Fix: test outputs/state, mock only boundaries.\n- **Tests sharing DB state**: order-dependent failures. Fix: transaction rollback or truncate per test.\n- **Huge fixture files** for transform tests. Fix: minimal inline DataFrames that show the rule.\n- **Chasing 100% coverage** with assertion-free tests. Fix: test behaviours and edge cases.",
+  "best_practices_md": "- Keep business rules pure so they need no mocks.\n- Inject clients/connections; tests pass fakes or test resources.\n- Real Postgres for anything SQL; mocks for hard-to-trigger errors.\n- moto/Stubber for AWS; never hit real AWS in unit tests.\n- `parametrize` edge cases; `pd.testing.assert_frame_equal` for frames.\n- Fixtures in `conftest.py`; function-scoped isolation, session-scoped setup.\n- Run tests in CI with coverage report; review missing branches.",
+  "my_context_md": "`ForcesightJobSchedulerAndRunner` already has tests for locking and next-run calculation, and `ECSInventoryPriceTracking` has pytest tests for the SP-API fetcher — good models to copy. The biggest untested surface is likely the 150+ processors in `ECSMarketplaceDataUpload`: their pandas transforms (rename/merge/groupby/apply) are ideal for small-DataFrame parametrised tests, and the deadlock-retry logic can be tested with a mock `side_effect`. The repo's heavy use of `INSERT … ON CONFLICT DO UPDATE SET col = COALESCE(EXCLUDED.col, t.col)` and `SELECT … FOR UPDATE` in `DebitNotes` should be tested against a real test PostgreSQL, not mocked.",
+  "revision_notes_md": "- Pyramid: many pure-transform tests, real-DB tests for SQL, fakes at AWS/HTTP boundaries, few E2E.\n- Mock: `return_value`, `side_effect` (exception / list / fn), `assert_called_once_with`, `call_args`.\n- `autospec=True` to enforce real signatures.\n- Patch where the name is looked up.\n- `monkeypatch.setattr/setenv` auto-undo.\n- boto3: Stubber (exact requests) or moto `@mock_aws` (in-memory AWS).\n- psycopg2: real test DB + rollback fixture; mock only error paths.\n- `parametrize`, `assert_frame_equal`, `--cov --cov-report=term-missing`.",
+  "exercises_md": "1. Choose one marketplace processor, extract its transform if needed, and write 5 parametrised tests covering normal rows, blanks, duplicates, BOM headers and unknown columns.\n2. Set up a `conftest.py` with a Dockerised Postgres fixture and per-test rollback; test one upsert with `COALESCE(EXCLUDED.col, t.col)` semantics.\n3. Write a moto test for a function that downloads a CSV from S3, processes it and writes a status object back.\n4. Test your deadlock-retry wrapper with `Mock(side_effect=[DeadlockDetected(), DeadlockDetected(), 'ok'])` and assert the retry count and backoff calls.",
+  "related": [
+    "pytest-essentials",
+    "py-solid-design-principles",
+    "py-clean-architecture",
+    "psycopg2-essentials",
+    "postgres-upsert",
+    "github-actions-ci"
+  ],
+  "flashcards": [
+    {
+      "front": "Where should you patch?",
+      "back": "Where the name is looked up at runtime: if `app/upload.py` does `from app.s3 import get_client`, patch `app.upload.get_client`."
+    },
+    {
+      "front": "What does `side_effect` accept?",
+      "back": "An exception (raised), an iterable (successive return values / exceptions), or a callable (called with the same args, its return used)."
+    },
+    {
+      "front": "Why not mock psycopg2 for repository tests?",
+      "back": "It only checks that some SQL string was sent; constraints, ON CONFLICT, locking and JSONB behaviour are never exercised. Use a real test Postgres with rollback per test."
+    },
+    {
+      "front": "Stubber vs moto?",
+      "back": "Stubber: attach to a real boto3 client, queue exact expected calls + responses (validated against the API model). moto: in-memory fake AWS so code runs unchanged against stateful services."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "`app/report.py` contains `from app.storage import download`. Which patch target makes `report.run()` use a mock?",
+      "options": [
+        "`patch('app.storage.download')`",
+        "`patch('download')`",
+        "`patch('app.report.download')`",
+        "`patch('builtins.download')`"
+      ],
+      "answer_index": 2,
+      "explanation": "`from … import` binds the name in `app.report`, so that's where it's looked up."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What's the best way to test an `INSERT … ON CONFLICT DO UPDATE` repository function?",
+      "options": [
+        "Against a real PostgreSQL test database with rollback between tests",
+        "Mock `cursor.execute` and assert the SQL string",
+        "Use SQLite in memory",
+        "Don't test it; it's just SQL"
+      ],
+      "answer_index": 0,
+      "explanation": "Only a real Postgres exercises conflict handling, constraints and PostgreSQL-specific syntax; SQLite differs in syntax and semantics."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To make a mock reject calls that don't match the real function's signature, pass `____=True` to `patch`.",
+      "answers": [
+        "autospec"
+      ],
+      "explanation": "`patch('mod.fn', autospec=True)` or `create_autospec(fn)`."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To compare two DataFrames in a test with a helpful diff on failure, use `pd.testing.____(actual, expected)`.",
+      "answers": [
+        "assert_frame_equal"
+      ],
+      "explanation": "Options like `check_dtype=False` relax the comparison."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from unittest.mock import Mock\n\ns3 = Mock()\ns3.get_object.return_value = {\"Body\": b\"sku,qty\"}\ns3.put_object.side_effect = [None, ConnectionError(\"boom\")]\n\nprint(s3.get_object(Bucket=\"b\", Key=\"k\")[\"Body\"])\ns3.put_object(Key=\"a\")\ntry:\n    s3.put_object(Key=\"b\")\nexcept ConnectionError as e:\n    print(\"error:\", e)\nprint(s3.put_object.call_count, s3.get_object.call_args.kwargs[\"Key\"])",
+      "answers": [
+        "b'sku,qty'\nerror: boom\n2 k"
+      ],
+      "explanation": "An iterable `side_effect` returns/raises its items in order; failed calls are still counted."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import time\nfrom time import time as now\nfrom unittest.mock import patch\n\ndef stamp_a():\n    return int(time.time())\n\ndef stamp_b():\n    return int(now())\n\nwith patch(\"time.time\", return_value=1.0):\n    print(stamp_a(), stamp_b() == 1)",
+      "answers": [
+        "1 False"
+      ],
+      "explanation": "`stamp_a` looks up `time.time` at call time and sees the patch; `now` was bound to the original function at import, so it is unaffected — patch where the name is looked up."
+    },
+    {
+      "type": "debug",
+      "prompt": "This test passes, but the production code has a bug where it writes to the wrong table. Why doesn't the test catch it, and how should it be tested?",
+      "code": "from unittest.mock import MagicMock\n\ndef test_save_orders():\n    conn = MagicMock()\n    save_orders(conn, [{\"order_id\": \"1\", \"qty\": 2}])\n    assert conn.cursor.called\n\n# production\ndef save_orders(conn, rows):\n    with conn.cursor() as cur:\n        cur.executemany(\"INSERT INTO order_lines_old (order_id, qty) VALUES (%(order_id)s, %(qty)s)\", rows)",
+      "answer": "The test only asserts that a cursor was created — a MagicMock accepts any SQL, any table, any parameters, so the assertion is meaningless (and nothing is committed or checked). Test against a real test database and assert on state:\n\n```python\ndef test_save_orders(conn):            # fixture: real Postgres, rollback after\n    save_orders(conn, [{\"order_id\": \"1\", \"qty\": 2}])\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT order_id, qty FROM order_lines\")\n        assert cur.fetchall() == [(\"1\", 2)]\n```\nThis fails immediately for the wrong table (or catches constraint/type problems).",
+      "rubric": [
+        "MagicMock accepts any SQL, so the test checks nothing meaningful",
+        "Assert on resulting DB state, not on calls",
+        "Use a real test Postgres fixture with rollback"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd decide what to mock and what to run for real when testing a marketplace report processor.",
+      "answer": "Split the processor into layers and test each at its cheapest meaningful level. Pure transforms (parse, rename, type coercion, filters, aggregations) get many fast tests with tiny inline DataFrames — no mocks needed because they have no I/O. Anything that is SQL (upserts, locking, constraints) runs against a real Postgres test database, because mocking a cursor only checks strings. External systems I don't own (S3, SES, SP-API) are faked at the boundary with moto, botocore Stubber, or an injected fake, since they are slow, cost money, and need credentials. Mocks are reserved for forcing hard-to-trigger paths: deadlock exceptions to test retries, timeouts, S3 errors. Finally a couple of end-to-end tests run a real sample file through to the test DB and check upload status. If something is hard to test, that's a signal to inject the dependency rather than patch deeper.",
+      "rubric": [
+        "Pure transforms: real code, small DataFrames, no mocks",
+        "SQL against a real test Postgres",
+        "External services faked at the boundary (moto/Stubber/fake)",
+        "Mocks for hard-to-trigger error paths; inject dependencies"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What's the difference between a mock, a stub and a fake?",
+      "difficulty": "easy",
+      "answer_md": "- **Stub**: returns canned answers so code can run (`get_rate.return_value = 83.0`); you don't assert on it.\n- **Mock**: records interactions so you can assert *how* it was called (`ses.send_email.assert_called_once_with(...)`). Useful for side effects that are the point of the code (an email was sent).\n- **Fake**: a working lightweight implementation (`InMemoryOrderRepo` with a dict, moto's in-memory S3). Tests behaviour/state rather than calls, so they're less brittle.\n\n`unittest.mock.Mock` can play the first two roles. Prefer fakes and state assertions where possible; heavy call-assertion mocking couples tests to implementation details and breaks on refactors."
+    },
+    {
+      "question": "How do you test code that uses boto3?",
+      "difficulty": "medium",
+      "answer_md": "Options, from most to least preferred depending on context:\n\n1. **Inject the client** and pass a small fake in unit tests — no library needed.\n2. **moto** (`from moto import mock_aws`): an in-memory AWS. Create the bucket in the test, run the code unchanged, assert the resulting objects:\n```python\n@mock_aws\ndef test_upload():\n    s3 = boto3.client(\"s3\", region_name=\"us-east-1\")\n    s3.create_bucket(Bucket=\"out\")\n    export_report(s3, \"out\", df)\n    assert s3.list_objects_v2(Bucket=\"out\")[\"KeyCount\"] == 1\n```\n3. **botocore Stubber**: queue exact expected calls and responses, including errors (`add_client_error('get_object', 'NoSuchKey')`). Validates parameters against the API model.\n\nNever call real AWS in unit tests; set fake credentials via env vars so a mistake can't touch real resources."
+    },
+    {
+      "question": "How would you set up tests that need PostgreSQL?",
+      "difficulty": "medium",
+      "answer_md": "- Run Postgres in Docker for local and CI (a `services:` container in GitHub Actions, or testcontainers-python which starts one from a fixture).\n- **Session-scoped fixture**: connect, create schema from the same DDL/migrations as production.\n- **Function-scoped fixture**: yield a connection and `rollback()` afterwards (or wrap in a SAVEPOINT) so each test starts clean and order doesn't matter. If code under test commits, truncate affected tables in teardown instead.\n- Seed data with small factory helpers, not big dumps.\n- Test real behaviour: upsert conflict handling, `COALESCE(EXCLUDED.x, t.x)`, unique constraints, and concurrency (two connections, one holds `FOR UPDATE`, assert the other's `SKIP LOCKED` gets a different row).\n- Never point tests at a shared or production database; read the DSN from a test-only env var."
+    }
+  ]
+}

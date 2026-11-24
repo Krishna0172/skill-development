@@ -1,0 +1,68 @@
+{
+  "slug": "python-data-structures",
+  "why_md": "Picking the right container is the cheapest performance win in backend code: a set lookup instead of a list scan turns an O(n*m) reconciliation into O(n+m). Ingestion jobs that dedupe order IDs, group rows by SKU or count statuses are data-structure problems before they are pandas problems. Interviewers use lists/dicts/sets to probe complexity reasoning, mutability and hashing, and almost every DSA round assumes you reach for `dict`, `set`, `deque` and `heapq` fluently.",
+  "revision_notes_md": "- `list`: O(1) append/index, O(n) `in` and `insert(0, x)`; use `deque` for queue ends.\n- `dict`/`set`: hash tables, average O(1) lookup; keys must be hashable (immutable).\n- Dicts keep insertion order (language guarantee since 3.7).\n- `defaultdict(list)` for grouping, `Counter` for counting, `most_common(n)` for top-n.\n- `[[0]*3]*3` repeats the SAME inner list - build with a comprehension.\n- Tuples are immutable and hashable (if their items are) - good composite dict keys like `(orgid, sku)`.\n- `heapq` is a min-heap on a list; `heapq.nlargest(k, it)` for top-k.\n- `d.get(k, default)` and `d.setdefault(k, [])` avoid KeyError branches.",
+  "exercises_md": "1. Given two lists of 200k and 50k order IDs, write a function returning IDs present in the first but not the second; time the list-based and set-based versions.\n2. Group a list of `(sku, marketplace, qty)` tuples into `{(sku, marketplace): total_qty}` using `defaultdict`, then return the top 5 with `heapq.nlargest`.",
+  "my_context_md": "ECSMarketplaceDataUpload routes 150+ report processors through a registry dispatcher - at its core a dict lookup from report type to processor, which is why dispatch stays O(1) no matter how many marketplaces are added. When the upsert code there sends rows through `execute_batch`/`execute_values`, deduplicating rows by their conflict key with a dict first avoids `ON CONFLICT` touching the same row twice in one statement.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To count how often each order status appears in a list, the idiomatic stdlib class is collections.____.",
+      "answers": [
+        "Counter",
+        "collections.counter",
+        "counter"
+      ],
+      "explanation": "Counter is a dict subclass that counts hashable items."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A double-ended queue with O(1) appends and pops at both ends is collections.____.",
+      "answers": [
+        "deque"
+      ],
+      "explanation": "deque avoids the O(n) cost of list.pop(0)/insert(0, x)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from collections import defaultdict\nrows = [(\"A\", 2), (\"B\", 1), (\"A\", 3), (\"C\", 4), (\"B\", 1)]\ntotals = defaultdict(int)\nfor sku, qty in rows:\n    totals[sku] += qty\nprint(dict(totals))\nprint(sorted(totals, key=totals.get, reverse=True)[0])",
+      "answers": [
+        "{'A': 5, 'B': 2, 'C': 4}\nA"
+      ],
+      "explanation": "defaultdict(int) starts each key at 0; insertion order is preserved (A, B, C) and A has the largest total (5)."
+    },
+    {
+      "type": "debug",
+      "prompt": "This should build a 3x3 grid of zeros and set one cell. What's wrong and how do you fix it?",
+      "code": "grid = [[0] * 3] * 3\ngrid[0][0] = 1\nprint(grid)  # [[1, 0, 0], [1, 0, 0], [1, 0, 0]]",
+      "answer": "`* 3` on the outer list copies the *reference* to the same inner list three times, so mutating one row mutates all.\n\n```python\ngrid = [[0] * 3 for _ in range(3)]\n```",
+      "rubric": [
+        "Outer multiplication repeats references to one inner list",
+        "Fix with a list comprehension creating a new list per row"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how a Python dict achieves average O(1) lookup and why keys must be hashable.",
+      "answer": "A dict is a hash table: `hash(key)` picks a slot; collisions are resolved by probing, and equality (`==`) confirms the match. Lookup is O(1) on average because the table resizes to keep load low. Keys must be hashable and their hash must not change while stored - a mutable key (like a list) could change its hash and become unfindable, so lists are unhashable; tuples of immutables work, e.g. `(orgid, sku)`.",
+      "rubric": [
+        "hash(key) chooses the bucket/slot; equality confirms",
+        "Resizing keeps load factor low -> average O(1)",
+        "Hash must be stable, so mutable types are unhashable"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which container best supports 'give me the 10 largest refunds' over a stream of 1M values with bounded memory?",
+      "options": [
+        "A sorted list re-sorted on every insert",
+        "A set",
+        "A min-heap of size 10 via heapq",
+        "A dict keyed by refund amount"
+      ],
+      "answer_index": 2,
+      "explanation": "Keep a size-k min-heap: push, and pop the smallest when size exceeds k - O(n log k) time, O(k) memory."
+    }
+  ]
+}

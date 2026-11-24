@@ -1,0 +1,123 @@
+{
+  "slug": "server-sent-events",
+  "title": "Server-Sent Events (SSE)",
+  "skill": "api-development",
+  "extra_skills": [
+    "fastapi",
+    "browser-apis",
+    "javascript"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "sse",
+    "streaming",
+    "eventsource",
+    "fastapi",
+    "real-time",
+    "http"
+  ],
+  "summary": "Server-Sent Events let a server push a stream of text messages to the browser over one long-lived HTTP response. The browser's built-in `EventSource` handles parsing and automatic reconnection. It's perfect for one-way updates like job progress, notifications or streaming LLM output; use WebSockets only when the client also needs to send a stream of messages back.",
+  "details_md": "### The wire format\nThe response has `Content-Type: text/event-stream` and stays open. Each event is a block of `field: value` lines ending with a **blank line**:\n```\nid: 42\nevent: progress\ndata: {\"pct\": 40}\n\n```\n- `data:` - the payload (multiple `data:` lines are joined with newlines).\n- `event:` - event name; the client listens with `addEventListener(\"progress\", ...)`. Without it, the `message` event fires.\n- `id:` - the browser remembers the last id and sends it back as the `Last-Event-ID` header when reconnecting, so the server can resume.\n- `retry:` - reconnection delay in ms.\n- Lines starting with `:` are comments - used as **heartbeats** to keep proxies from closing idle connections.\n\n### Client side\n```js\nconst es = new EventSource(\"/jobs/123/events\");\nes.addEventListener(\"progress\", e => render(JSON.parse(e.data)));\nes.onerror = () => { /* browser auto-reconnects */ };\nes.close();   // stop listening (and stop reconnecting)\n```\n`EventSource` only does **GET** and can't set custom headers (cookies are sent; `withCredentials` for cross-origin). For POST bodies or `Authorization` headers (e.g. LLM streaming APIs), use `fetch()` and read `response.body` with a `ReadableStream` reader, parsing the SSE format yourself (or a small library).\n\n### Server side in FastAPI\nReturn a `StreamingResponse` wrapping a generator (sync or async) that yields formatted strings, with `media_type=\"text/event-stream\"`. The `sse-starlette` package provides an `EventSourceResponse` that adds heartbeats, formatting and disconnect handling for you. Important details:\n- Use an **async generator** with `await asyncio.sleep()` between polls; a sync generator runs in a threadpool, and blocking sleeps hold a thread per client.\n- Check `await request.is_disconnected()` to stop work when the client leaves; otherwise the generator keeps running.\n- Send a heartbeat comment every ~15-30 s.\n- Set `Cache-Control: no-cache` and, behind Nginx, `X-Accel-Buffering: no` so the proxy doesn't buffer the stream.\n\n### SSE vs alternatives\n| | Polling | SSE | WebSocket |\n|---|---|---|---|\n| Direction | client pull | server -> client | bidirectional |\n| Transport | normal HTTP | normal HTTP | upgraded TCP connection |\n| Reconnect | n/a | built in | manual |\n| Data | any | UTF-8 text | text + binary |\n\nSSE works through most HTTP infrastructure, benefits from HTTP/2 multiplexing (under HTTP/1.1 browsers limit ~6 connections per domain, which SSE tabs consume), and is simpler than WebSockets for one-way updates.\n\n### Scaling considerations\nEach client holds an open connection, so the server must be async or have enough threads. With multiple server instances, the instance holding the connection may not be the one doing the work - publish progress through a shared store (DB, Redis pub/sub) that every instance can read. Gateways matter too: AWS API Gateway has integration timeouts and has traditionally buffered responses, so verify that streaming works end to end (ALB, or Lambda response streaming, are common alternatives) before relying on long SSE streams.",
+  "code_md": "```python\n# FastAPI SSE endpoint streaming job progress from an in-memory job store\nimport asyncio, json\nfrom fastapi import FastAPI, Request\nfrom fastapi.responses import StreamingResponse\n\napp = FastAPI()\nJOBS: dict[str, dict] = {\"abc\": {\"status\": \"running\", \"progress\": 0}}\n\ndef sse(data: dict, event: str | None = None, id: str | None = None) -> str:\n    msg = \"\"\n    if id is not None:\n        msg += f\"id: {id}\\n\"\n    if event:\n        msg += f\"event: {event}\\n\"\n    msg += f\"data: {json.dumps(data)}\\n\\n\"        # blank line terminates the event\n    return msg\n\n@app.get(\"/jobs/{job_id}/events\")\nasync def job_events(job_id: str, request: Request):\n    async def stream():\n        last = None\n        ticks = 0\n        while True:\n            if await request.is_disconnected():   # client went away -> stop\n                break\n            job = JOBS.get(job_id)\n            if job is None:\n                yield sse({\"error\": \"not found\"}, event=\"error\")\n                break\n            if job != last:\n                yield sse(job, event=\"progress\")\n                last = dict(job)\n            if job[\"status\"] in (\"done\", \"error\", \"cancelled\"):\n                break\n            ticks += 1\n            if ticks % 30 == 0:\n                yield \": keep-alive\\n\\n\"          # heartbeat comment\n            await asyncio.sleep(0.5)              # non-blocking wait\n\n    return StreamingResponse(\n        stream(),\n        media_type=\"text/event-stream\",\n        headers={\"Cache-Control\": \"no-cache\", \"X-Accel-Buffering\": \"no\"},\n    )\n```\n\n```ts\n// Browser client with EventSource\nconst es = new EventSource(`/jobs/${jobId}/events`);\n\nes.addEventListener(\"progress\", (e: MessageEvent) => {\n  const job = JSON.parse(e.data) as { status: string; progress: number };\n  progressBar.value = job.progress;\n  if ([\"done\", \"error\", \"cancelled\"].includes(job.status)) es.close(); // stop auto-reconnect\n});\n\nes.onerror = () => console.warn(\"SSE connection lost, browser will retry\");\n```\n\n```ts\n// fetch-based SSE reader (needed for POST bodies or Authorization headers)\nasync function streamCompletion(prompt: string, onChunk: (s: string) => void) {\n  const res = await fetch(\"/api/generate\", {\n    method: \"POST\",\n    headers: { \"Content-Type\": \"application/json\", Authorization: `Bearer ${token}` },\n    body: JSON.stringify({ prompt }),\n  });\n  const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();\n  let buffer = \"\";\n  while (true) {\n    const { value, done } = await reader.read();\n    if (done) break;\n    buffer += value;\n    const events = buffer.split(\"\\n\\n\");\n    buffer = events.pop()!;                 // keep incomplete event\n    for (const evt of events) {\n      const data = evt.split(\"\\n\").filter(l => l.startsWith(\"data: \")).map(l => l.slice(6)).join(\"\\n\");\n      if (data) onChunk(data);\n    }\n  }\n}\n```\n\n```bash\n# Watch a stream from the terminal (-N disables buffering)\ncurl -N http://localhost:8000/jobs/abc/events\n```",
+  "use_cases_md": "- Progress of long-running jobs (downloads, file processing, report generation).\n- Streaming LLM tokens to the UI as they're generated.\n- Live notifications, dashboards and log tails.\n- Status updates for background sync jobs without client polling.",
+  "mistakes_md": "- **Forgetting the blank line** after each event - the browser never dispatches it. Fix: end every event with `\\n\\n`.\n- **Blocking sleeps in an async generator** (`time.sleep`) - freezes the event loop for all clients. Fix: `await asyncio.sleep()`.\n- **Not handling disconnects** - generators run forever after the tab closes. Fix: check `request.is_disconnected()` or handle cancellation.\n- **Proxy buffering** - events arrive in bursts or only at the end. Fix: `X-Accel-Buffering: no`, disable compression/buffering for the route.\n- **No heartbeat** - idle connections get cut by load balancers. Fix: periodic `: ping` comments.\n- **Not closing `EventSource` on completion** - it reconnects and re-streams. Fix: `es.close()` on a terminal event.\n- **Expecting `EventSource` to send auth headers** - it can't. Fix: cookies, a short-lived token in the query string, or a fetch-based reader.",
+  "best_practices_md": "- Send structured JSON in `data:` with an `event:` name per message type.\n- Include `id:` and support `Last-Event-ID` when missed events matter.\n- Emit a terminal event (`done`/`error`) so clients know when to close.\n- Keep per-connection work cheap; read progress from a shared store rather than doing the work inside the stream.\n- Prefer HTTP/2 in front of SSE-heavy apps to avoid per-domain connection limits.\n- Fall back to polling if the infrastructure (e.g. buffering gateways) can't stream.",
+  "my_context_md": "- Your FastAPI downloader apps already stream job progress with Server-Sent Events via `StreamingResponse`, reading from the in-memory job dict that executor threads update - the pattern in the first code example.\n- Those background jobs use `threading.Event` for cancellation; pairing it with `request.is_disconnected()` lets you decide whether a closed browser tab should cancel the job or just stop the stream.\n- Your Next.js app calls an OpenAI-compatible API; if you stream completions, those APIs use the SSE format over a POST request, which is why a fetch-based reader is needed instead of `EventSource`.",
+  "related": [
+    "fastapi-essentials",
+    "python-asyncio",
+    "python-generators-iterators",
+    "javascript-async",
+    "rest-api-design"
+  ],
+  "flashcards": [
+    {
+      "front": "Content-Type for SSE?",
+      "back": "`text/event-stream`"
+    },
+    {
+      "front": "What terminates an SSE event?",
+      "back": "A blank line (`\\n\\n` after the last field)."
+    },
+    {
+      "front": "How does SSE resume after reconnect?",
+      "back": "Browser sends `Last-Event-ID` header with the last received `id:`; server resumes from there."
+    },
+    {
+      "front": "SSE vs WebSocket in one line?",
+      "back": "SSE: one-way server->client over plain HTTP with auto-reconnect. WebSocket: bidirectional, upgraded connection, manual reconnect."
+    },
+    {
+      "front": "How to send a heartbeat in SSE?",
+      "back": "A comment line starting with `:` (e.g. `: ping\\n\\n`)."
+    },
+    {
+      "front": "Why can't EventSource be used for authenticated POST streams?",
+      "back": "EventSource only supports GET and can't set custom headers; use fetch + ReadableStream parsing."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which FastAPI response type is typically used to implement SSE without extra libraries?",
+      "options": [
+        "JSONResponse",
+        "FileResponse",
+        "StreamingResponse with media_type='text/event-stream'",
+        "RedirectResponse"
+      ],
+      "answer_index": 2,
+      "explanation": "StreamingResponse consumes a generator and sends chunks as they're yielded."
+    },
+    {
+      "question": "Events arrive all at once when the job finishes, but only in production behind Nginx. Likely cause?",
+      "options": [
+        "Proxy response buffering",
+        "Missing `id:` field",
+        "Browser bug",
+        "JSON payloads not allowed"
+      ],
+      "answer_index": 0,
+      "explanation": "Nginx buffers proxied responses by default; disable with `X-Accel-Buffering: no` or `proxy_buffering off`."
+    },
+    {
+      "question": "What happens if the client tab closes and the server ignores disconnects?",
+      "options": [
+        "Uvicorn kills the process",
+        "The browser sends a stop event",
+        "The generator may keep running and consuming resources",
+        "Nothing can happen"
+      ],
+      "answer_index": 2,
+      "explanation": "Check `request.is_disconnected()` (or handle cancellation) to stop work for gone clients."
+    },
+    {
+      "question": "Your chat UI needs the server to stream tokens AND the user to send messages. Which is reasonable?",
+      "options": [
+        "Only polling",
+        "SSE requires WebSockets underneath",
+        "Only WebSockets are possible",
+        "SSE (or fetch streaming) for server output plus normal POSTs for user messages"
+      ],
+      "answer_index": 3,
+      "explanation": "Most LLM chat apps use a POST that returns a streamed response; WebSockets are only needed for continuous bidirectional streams."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you implement real-time progress updates for a long-running job? Compare options.",
+      "difficulty": "medium",
+      "answer_md": "Options:\n1. **Polling** - client calls `GET /jobs/{id}` every few seconds. Simplest, works everywhere (including API Gateway/Lambda), cacheable, but adds latency and load.\n2. **SSE** - client opens `GET /jobs/{id}/events`; server pushes progress events. One-way, plain HTTP, built-in reconnect with `Last-Event-ID`. Ideal for progress.\n3. **WebSockets** - bidirectional; overkill unless the client sends continuous messages (collaboration, games).\n4. **Webhooks** - for server-to-server notification when the client is another backend.\n\nFor a browser progress bar I'd use **SSE** with polling as fallback:\n- The worker writes progress to a shared store (DB row or Redis), not to the HTTP handler - so any API instance can serve the stream and progress survives reconnects.\n- The SSE endpoint is an async generator: read state, yield on change, heartbeat every ~20 s, stop on terminal status or disconnect.\n- Events carry JSON (`event: progress`, `data: {\"pct\": 40}`) and a final `done`/`error` event, after which the client calls `es.close()`.\n- Configure proxies not to buffer, and make sure the infrastructure (gateways, load balancers) supports long-lived streaming responses."
+    },
+    {
+      "question": "Describe the SSE protocol format and how reconnection works.",
+      "difficulty": "easy",
+      "answer_md": "SSE is a long-lived HTTP GET response with `Content-Type: text/event-stream`, UTF-8 text, made of events separated by blank lines. Each event has fields:\n```\nid: 17\nevent: progress\nretry: 5000\ndata: {\"pct\": 70}\n\n```\n- `data` - payload (multiple lines allowed, joined with `\\n`).\n- `event` - custom event type; defaults to `message`.\n- `id` - sets the stream's last event ID.\n- `retry` - client's reconnection delay in ms.\n- Lines starting with `:` are comments (heartbeats).\n\nReconnection: if the connection drops (network blip, server restart), `EventSource` automatically reconnects after the retry delay and sends a `Last-Event-ID` header with the most recent `id`. The server can then replay missed events (e.g. from a log/table ordered by id) or send the current state. A server can stop reconnections by responding with a non-200 status (e.g. 204) or a non-SSE content type; the client stops by calling `close()`."
+    },
+    {
+      "question": "What problems arise when scaling SSE across multiple server instances, and how do you solve them?",
+      "difficulty": "hard",
+      "answer_md": "Problems:\n- **State locality**: if job state lives in a process's memory, a client connected to instance B can't see progress written by a worker on instance A (and the in-memory dict pattern fails as soon as you run multiple Uvicorn workers).\n- **Connection count**: each client holds an open connection - fine with async servers, expensive with a thread per connection.\n- **Infrastructure**: load balancer idle timeouts, proxy buffering, HTTP/1.1's ~6-connections-per-domain browser limit, and gateways with timeouts or buffering.\n- **Deploys** drop all connections at once (thundering reconnect).\n\nSolutions:\n- Store progress in a **shared store**: a DB row (`jobs` table with status/progress) or Redis; for push semantics, Redis pub/sub or PostgreSQL `LISTEN/NOTIFY` lets each instance fan out to its own connected clients.\n- Make the SSE handler async and cheap; heartbeats under the LB idle timeout.\n- Use event IDs + replay from the store so reconnects (including during deploys) are seamless; add jitter via `retry:`.\n- Serve over HTTP/2; disable buffering on proxies.\n- If streaming isn't supported end to end, fall back to polling."
+    }
+  ]
+}

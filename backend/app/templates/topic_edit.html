@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit " ~ topic.title if topic else "New topic" }}{% endblock %}
+{% block content %}
+{% set t = topic or {} %}
+<div class="page-head">
+  <div><h1>{{ "Edit: " ~ t.title if topic else "New topic" }}</h1><p>All long fields accept Markdown.</p></div>
+  <div class="actions"><a class="btn" href="{{ '/topics/' ~ t.id if topic else '/topics' }}">Cancel</a></div>
+</div>
+<form method="post" action="{{ '/topics/' ~ t.id ~ '/edit' if topic else '/topics/new' }}" class="card"><div class="body form-grid">
+  <div class="grid g4">
+    <label class="field" style="grid-column:span 2">Title<input name="title" value="{{ t.title or '' }}" required></label>
+    <label class="field">Category<input name="category" value="{{ t.category or 'General' }}"></label>
+    <label class="field">Difficulty<select name="difficulty">{% for d in ["beginner", "intermediate", "advanced"] %}<option value="{{ d }}" {{ 'selected' if d == t.difficulty }}>{{ d|label }}</option>{% endfor %}</select></label>
+  </div>
+  <div class="grid g2">
+    <label class="field">Skill<select name="skill_id"><option value="">—</option>{% for sid, name in skills %}<option value="{{ sid }}" {{ 'selected' if t.skill and t.skill.id == sid }}>{{ name }}</option>{% endfor %}</select></label>
+    <label class="field">Tags <span class="hint">comma-separated</span><input name="tags" value="{{ (t.tags or [])|join(', ') }}"></label>
+  </div>
+  {% if not topic %}
+    <label class="field">Initial status<select name="status">{% for s in ["not_started", "learning", "practised"] %}<option value="{{ s }}">{{ s|label }}</option>{% endfor %}</select></label>
+  {% endif %}
+  <label class="field">Summary<textarea name="summary" rows="2">{{ t.summary or '' }}</textarea></label>
+  {% for key, heading, rows in [("why_md", "Why it matters", 3), ("details_md", "Explanation", 10), ("code_md", "Code", 8),
+                                ("use_cases_md", "Use cases", 4), ("mistakes_md", "Common mistakes", 4),
+                                ("best_practices_md", "Best practices", 4), ("my_context_md", "In your work", 4),
+                                ("revision_notes_md", "Revision notes", 4), ("exercises_md", "Exercises", 4), ("notes_md", "My notes", 4)] %}
+    <label class="field">{{ heading }}<textarea name="{{ key }}" rows="{{ rows }}" {% if key == "code_md" %}class="code"{% endif %}>{{ t[key] or '' }}</textarea></label>
+  {% endfor %}
+  <div><button class="btn primary">{{ "Save" if topic else "Create topic" }}</button></div>
+</div></form>
+{% endblock %}

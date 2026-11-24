@@ -1,0 +1,180 @@
+{
+  "slug": "sql-insert-update-delete",
+  "title": "INSERT, UPDATE, DELETE and RETURNING",
+  "skill": "postgresql",
+  "extra_skills": [
+    "psycopg2"
+  ],
+  "category": "Database",
+  "difficulty": "beginner",
+  "tags": [
+    "dml",
+    "insert",
+    "update",
+    "delete",
+    "returning"
+  ],
+  "summary": "DML statements change the data in tables: INSERT adds rows, UPDATE modifies them, DELETE removes them. PostgreSQL's RETURNING clause gives back the affected rows in the same statement, saving an extra query. The most important habit is writing a correct WHERE before you run UPDATE or DELETE.",
+  "why_md": "- Every write path of a backend is one of these three statements.\n- Forgetting WHERE on an UPDATE or DELETE is the classic production accident; knowing the safe workflow prevents it.\n- RETURNING removes read-after-write round trips (for example to get the generated id).\n- Bulk inserts versus row-by-row inserts is a typical performance interview topic.",
+  "details_md": "### INSERT\n`INSERT INTO products (name, price) VALUES ('pen', 2.50);` lists the target columns and a matching list of values. Always name the columns: if the table gains a column later, an unnamed insert breaks. Columns you omit get their DEFAULT (or NULL). Insert many rows at once: `VALUES (...), (...), (...)`, far faster than separate statements. Insert from a query: `INSERT INTO archive SELECT * FROM orders WHERE ...`.\n\n### UPDATE\n`UPDATE products SET price = price * 1.1 WHERE category = 'toys';` evaluates the right-hand side using the old row values, then writes the new row. **Without WHERE every row changes.** You can set several columns: `SET price = 3, in_stock = false`. PostgreSQL also supports `UPDATE ... FROM other_table WHERE ...` to compute new values from another table.\n\n### DELETE\n`DELETE FROM products WHERE id = 7;` removes matching rows. No WHERE means all rows. `TRUNCATE` is faster for emptying a whole table. If other tables reference the row with a foreign key, the delete may be blocked or cascade, depending on the constraint (see the constraints topic).\n\n### RETURNING\nPostgreSQL lets INSERT, UPDATE and DELETE return columns of the affected rows: `INSERT ... RETURNING id`, `UPDATE ... RETURNING *`, `DELETE ... RETURNING name`. You get the generated id, the new value after a computation, or the rows you just removed, in a single round trip and without race conditions.\n\n### Safe workflow\n1. Write a `SELECT` with the same WHERE and check the rows.\n2. Open a transaction: `BEGIN;`.\n3. Run the UPDATE/DELETE; check the reported row count.\n4. `COMMIT;` if right, `ROLLBACK;` if not.\n\n### Row counts and transactions\nEach statement reports how many rows it affected (`UPDATE 3`). In Python, `cursor.rowcount` has it. Changes are only permanent once the transaction commits; with psycopg2 you must call `commit()` (or use a context manager that does).\n\n### Upsert (preview)\n`INSERT ... ON CONFLICT` inserts or updates when a unique key already exists; it has its own topic (`postgres-upsert`).",
+  "code_md": "```sql\n-- INSERT: name the columns; multi-row VALUES; RETURNING the new id\nINSERT INTO products (name, price, category)\nVALUES ('pen', 2.50, 'stationery'),\n       ('ink', 5.00, 'stationery')\nRETURNING id, name;\n```\n```sql\n-- UPDATE with WHERE, and RETURNING the new values\nUPDATE products\nSET price = price * 1.10\nWHERE category = 'stationery'\nRETURNING id, price;\n\n-- UPDATE ... FROM: take values from another table\nUPDATE orders o\nSET status = 'shipped'\nFROM shipments s\nWHERE s.order_id = o.id AND s.shipped_at IS NOT NULL;\n```\n```sql\n-- Safe delete workflow\nBEGIN;\nDELETE FROM products WHERE in_stock = false RETURNING id, name;  -- inspect\nROLLBACK;  -- or COMMIT; once satisfied\n```\n```python\n# psycopg2: parameters, rowcount, and RETURNING\ncur.execute(\"INSERT INTO products (name, price) VALUES (%s, %s) RETURNING id\", (\"pen\", 2.5))\nnew_id = cur.fetchone()[0]\nconn.commit()\n```",
+  "use_cases_md": "- Create an order and fetch its generated id with `INSERT ... RETURNING id`.\n- Mark marketplace report rows as processed with `UPDATE ... SET status = 'done' WHERE id = ANY(%s)`.\n- Purge expired sessions with `DELETE ... WHERE expires_at < now()`.\n- Archive-then-delete pattern: `DELETE ... RETURNING *` feeding an `INSERT` in a CTE.\n- Bulk-load thousands of rows using multi-row VALUES.",
+  "mistakes_md": "- **UPDATE/DELETE without WHERE**: changes everything. Run a SELECT first, use a transaction, and check the row count.\n- **Unnamed column list in INSERT**: breaks when the schema changes.\n- **One INSERT per row in a loop**: very slow because of round trips; use multi-row VALUES, `execute_values` or `COPY`.\n- **Forgetting to commit**: with psycopg2 the change is rolled back when the connection closes.\n- **Re-querying for the generated id**: racy and wasteful; use RETURNING.\n- **Assuming a delete cascades**: depends on the foreign key's ON DELETE rule.",
+  "best_practices_md": "- Test the WHERE with SELECT first; wrap risky writes in a transaction.\n- Always name columns in INSERT.\n- Use RETURNING instead of a follow-up SELECT.\n- Batch inserts; use COPY for very large loads.\n- Parameterise values.\n- Check `rowcount` and treat unexpected counts as errors.",
+  "my_context_md": "",
+  "revision_notes_md": "- `INSERT INTO t (cols) VALUES (...), (...)`; name the columns.\n- `UPDATE t SET c = expr WHERE ...`; no WHERE = every row.\n- `DELETE FROM t WHERE ...`; TRUNCATE empties fast.\n- `RETURNING` gives back affected rows (PostgreSQL).\n- `UPDATE ... FROM` uses another table's data.\n- Check with SELECT first; use BEGIN / ROLLBACK to rehearse.\n- psycopg2: `cur.rowcount`, then `conn.commit()`.\n- Batch inserts beat loops.",
+  "exercises_md": "1. Insert 5 products in one statement and capture the generated ids with RETURNING.\n2. Raise prices by 10% for one category, review the result with RETURNING, then ROLLBACK and prove nothing changed.\n3. Write a DELETE with a WHERE that matches 0 rows and check the reported count; then write the matching SELECT first.\n4. In Python, insert 1,000 rows with a loop and then with one multi-row statement and time both.",
+  "related": [
+    "sql-constraints-keys",
+    "postgres-upsert",
+    "transactions-isolation",
+    "psycopg2-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "What happens with UPDATE without WHERE?",
+      "back": "Every row in the table is updated."
+    },
+    {
+      "front": "What does RETURNING do?",
+      "back": "Returns column values of the rows an INSERT/UPDATE/DELETE affected, in the same statement (PostgreSQL)."
+    },
+    {
+      "front": "Why name columns in INSERT?",
+      "back": "The statement keeps working if columns are added or reordered."
+    },
+    {
+      "front": "Fastest way to insert many rows?",
+      "back": "Multi-row VALUES / execute_values; COPY for very large loads."
+    },
+    {
+      "front": "Safe way to try a risky DELETE?",
+      "back": "SELECT with the same WHERE, then BEGIN, run it, check the count, COMMIT or ROLLBACK."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What does `UPDATE products SET price = 0;` do?",
+      "options": [
+        "Errors: WHERE required",
+        "Does nothing",
+        "Updates the first row",
+        "Updates all rows"
+      ],
+      "answer_index": 3,
+      "explanation": "Without WHERE every row is affected."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which clause returns the generated id of a new row in PostgreSQL?",
+      "options": [
+        "OUTPUT",
+        "RETURNING",
+        "SELECT LAST_ID",
+        "GET"
+      ],
+      "answer_index": 1,
+      "explanation": "RETURNING is the PostgreSQL feature."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is a loop of single-row INSERTs slow?",
+      "options": [
+        "Indexes are disabled",
+        "SQL forbids it",
+        "Each statement costs a network round trip and parsing",
+        "It locks the table"
+      ],
+      "answer_index": 2,
+      "explanation": "Batching removes per-statement overhead."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Complete: ____ FROM sessions WHERE expires_at < now();",
+      "answers": [
+        "delete"
+      ],
+      "explanation": "DELETE FROM removes rows."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Complete: INSERT INTO products (name) VALUES ('pen') ____ id;",
+      "answers": [
+        "returning"
+      ],
+      "explanation": "RETURNING id returns the new id."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table p(id integer primary key, name text, price integer);\"\n                \"insert into p(name, price) values ('pen',10),('ink',20),('pad',30);\")\ncur = c.execute(\"update p set price = price + 5 where price >= 20\")\nprint(cur.rowcount)\nprint(c.execute(\"select name, price from p order by id\").fetchall())",
+      "answers": [
+        "2\n[('pen', 10), ('ink', 25), ('pad', 35)]"
+      ],
+      "explanation": "Two rows match (ink and pad)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table p(id integer primary key, name text);\"\n                \"insert into p(name) values ('a'),('b'),('c');\")\nc.execute(\"delete from p where id = 2\")\nc.execute(\"insert into p(name) values ('d')\")\nprint(c.execute(\"select id, name from p order by id\").fetchall())\nprint(c.execute(\"delete from p\").rowcount)",
+      "answers": [
+        "[(1, 'a'), (3, 'c'), (4, 'd')]\n3"
+      ],
+      "explanation": "Deleted id 2 stays gone; new row gets max+1 = 4; DELETE without WHERE removes all 3."
+    },
+    {
+      "type": "debug",
+      "prompt": "This script is meant to deactivate one user but the support team reports all users are inactive. What's wrong?",
+      "code": "cur.execute(\"UPDATE users SET active = false\")\ncur.execute(\"WHERE id = %s\", (user_id,))\nconn.commit()",
+      "answer": "The WHERE is in a separate statement, so the UPDATE ran on every row. Put it in the same statement and check rowcount.\n```python\ncur.execute(\"UPDATE users SET active = false WHERE id = %s\", (user_id,))\nassert cur.rowcount == 1\nconn.commit()\n```",
+      "rubric": [
+        "WHERE must be part of the UPDATE",
+        "Parameterised value",
+        "Verify rowcount / test with SELECT or transaction first"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain RETURNING and why it is better than inserting and then selecting.",
+      "answer": "RETURNING makes INSERT/UPDATE/DELETE hand back the affected rows, including generated ids and computed values. It needs one round trip, is atomic with the write, and cannot pick up another session's row the way `SELECT max(id)` can.",
+      "rubric": [
+        "Returns affected rows in the same statement",
+        "One round trip",
+        "No race condition vs a follow-up SELECT"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Describe a safe workflow for a manual production DELETE.",
+      "answer": "Write a SELECT with the exact WHERE and review the rows and count. Open a transaction with BEGIN, run the DELETE ... RETURNING, confirm the count matches, then COMMIT; otherwise ROLLBACK. For large deletes batch them to limit lock time and bloat.",
+      "rubric": [
+        "SELECT first",
+        "Transaction with count check",
+        "COMMIT/ROLLBACK decision"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "DELETE vs TRUNCATE vs DROP?",
+      "difficulty": "easy",
+      "answer_md": "DELETE removes selected rows (WHERE allowed), is fully logged and fires row triggers. TRUNCATE empties the whole table quickly, no WHERE, takes a strong lock. DROP removes the table itself. All three are transactional in PostgreSQL."
+    },
+    {
+      "question": "How do you insert many rows efficiently from Python?",
+      "difficulty": "medium",
+      "answer_md": "Avoid one execute per row. Use psycopg2's `execute_values` or a multi-row VALUES statement, in batches of a few thousand, committing once per batch. For very large loads use COPY (`copy_expert` or `cursor.copy` in psycopg 3), which is the fastest path."
+    },
+    {
+      "question": "What does UPDATE ... FROM do?",
+      "difficulty": "medium",
+      "answer_md": "It lets you update a table using values from another table or subquery: `UPDATE orders o SET status = s.status FROM shipments s WHERE s.order_id = o.id`. It is PostgreSQL's join-update. If several source rows match one target row, only one is applied, arbitrarily, so ensure the join is one-to-one."
+    },
+    {
+      "question": "Why can UPDATE cause table bloat in PostgreSQL?",
+      "difficulty": "hard",
+      "answer_md": "Under MVCC an UPDATE writes a new row version and leaves the old one until VACUUM cleans it. A heavy update workload creates dead tuples, increasing table size. HOT updates and autovacuum tuning reduce it."
+    }
+  ]
+}

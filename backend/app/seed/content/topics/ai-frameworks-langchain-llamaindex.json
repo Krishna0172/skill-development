@@ -1,0 +1,158 @@
+{
+  "slug": "ai-frameworks-langchain-llamaindex",
+  "title": "LangChain & LlamaIndex: frameworks vs plain code",
+  "skill": "ai-agents",
+  "extra_skills": [
+    "llm-applications",
+    "rag"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "langchain",
+    "llamaindex",
+    "abstractions",
+    "rag",
+    "chains",
+    "lock-in"
+  ],
+  "summary": "LangChain and LlamaIndex wrap the recurring pieces of LLM apps — model clients, prompt templates, retrievers, indexes, chains — behind common interfaces. They speed up prototypes and give you many integrations, but add abstraction layers, fast-moving APIs and harder debugging. Know what each abstraction does in plain Python so you can choose when to use one.",
+  "why_md": "- Most GenAI job posts and tutorials mention LangChain or LlamaIndex; interviewers expect you to know what they provide **and** their costs.\n- Every abstraction is just a function you could write: prompt formatting, a model call, parsing, retrieval. Knowing the plain-Python version makes framework bugs debuggable.\n- The real decision is architectural: speed of prototyping and integrations vs control, stability and observability in production.",
+  "details_md": "### What the frameworks give you\nBoth libraries standardise the moving parts of an LLM application:\n\n- **Model wrappers** – one interface over many providers (chat models, embedding models), so swapping vendors is a config change.\n- **Prompt templates** – parameterised messages with variables, roughly `str.format` with role-aware messages.\n- **Output parsers / structured output** – turn model text into JSON or typed objects.\n- **Retrievers & vector-store integrations** – `query -> list[Document]` over many vector DBs.\n- **Chains / pipelines** – composition of the steps above. In LangChain the expression language composes runnables with `|` (`prompt | model | parser`).\n- **Indexes & ingestion (LlamaIndex's focus)** – loaders, node/chunk parsers, an index built from documents, and a *query engine* that does retrieve + synthesize.\n- **Agents & tools** – a tool registry plus the reason/act loop. LangChain's ecosystem also includes LangGraph for explicit state-machine style agent graphs.\n\nRule of thumb: **LlamaIndex is data/retrieval-centric** (ingest, index, query), **LangChain is orchestration-centric** (compose calls, tools, agents). They overlap heavily.\n\n### Under the hood it is plain Python\nA \"chain\" is function composition; a retriever is a function returning ranked chunks; a template is string formatting; memory is a list of messages. A framework adds callbacks for tracing, retries, batching and async variants on top.\n\n### When to use one\n- Prototyping a RAG demo over PDFs in an afternoon.\n- You need many integrations (several vector stores, loaders, providers) and don't want to write adapters.\n- The team already standardised on it and uses its tracing tooling.\n\n### When plain code wins\n- A small number of well-defined calls (e.g. a text-to-SQL endpoint): an SDK call plus 50 lines of your code is easier to test and reason about.\n- Strict latency/cost control, custom retries, exact prompts you must audit.\n- Long-lived services: framework APIs have moved fast, and upgrades can break imports and behaviour.\n\n### Costs to weigh\n- **Debugging**: the final prompt sent to the model may be assembled across several classes; you need tracing or verbose callbacks to see it.\n- **Lock-in**: your code is shaped around their classes; migrating out means rewriting.\n- **Hidden defaults**: chunk sizes, retry policies, prompt wording you didn't choose.\n\nA common production pattern: use the framework's loaders/integrations, but own the core prompt, the model call and the control loop.",
+  "code_md": "```python\n# Plain-Python 'chain': template -> model -> parser. Every framework piece maps to one of these.\nimport json\nfrom typing import Callable\n\ndef render(question: str, schema: str) -> list[dict]:\n    return [\n        {\"role\": \"system\", \"content\": f\"Write one read-only PostgreSQL query. Schema:\\n{schema}\"},\n        {\"role\": \"user\", \"content\": question},\n    ]\n\ndef parse_json(text: str) -> dict:\n    return json.loads(text)          # validate further with Pydantic in real code\n\ndef make_chain(call_model: Callable[[list[dict]], str]):\n    def chain(question: str, schema: str) -> dict:\n        messages = render(question, schema)\n        raw = call_model(messages)   # your provider SDK call, with timeout + retries you control\n        return parse_json(raw)\n    return chain\n```\n\n```python\n# The same idea expressed with frameworks (shape only - import paths and class names\n# change between releases, check the current docs before copying).\n\n# LangChain: compose runnables with the | operator\n# from langchain_core.prompts import ChatPromptTemplate\n# from langchain_core.output_parsers import StrOutputParser\n# prompt = ChatPromptTemplate.from_messages([(\"system\", \"Schema:\\n{schema}\"), (\"user\", \"{question}\")])\n# chain = prompt | chat_model | StrOutputParser()\n# sql = chain.invoke({\"schema\": schema, \"question\": q})\n\n# LlamaIndex: load -> index -> query engine (retrieve + synthesize)\n# from llama_index.core import SimpleDirectoryReader, VectorStoreIndex\n# docs = SimpleDirectoryReader(\"./policies\").load_data()\n# index = VectorStoreIndex.from_documents(docs)\n# answer = index.as_query_engine().query(\"What is the return window?\")\n```",
+  "use_cases_md": "- **RAG prototype** over marketplace policy PDFs with LlamaIndex loaders + a vector index, to validate retrieval quality before building it properly.\n- **Multi-provider fallback**: a framework model wrapper lets you switch provider when one is rate-limited.\n- **Production text-to-SQL service** in plain code: one SDK call, your own prompt, SQL validation and cost logging per org.\n- **Hybrid**: use framework document loaders/splitters for ingestion jobs, plain code for the request path.",
+  "mistakes_md": "- **Adopting a framework before understanding the flow** – you can't debug what you can't describe. Build the 30-line plain version first.\n- **Never looking at the final prompt** – defaults inject extra instructions; enable tracing/verbose logging and inspect what is actually sent.\n- **Unpinned versions** – these libraries change quickly; pin exact versions and upgrade deliberately with tests.\n- **Wrapping everything** – putting business logic inside framework callbacks makes it untestable; keep domain logic in your own functions.\n- **Trusting default chunking/retrieval settings** – evaluate them on your data.",
+  "best_practices_md": "- Keep a thin adapter layer (`llm_client.py`, `retriever.py`) so the framework is replaceable.\n- Pin versions; read changelogs before upgrades.\n- Turn on tracing in dev and log the rendered prompt + token usage.\n- Unit-test your parsing/validation with fake model outputs, no network.\n- Use frameworks for integrations and prototypes; own the critical control flow in production.",
+  "my_context_md": "`GetLlmData` / `ECSLlmQueryProcess` store chat sessions, message history, votes, per-org USD cost and the original/dynamic SQL generated by the model — but the repo makes no direct LLM API calls. If you rebuilt that flow, the framework-vs-plain decision is real: a text-to-SQL path is a handful of steps (render schema prompt, call model, validate SQL, run read-only, log cost), which plain Python handles cleanly and keeps the cost-tracking you already store accurate. Your `ECSMarketplaceDataUpload` registry dispatcher is the same kind of 'own the routing' code a framework would otherwise hide.",
+  "revision_notes_md": "- Frameworks = model wrappers + prompt templates + parsers + retrievers + chains + agents/tools.\n- LlamaIndex: data/retrieval focus (loaders, nodes, index, query engine).\n- LangChain: orchestration focus (runnables composed with `|`, tools, agents; LangGraph for graphs).\n- Chain = function composition; retriever = query -> chunks; memory = list of messages.\n- Use for: prototypes, many integrations, team standard.\n- Avoid for: small fixed flows, strict latency/cost control, long-lived critical paths.\n- Costs: debugging indirection, lock-in, hidden defaults, fast API churn.\n- Always: pin versions, trace rendered prompts, keep a thin adapter layer.",
+  "exercises_md": "1. Write a plain-Python text-to-SQL 'chain' (render -> fake model -> parse -> validate) with a fake model function, and unit-test it with pytest.\n2. Re-express the same flow with LangChain or LlamaIndex in a throwaway venv; log the exact prompt sent and compare with yours.\n3. List every default (chunk size, overlap, top-k, retries) the framework applied in exercise 2 and decide which you would override.\n4. Design an `LLMClient` protocol (typing.Protocol) that both a raw SDK and a framework model wrapper could implement.",
+  "related": [
+    "ai-llm-apis",
+    "ai-retrieval-pipelines",
+    "ai-agents-tool-calling",
+    "ai-multistep-workflows",
+    "ai-evaluation-observability"
+  ],
+  "flashcards": [
+    {
+      "front": "LlamaIndex vs LangChain focus?",
+      "back": "LlamaIndex: data ingestion, indexing, query engines (retrieval-centric). LangChain: composing calls, tools and agents (orchestration-centric). Large overlap."
+    },
+    {
+      "front": "What is a 'chain' in plain Python?",
+      "back": "Function composition: render prompt -> call model -> parse/validate output."
+    },
+    {
+      "front": "Main production costs of an LLM framework?",
+      "back": "Debugging through abstraction layers, lock-in to its classes, hidden defaults, fast-changing APIs."
+    },
+    {
+      "front": "How do you keep a framework replaceable?",
+      "back": "Wrap it behind your own thin adapter/protocol, pin versions, keep business logic in your functions."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which statement best describes what an LLM framework 'chain' is?",
+      "options": [
+        "A special model architecture trained for multi-step tasks",
+        "Function composition of prompt rendering, model call and output parsing",
+        "A database table that stores conversation history",
+        "A GPU scheduling primitive"
+      ],
+      "answer_index": 1,
+      "explanation": "A chain composes steps you could write as ordinary functions; frameworks add tracing, retries and async variants."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You must build a single text-to-SQL endpoint with strict cost logging per org and audited prompts. What is usually the better default?",
+      "options": [
+        "A full agent framework with default prompts",
+        "A no-code workflow builder",
+        "Plain code around the provider SDK, with your own prompt and validation",
+        "Fine-tuning a model first"
+      ],
+      "answer_index": 2,
+      "explanation": "A small, fixed flow is easier to test, audit and cost-control in plain code."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In LangChain's expression language, steps are composed with the ____ operator, e.g. prompt | model | parser.",
+      "answers": [
+        "|",
+        "pipe",
+        "pipe |",
+        "| (pipe)"
+      ],
+      "explanation": "Runnables overload `|` to build a sequence."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Because these libraries change quickly, you should ____ exact versions in requirements and upgrade deliberately.",
+      "answers": [
+        "pin",
+        "lock"
+      ],
+      "explanation": "Pinning prevents silent breakage on rebuilds."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this toy 'chain' print?",
+      "code": "from functools import reduce\n\ndef render(q):\n    return f\"Q: {q.strip()}\"\n\ndef fake_model(prompt):\n    return prompt.upper() + \" -> SELECT 1\"\n\ndef parse(text):\n    return text.split(\" -> \")[1]\n\nsteps = [render, fake_model, parse]\nchain = lambda x: reduce(lambda acc, f: f(acc), steps, x)\nprint(chain(\"  total orders  \"))\nprint(len(steps))\n",
+      "answers": [
+        "SELECT 1\n3"
+      ],
+      "explanation": "reduce feeds each step's output into the next: render -> 'Q: total orders', model appends ' -> SELECT 1', parse keeps the part after ' -> '."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this prompt-template code print?",
+      "code": "from string import Template\n\nt = Template(\"Org $org asks: $question\")\nprint(t.safe_substitute(org=\"acme\"))\ntry:\n    t.substitute(org=\"acme\")\nexcept KeyError as e:\n    print(\"missing\", e)\n",
+      "answers": [
+        "Org acme asks: $question\nmissing 'question'"
+      ],
+      "explanation": "safe_substitute leaves unknown placeholders in place; substitute raises KeyError for the missing variable."
+    },
+    {
+      "type": "debug",
+      "prompt": "Answers suddenly got worse after a routine image rebuild, with no code changes. What's wrong and how do you fix it?",
+      "code": "# requirements.txt\nlangchain\nllama-index\nfastapi==0.115.0\n\n# app.py\nchain = build_chain()          # framework defaults for prompt + retriever\nresult = chain.invoke({\"question\": q})\n",
+      "answer": "The framework packages are **unpinned**, so the rebuild pulled new versions whose defaults (prompt wording, retriever top-k, chunking, parsers) or APIs changed. Nobody can see what changed because the rendered prompt is not logged.\n\nFix:\n```text\nlangchain==<tested version>\nllama-index==<tested version>\n```\n- pin exact versions (or use a lock file),\n- set important parameters explicitly (top_k, chunk size, prompt text) instead of relying on defaults,\n- log/trace the rendered prompt and run an eval set before upgrading.",
+      "rubric": [
+        "Identifies unpinned framework versions",
+        "Mentions changed hidden defaults or APIs",
+        "Pins versions / uses lock file",
+        "Sets parameters explicitly and evaluates before upgrade"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior when you would and would not use LangChain or LlamaIndex.",
+      "answer": "They provide reusable abstractions: model wrappers, prompt templates, parsers, retrievers, indexes, chains and agent tooling, plus many integrations. Use them for **prototypes**, when you need **many integrations** (loaders, vector stores, providers) or the team has standardised on them. Prefer **plain code** for small, fixed, latency/cost-critical flows where you must audit prompts and control retries. Costs: debugging through layers, lock-in, hidden defaults, API churn. Middle ground: thin adapter layer, framework for ingestion, own code for the request path.",
+      "rubric": [
+        "Lists what the abstractions provide",
+        "Gives good reasons to use (prototyping, integrations)",
+        "Gives reasons to avoid (control, debugging, lock-in, churn)",
+        "Suggests adapter layer / hybrid approach"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Would you use LangChain for a production RAG service? Defend your answer.",
+      "difficulty": "medium",
+      "answer_md": "It depends on the flow's size and stability needs. For a production RAG service I would usually **own the request path** — embed query, retrieve top-k with metadata filters (e.g. `org_id`), build the prompt, call the model with timeout/retries, validate output, log tokens and cost — because it is a handful of functions that I need to test, trace and tune. I'd happily use framework **loaders and splitters** in the ingestion job, and the framework is great for a prototype to evaluate chunking and retrievers quickly.\n\nRisks I'd call out: rendered prompts hidden behind classes, defaults I didn't pick (top-k, chunk size), and frequent API changes. If the team already uses LangChain, I'd pin versions, wrap it in an adapter (`Retriever`, `LLMClient` protocols) and keep an eval set that runs on every upgrade."
+    },
+    {
+      "question": "What does LlamaIndex's 'query engine' do, conceptually?",
+      "difficulty": "easy",
+      "answer_md": "A query engine wraps **retrieve + synthesize**. Given a question it uses a retriever over an index (typically a vector index of chunked 'nodes' with embeddings) to fetch the top-k relevant chunks, optionally post-processes them (re-ranking, metadata filtering), then calls the LLM with a prompt that includes those chunks to produce an answer, often with source references.\n\nIn plain Python: `chunks = retriever(q, k=5); prompt = template(q, chunks); answer = llm(prompt)`. Knowing this mapping lets you debug: if answers are wrong, check retrieval (are the right chunks returned?) separately from synthesis (is the prompt/model using them?)."
+    },
+    {
+      "question": "How do you debug a chain that returns wrong output?",
+      "difficulty": "medium",
+      "answer_md": "Break it into its steps and inspect each boundary. 1) Turn on tracing/verbose callbacks (or a tracing tool) to capture the **exact rendered prompt**, model parameters and raw output. 2) Check retrieval separately: log retrieved chunk IDs and scores for the failing query. 3) Check parsing: does the raw output fail the parser, and is the parser silently falling back? 4) Reproduce with a fixed input in a unit test using a fake model returning the captured raw output. 5) If a framework default is the cause (top-k, prompt wording), set it explicitly. Then add the case to the eval set so it doesn't regress."
+    }
+  ]
+}

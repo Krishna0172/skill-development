@@ -1,0 +1,151 @@
+{
+  "slug": "ai-model-training",
+  "title": "Training models: splits, gradient descent, regularisation, tuning",
+  "skill": "ml-fundamentals",
+  "extra_skills": [
+    "deep-learning"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "train-val-test",
+    "cross-validation",
+    "gradient-descent",
+    "learning-rate",
+    "regularization",
+    "early-stopping",
+    "hyperparameters"
+  ],
+  "summary": "How models are actually trained and tuned: splitting data into train/validation/test, cross-validation, gradient descent and the learning rate, L1/L2 regularisation, early stopping, and systematic hyperparameter search — the same ideas apply from logistic regression to fine-tuning LLMs.",
+  "why_md": "- Proper splits are what make a reported metric trustworthy.\n- Gradient descent and learning rate are the core of every neural network and LLM fine-tune.\n- Regularisation and early stopping are the main tools against overfitting.\n- Hyperparameter search done wrong (tuning on test) silently inflates results.\n- Interview favourites: \"what happens if the learning rate is too high?\", \"L1 vs L2?\", \"why cross-validation?\"",
+  "details_md": "### Train / validation / test\n- **Train**: fit parameters.\n- **Validation**: choose hyperparameters, features, model type, early-stopping point.\n- **Test**: one final, untouched estimate of real-world performance.\nTypical 70/15/15; for temporal data, split by time in that order. `stratify=y` keeps class ratios for imbalanced classification. Group-aware splits (`GroupKFold`) keep all rows of one customer/SKU on the same side.\n\n### Cross-validation\nK-fold CV trains k models, each validated on a different fold, and averages the score — a less noisy estimate than one split, especially with small data. Use `StratifiedKFold` for classification, `TimeSeriesSplit` for time series (always train on the past, validate on the future).\n\n### Gradient descent\nModels with a differentiable loss are trained by repeatedly nudging parameters against the gradient: `w ← w − lr · ∂loss/∂w`. **Mini-batch SGD** computes the gradient on small batches (32-1024 rows) for speed and noise that helps generalisation. **Adam** adapts the step per parameter and is the default for neural nets.\n\n### Learning rate\nThe single most important hyperparameter for gradient-based training. Too high → loss oscillates or explodes (NaN); too low → painfully slow, may stall. Schedules (warmup, cosine decay) are standard for transformers. In gradient boosting, the learning rate shrinks each tree's contribution — lower rate + more trees usually generalises better.\n\n### Regularisation\nPenalise complexity to reduce variance:\n- **L2 (Ridge / weight decay)**: adds `λ Σ w²`; shrinks all weights smoothly.\n- **L1 (Lasso)**: adds `λ Σ |w|`; drives some weights to exactly zero → feature selection.\n- Trees: max depth, min samples per leaf. Neural nets: dropout, weight decay, data augmentation.\nIn scikit-learn's LogisticRegression, `C` is the **inverse** of regularisation strength.\n\n### Early stopping\nTrack validation loss each epoch/boosting round; stop when it hasn't improved for `patience` rounds and keep the best checkpoint. Cheap and very effective.\n\n### Hyperparameter search\nGrid search tries every combination (expensive); random search samples combinations and finds good regions faster; Bayesian tools like Optuna learn which regions are promising. Always search on validation/CV, never test, and fix random seeds.",
+  "code_md": "```python\n# Gradient descent for y = w*x + b in plain Python\nxs = [1.0, 2.0, 3.0, 4.0]\nys = [3.0, 5.0, 7.0, 9.0]          # true: w=2, b=1\nw, b, lr = 0.0, 0.0, 0.05\nfor epoch in range(2000):\n    n = len(xs)\n    dw = sum(2 * (w * x + b - y) * x for x, y in zip(xs, ys)) / n\n    db = sum(2 * (w * x + b - y) for x, y in zip(xs, ys)) / n\n    w, b = w - lr * dw, b - lr * db\nprint(round(w, 3), round(b, 3))     # ~2.0, ~1.0\n```\n\n```python\n# Time-aware CV + randomised search on a gradient boosting model\nfrom scipy.stats import loguniform, randint\nfrom sklearn.ensemble import HistGradientBoostingRegressor\nfrom sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit\n\nsearch = RandomizedSearchCV(\n    HistGradientBoostingRegressor(early_stopping=True, random_state=42),\n    param_distributions={\n        \"learning_rate\": loguniform(0.01, 0.3),\n        \"max_leaf_nodes\": randint(15, 127),\n        \"l2_regularization\": loguniform(1e-4, 10),\n    },\n    n_iter=30, cv=TimeSeriesSplit(n_splits=5),\n    scoring=\"neg_mean_absolute_error\", random_state=42, n_jobs=-1,\n)\nsearch.fit(X_train, y_train)            # test set untouched\nprint(search.best_params_, -search.best_score_)\n```",
+  "use_cases_md": "- Tuning a demand-forecast model with `TimeSeriesSplit` so validation is always in the future.\n- `GroupKFold` by customer when predicting returns, so a customer's orders don't leak across folds.\n- L1-regularised logistic regression to pick the few n-gram features that predict low ratings.\n- Early stopping when fine-tuning a small transformer classifier on support tickets.\n- Learning-rate tuning is the first knob when an LLM fine-tune diverges.",
+  "mistakes_md": "- **Tuning on the test set** — it stops being a test set. Use CV/validation.\n- **Plain KFold on time series** — trains on the future. Use `TimeSeriesSplit`.\n- **Same customer in train and validation** — over-optimistic; use group splits.\n- **Learning rate too high** → NaN loss; too low → no progress. Try a log-scale sweep (1e-5 … 1e-1).\n- **Confusing `C` with `alpha`** — larger `C` = *less* regularisation in LogisticRegression/SVC.\n- **Grid search over huge grids** — use random/Bayesian search.\n- **Not scaling features** before gradient-descent-based models — slow, unstable convergence.",
+  "best_practices_md": "- Decide split strategy (time, group, stratified) from how the model will be used.\n- Keep the test set locked until the end; evaluate once.\n- Search learning rate and regularisation on a log scale.\n- Use early stopping with a validation set for boosting and neural nets.\n- Put preprocessing inside the Pipeline so CV refits it per fold.\n- Log every run's params, seed, data version and scores (MLflow or even a Postgres table).",
+  "my_context_md": "`ForcesightJobSchedulerAndRunner` already runs scheduled jobs with locking and a ThreadPoolExecutor — a natural host for periodic retraining jobs (claim job with `FOR UPDATE SKIP LOCKED`, train, write metrics). Logging each training run's params and scores into a PostgreSQL table with JSONB columns fits his existing style.",
+  "revision_notes_md": "- Train = fit; validation = choose; test = report once.\n- `stratify=y`, `GroupKFold`, `TimeSeriesSplit` as needed.\n- GD: `w ← w − lr·grad`; mini-batch; Adam default for NNs.\n- LR too high → diverge/NaN; too low → slow.\n- L2 shrinks weights; L1 zeroes some (feature selection).\n- sklearn `C` = 1/regularisation strength.\n- Early stopping: watch val loss, keep best checkpoint.\n- Random/Bayesian search > big grids; log-scale ranges.",
+  "exercises_md": "1. Run the plain-Python gradient descent with lr = 0.001, 0.05 and 0.2; record what happens to w, b and the loss.\n2. Compare `KFold` vs `TimeSeriesSplit` scores on a weekly sales dataset and explain the gap.\n3. Fit L1 and L2 logistic regression on review-text n-gram features; count non-zero coefficients for each.\n4. Create a `training_runs` Postgres table (params JSONB, metrics JSONB, data_version, created_at) and log a RandomizedSearchCV run into it.",
+  "related": [
+    "ai-ml-fundamentals",
+    "ai-model-evaluation",
+    "ai-scikit-learn",
+    "ai-neural-networks",
+    "ai-supervised-learning"
+  ],
+  "flashcards": [
+    {
+      "front": "Gradient descent update rule?",
+      "back": "w ← w − learning_rate · ∂loss/∂w"
+    },
+    {
+      "front": "L1 vs L2 regularisation?",
+      "back": "L1 (Σ|w|) pushes some weights to exactly 0 (feature selection). L2 (Σw²) shrinks all weights smoothly."
+    },
+    {
+      "front": "Which CV splitter for time series?",
+      "back": "TimeSeriesSplit — each fold trains on the past and validates on the following period."
+    },
+    {
+      "front": "What is early stopping?",
+      "back": "Stop training when validation loss stops improving for N rounds, keeping the best checkpoint."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Training loss jumps around wildly and becomes NaN after a few hundred steps. What is the most likely first fix?",
+      "options": [
+        "Increase the number of epochs",
+        "Lower the learning rate",
+        "Remove regularisation",
+        "Use a larger test set"
+      ],
+      "answer_index": 1,
+      "explanation": "Divergence/NaN is the classic symptom of a too-large learning rate."
+    },
+    {
+      "type": "mcq",
+      "prompt": "In scikit-learn's LogisticRegression, what does increasing C do?",
+      "options": [
+        "Reduces regularisation (weights can grow larger)",
+        "Increases regularisation",
+        "Changes the solver",
+        "Increases the number of CV folds"
+      ],
+      "answer_index": 0,
+      "explanation": "C is the inverse of regularisation strength."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "____ regularisation adds the sum of absolute weights to the loss and tends to set some weights exactly to zero.",
+      "answers": [
+        "L1",
+        "lasso",
+        "l1 (lasso)"
+      ],
+      "explanation": "L1 / Lasso produces sparse models."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "For time-ordered data, scikit-learn's ____ splitter ensures each validation fold comes after its training data.",
+      "answers": [
+        "TimeSeriesSplit",
+        "time series split"
+      ],
+      "explanation": "Avoids training on the future."
+    },
+    {
+      "type": "output",
+      "prompt": "Three steps of gradient descent on loss(w) = (w − 3)². What does this print?",
+      "code": "w, lr = 0.0, 0.25\nfor step in range(3):\n    grad = 2 * (w - 3)\n    w = w - lr * grad\n    print(step, w)",
+      "answers": [
+        "0 1.5\n1 2.25\n2 2.625"
+      ],
+      "explanation": "Each step moves w halfway to the minimum at 3 (lr·2 = 0.5): 0 → 1.5 → 2.25 → 2.625."
+    },
+    {
+      "type": "output",
+      "prompt": "Early stopping with patience. What does this print?",
+      "code": "val_losses = [0.90, 0.70, 0.62, 0.60, 0.61, 0.63, 0.59, 0.64]\nbest, best_epoch, patience, waited = float(\"inf\"), -1, 2, 0\nfor epoch, loss in enumerate(val_losses):\n    if loss < best:\n        best, best_epoch, waited = loss, epoch, 0\n    else:\n        waited += 1\n        if waited >= patience:\n            print(\"stop at\", epoch)\n            break\nprint(\"best\", best_epoch, best)",
+      "answers": [
+        "stop at 5\nbest 3 0.6"
+      ],
+      "explanation": "Best is 0.60 at epoch 3; epochs 4 and 5 don't improve, so patience 2 triggers at epoch 5. The later 0.59 is never seen — patience is a trade-off."
+    },
+    {
+      "type": "debug",
+      "prompt": "The team reports a test MAE of 41 units but production MAE is 65. Review the training script.",
+      "code": "from sklearn.model_selection import GridSearchCV, KFold\n\nX_train, X_test, y_train, y_test = split_by_date(df, cutoff=\"2026-07-01\")\nbest = None\nfor params in grid:\n    model = make_model(**params).fit(X_train, y_train)\n    score = mae(y_test, model.predict(X_test))\n    if best is None or score < best[0]:\n        best = (score, params)\nprint(\"test MAE\", best[0])",
+      "answer": "Hyperparameters are selected by their **test** score, so the reported test MAE is the minimum over many tries — optimistically biased; the test set became a validation set. Tune with time-aware CV on the training data only, then evaluate the chosen model once on test:\n\n```python\nfrom sklearn.model_selection import GridSearchCV, TimeSeriesSplit\nsearch = GridSearchCV(make_model(), grid, cv=TimeSeriesSplit(5),\n                      scoring=\"neg_mean_absolute_error\")\nsearch.fit(X_train, y_train)\nprint(\"test MAE\", mae(y_test, search.best_estimator_.predict(X_test)))\n```\n(The imported plain KFold would also be wrong for time series.)",
+      "rubric": [
+        "Identifies tuning on the test set (selection bias)",
+        "Uses CV/validation on training data for selection",
+        "Uses a time-aware splitter and evaluates test once"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how gradient descent trains a model, and the role of the learning rate, to a backend developer.",
+      "answer": "Think of the loss as a landscape over the parameters; we want the lowest point. We can't see the whole landscape, but we can compute the **gradient** — the slope at our current position — via calculus (backprop in neural nets). Gradient descent repeatedly takes a step downhill: `w ← w − lr · gradient`. The **learning rate** is the step size: too large and we overshoot and bounce or diverge (NaN); too small and we crawl and may stall. In practice we compute the gradient on mini-batches of data (SGD), use adaptive optimisers like Adam, and often decay the learning rate over time. Training stops after a fixed number of epochs or via early stopping on validation loss.",
+      "rubric": [
+        "Loss landscape / gradient = direction of steepest increase",
+        "Update rule w − lr·grad, iterated",
+        "LR too high diverges, too low slow",
+        "Mini-batches / optimisers like Adam or early stopping"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Why use cross-validation, and how do you choose the right CV scheme?",
+      "difficulty": "medium",
+      "answer_md": "A single validation split gives a noisy estimate — results can swing a few points depending on which rows landed where. **K-fold CV** trains on k−1 folds and validates on the remaining one, k times, and averages; you also get a standard deviation showing stability.\n\nChoose the scheme to mimic production:\n- **StratifiedKFold** for classification, preserving class ratios (essential with rare positives like fraud).\n- **GroupKFold** when rows share an entity (customer, SKU, seller) to stop the model memorising entities across folds.\n- **TimeSeriesSplit** / rolling-origin backtesting for forecasting — always validate on the future.\n\nPreprocessing must live inside a Pipeline so each fold fits its own scaler/encoder. CV is for selection; the test set is still kept for the final, single evaluation."
+    },
+    {
+      "question": "How do you fight overfitting during training?",
+      "difficulty": "easy",
+      "answer_md": "- **More / better data** (and data augmentation for images/text).\n- **Simpler model**: shallower trees, fewer features.\n- **Regularisation**: L2/L1 penalties, weight decay, dropout in neural nets, min samples per leaf in trees.\n- **Early stopping** on validation loss.\n- **Ensembling**: random forests average high-variance trees.\n- **Feature hygiene**: remove leaky or noisy features.\n\nDiagnose first: plot train vs validation loss. If both are high, you're underfitting and these remedies make it worse — you need a more expressive model or better features instead."
+    }
+  ]
+}

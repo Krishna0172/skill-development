@@ -1,0 +1,155 @@
+{
+  "slug": "py-performance",
+  "title": "Writing fast Python for data backends",
+  "skill": "python-performance",
+  "extra_skills": [
+    "etl-data-processing",
+    "psycopg2"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "complexity",
+    "data-structures",
+    "vectorisation",
+    "generators",
+    "caching",
+    "batching",
+    "timeit"
+  ],
+  "summary": "Where Python time actually goes and how to cut it: algorithmic complexity and the right data structure first, then vectorised pandas instead of `iterrows`, generators to bound memory, `functools.cache`/`lru_cache` for repeated work, efficient string building, batching database round-trips, and measuring with `timeit` before and after.",
+  "why_md": "- Most slow ETL jobs are slow for one of four reasons: O(n²) lookups, row-by-row pandas, one DB round-trip per row, or recomputing the same thing.\n- Fixing those gives 10-1000x speedups — far more than micro-tuning.\n- Shorter jobs mean cheaper ECS/Lambda bills and fewer timeouts.\n- 'Make this faster' is a common live-coding interview prompt; you're judged on measuring and reasoning about complexity.",
+  "details_md": "### 1. Complexity and data structures\n`x in list` is O(n); `x in set`/`dict` is O(1) average. A loop that does a list membership test per row is O(n·m). Build a set/dict once, then look up. Know the costs: `list.insert(0, x)`/`pop(0)` are O(n) (use `collections.deque`), sorting is O(n log n), `heapq.nlargest(k, ...)` beats full sort for small k, `collections.Counter` / `defaultdict` replace manual counting.\n\n### 2. Vectorise pandas\n`df.iterrows()` creates a Series per row — easily 100x slower than column operations. Prefer, in order: vectorised column ops (`df.a * df.b`, `.str`, `.dt`), `np.where`/`np.select` for conditionals, `merge`/`map` for lookups, `groupby().agg/transform`. If you must loop, `itertuples()` is far faster than `iterrows()`, and `df.apply(axis=1)` is still a Python loop.\n\n### 3. Generators for memory\nGenerators produce items lazily, so a pipeline of generator functions (`read → parse → filter → batch`) runs in constant memory. Cost: single pass, no `len()`. Large intermediate lists are often the cause of both memory spikes and slowness (allocation, GC).\n\n### 4. Caching\n`functools.cache` (unbounded) and `lru_cache(maxsize=...)` memoise pure functions keyed by hashable arguments — perfect for FX rates per (currency, date), parsed config, or regex compilation. `cache_info()` shows hits/misses. Don't cache functions with side effects or unbounded key spaces in long-lived processes; for time-sensitive data add a TTL.\n\n### 5. String building\n`s += piece` in a loop can be quadratic; use `''.join(parts)` or `io.StringIO`. For SQL, never build values into strings — use parameters (correctness *and* plan reuse).\n\n### 6. Batch database work\nEach `cursor.execute` per row is a network round-trip (~0.5-2 ms each; 100k rows ≈ minutes). Use `psycopg2.extras.execute_values` (one multi-row INSERT per page), `execute_batch`, or `COPY` via `copy_expert` for bulk loads into a staging table. Commit per batch, not per row. Likewise, fetch with one set-based query instead of N lookups (the N+1 problem).\n\n### 7. Measure\n`timeit` for micro-benchmarks (`python -m timeit -s 'setup' 'stmt'`, or `%timeit`), `time.perf_counter()` around stages, and a profiler (cProfile) to find the actual hot spot before optimising. Optimise the biggest cost first and re-measure.",
+  "code_md": "```python\nimport numpy as np\nimport pandas as pd\n\n# SLOW: Python loop + list membership per row  -> O(n*m) and iterrows overhead\ndef flag_slow(df, blocked_skus: list):\n    out = []\n    for _, row in df.iterrows():\n        out.append(\"blocked\" if row[\"sku\"] in blocked_skus else\n                   (\"high\" if row[\"price\"] * row[\"qty\"] > 10_000 else \"normal\"))\n    df[\"flag\"] = out\n    return df\n\n# FAST: vectorised; isin uses a hash table\ndef flag_fast(df, blocked_skus):\n    df[\"flag\"] = np.select(\n        [df[\"sku\"].isin(blocked_skus), df[\"price\"] * df[\"qty\"] > 10_000],\n        [\"blocked\", \"high\"], default=\"normal\")\n    return df\n\n# Lookup via merge/map instead of per-row queries\nfx = {\"USD\": 83.2, \"EUR\": 90.1}\ndf[\"amount_inr\"] = df[\"amount\"] * df[\"currency\"].map(fx)\n```\n\n```python\nfrom functools import lru_cache\nfrom itertools import batched          # Python 3.12+\nfrom psycopg2.extras import execute_values\n\n@lru_cache(maxsize=1024)\ndef marketplace_id(code: str) -> int:   # repeated lookups hit memory, not the DB\n    with conn.cursor() as cur:\n        cur.execute(\"SELECT id FROM marketplaces WHERE code = %s\", (code,))\n        return cur.fetchone()[0]\n\ndef load(rows, conn, page=5_000):\n    sql = \"\"\"INSERT INTO orders (order_id, sku, qty) VALUES %s\n             ON CONFLICT (order_id) DO UPDATE SET qty = EXCLUDED.qty\"\"\"\n    with conn, conn.cursor() as cur:            # one transaction\n        for chunk in batched(rows, page):        # generator input OK\n            execute_values(cur, sql, chunk, page_size=page)\n```\n\n```bash\npython -m timeit -s \"s=set(range(100_000)); l=list(s)\" \"99_999 in l\"   # ~ms\npython -m timeit -s \"s=set(range(100_000))\" \"99_999 in s\"             # ~tens of ns\n```",
+  "use_cases_md": "- Replacing `iterrows` in a marketplace report transform with `np.select`/`merge` (minutes → seconds).\n- Converting a per-row `INSERT` loop to `execute_values` pages inside one transaction.\n- Caching SKU→product_id or FX-rate lookups with `lru_cache` during a load.\n- Streaming a large file through generator stages to keep memory flat.\n- Replacing N per-SKU SELECTs with one `WHERE sku = ANY(%s)` query.",
+  "mistakes_md": "- **Optimising without measuring**: effort on the wrong 5%. Fix: profile, then optimise the top item.\n- **`iterrows` / `apply(axis=1)` for arithmetic or conditionals**. Fix: vectorise.\n- **List membership inside loops**. Fix: convert to set once.\n- **Per-row execute + commit**. Fix: batch + single transaction.\n- **Unbounded `cache` on high-cardinality keys** in a long-running service. Fix: `lru_cache(maxsize=)` or TTL.\n- **Materialising huge lists** (`list(reader)`, `readlines()`) just to iterate once. Fix: generators.\n- **Benchmarking with one run / including setup**. Fix: `timeit` with setup, repeat runs.",
+  "best_practices_md": "- Measure → find hot spot → fix algorithm/data structure → re-measure.\n- Sets/dicts for lookup, deque for queues, Counter/defaultdict for tallies.\n- Vectorised pandas/NumPy; `itertuples` if a loop is unavoidable.\n- Generators for pipelines; batch at the I/O boundary.\n- Cache pure, repeatedly-called functions with bounded caches.\n- Push set-based work to PostgreSQL when the data lives there.\n- `''.join` for strings; parameters for SQL.",
+  "my_context_md": "The repo already uses `execute_batch` / `execute_values`, which is the right batching approach — check the processors in `ECSMarketplaceDataUpload` for remaining per-row `execute` loops and per-row commits. Those processors also use pandas `apply` and `groupby`; any `apply(axis=1)` or `iterrows` doing arithmetic, conditionals or dictionary lookups is a vectorisation candidate (`np.select`, `.map`, `merge`). The audit's 641 functions over 100 lines make profiling the first step — don't guess which part is slow.",
+  "revision_notes_md": "- Complexity first: list `in` O(n), set/dict O(1); deque for pops from the left.\n- iterrows ≪ itertuples ≪ vectorised column ops; `np.select`, `.map`, `merge`, `isin`.\n- Generators: lazy, constant memory, single pass.\n- `functools.cache` / `lru_cache(maxsize)`; `cache_info()`; only pure functions.\n- `''.join(parts)` instead of `+=` in loops.\n- DB: `execute_values` / `COPY`; one transaction; avoid N+1 queries.\n- `itertools.batched` (3.12+) for chunking iterables.\n- Measure with `timeit`, `perf_counter`, cProfile.",
+  "exercises_md": "1. Pick one processor with `iterrows`/`apply(axis=1)`, write a vectorised version, assert `df.equals` on a sample, and time both with `timeit`.\n2. Benchmark inserting 50k rows: per-row execute+commit, `executemany`, `execute_values`, and `COPY` into a local test DB; tabulate results.\n3. Add `lru_cache` to a lookup function used in a load loop and print `cache_info()` at the end of a run.\n4. Rewrite a function that builds a list of all rows before writing into a generator pipeline with `itertools.batched`, and compare peak memory with tracemalloc.",
+  "related": [
+    "pandas-cleaning-performance",
+    "py-profiling-debugging",
+    "py-internals-memory",
+    "python-generators-iterators",
+    "psycopg2-essentials",
+    "python-data-structures"
+  ],
+  "flashcards": [
+    {
+      "front": "Why is `df.iterrows()` slow?",
+      "back": "It builds a pandas Series object per row and runs a Python loop; vectorised ops run in C over whole columns."
+    },
+    {
+      "front": "Fastest way to insert 100k rows with psycopg2?",
+      "back": "`COPY` (via `copy_expert`) into a table/staging table, or `execute_values` with a large `page_size`, all within one transaction."
+    },
+    {
+      "front": "`functools.cache` vs `lru_cache`?",
+      "back": "`cache` = unbounded `lru_cache(maxsize=None)`. Use `lru_cache(maxsize=N)` in long-lived processes to bound memory. Both need hashable args."
+    },
+    {
+      "front": "Why `''.join(parts)` instead of `s += x`?",
+      "back": "Repeated concatenation can copy the growing string each time (quadratic); join computes the size once and copies once."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A loop over 1M order rows checks `if row.sku in blocked_skus` where `blocked_skus` is a 50k-element list. Best fix?",
+      "options": [
+        "Sort the list first",
+        "Use `itertuples` instead of `iterrows`",
+        "Convert `blocked_skus` to a set once (or use `df.sku.isin(...)`)",
+        "Use multiprocessing"
+      ],
+      "answer_index": 2,
+      "explanation": "List membership is O(n); a set gives O(1) average lookup, removing the O(n·m) behaviour."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the most efficient way to apply a 3-way conditional label to a DataFrame column?",
+      "options": [
+        "`df.apply(lambda r: ..., axis=1)`",
+        "A for loop over `df.iterrows()`",
+        "`df.itertuples()` with list append",
+        "`np.select([cond1, cond2], [\"a\", \"b\"], default=\"c\")`"
+      ],
+      "answer_index": 3,
+      "explanation": "`np.select` evaluates vectorised conditions over whole arrays."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To see hits and misses of a memoised function, call `fn.____()`.",
+      "answers": [
+        "cache_info"
+      ],
+      "explanation": "`lru_cache` adds `cache_info()` and `cache_clear()` to the wrapped function."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "With psycopg2, `extras.____(cur, sql, rows)` sends many rows as a single multi-row INSERT per page.",
+      "answers": [
+        "execute_values"
+      ],
+      "explanation": "`execute_values` expands `VALUES %s` into pages of rows (default page_size 100)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from functools import lru_cache\n\ncalls = 0\n\n@lru_cache(maxsize=None)\ndef fx_rate(cur):\n    global calls\n    calls += 1\n    return {\"USD\": 83.0, \"EUR\": 90.0}[cur]\n\ntotal = sum(fx_rate(c) for c in [\"USD\", \"EUR\", \"USD\", \"USD\", \"EUR\"])\nprint(total, calls)\nprint(fx_rate.cache_info().hits)",
+      "answers": [
+        "429.0 2\n3"
+      ],
+      "explanation": "Only the first call per currency executes the function (2 misses); the other 3 calls are cache hits."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "gen = (x * x for x in range(5))\nprint(sum(gen), sum(gen))\n\nr = range(10**12)\nprint(type(r).__name__, 10**12 - 1 in r, len(r) == 10**12)",
+      "answers": [
+        "30 0\nrange True True"
+      ],
+      "explanation": "A generator is single-pass, so the second sum sees nothing. `range` is lazy and supports O(1) membership and len without materialising values."
+    },
+    {
+      "type": "debug",
+      "prompt": "This loader takes 40 minutes for 200k rows. What's wrong and how do you fix it?",
+      "code": "def load(df, conn):\n    for _, row in df.iterrows():\n        cur = conn.cursor()\n        cur.execute(\"SELECT id FROM products WHERE sku = %s\", (row[\"sku\"],))\n        pid = cur.fetchone()[0]\n        cur.execute(\"INSERT INTO sales (product_id, qty) VALUES (%s, %s)\",\n                    (pid, row[\"qty\"]))\n        conn.commit()",
+      "answer": "Per row it does: an `iterrows` Series construction, a SELECT round-trip (N+1 lookups), an INSERT round-trip, and a commit (fsync). ~4 expensive operations x 200k.\n\n```python\nfrom psycopg2.extras import execute_values\n\ndef load(df, conn):\n    skus = df[\"sku\"].unique().tolist()\n    with conn, conn.cursor() as cur:                     # one transaction\n        cur.execute(\"SELECT sku, id FROM products WHERE sku = ANY(%s)\", (skus,))\n        ids = dict(cur.fetchall())                        # one lookup query\n        df = df.assign(product_id=df[\"sku\"].map(ids))     # vectorised map\n        rows = list(df[[\"product_id\", \"qty\"]].itertuples(index=False, name=None))\n        execute_values(cur, \"INSERT INTO sales (product_id, qty) VALUES %s\",\n                       rows, page_size=5000)\n```\n(Handle unknown SKUs where `product_id` is NaN before inserting.)",
+      "rubric": [
+        "N+1 SELECTs — fetch all ids in one query",
+        "Per-row INSERT + commit — batch with execute_values in one transaction",
+        "iterrows overhead — use vectorised map/itertuples"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain your process for speeding up a slow ETL job, as you would in an interview.",
+      "answer": "First measure: time each stage (extract, transform, load) with `perf_counter` and run cProfile on a representative input to find where time actually goes. Then attack the biggest cost with the highest-leverage fix: algorithmic problems (O(n²) membership tests → sets/dicts, N+1 queries → one set-based query), row-by-row pandas → vectorised column ops, merges and `np.select`, per-row DB writes → `execute_values`/`COPY` in one transaction, recomputation → `lru_cache`. Fix memory issues with generators/chunking since swapping and GC also cost time. Re-measure after each change and keep a regression benchmark. Only then consider parallelism: threads for I/O-bound stages, processes for CPU-bound Python, or pushing aggregation into PostgreSQL.",
+      "rubric": [
+        "Measure/profile first to find the hot spot",
+        "Algorithmic & data-structure fixes, vectorisation",
+        "Batch I/O (execute_values/COPY, avoid N+1)",
+        "Re-measure; parallelism only after"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Why is `iterrows` slow and what do you use instead?",
+      "difficulty": "easy",
+      "answer_md": "`iterrows` runs a Python-level loop and constructs a new `Series` for every row (with dtype upcasting — ints may become floats when mixed with floats). Per-row overhead is microseconds, so a few million rows means minutes.\n\nInstead, in order of preference:\n- column arithmetic and `.str`/`.dt` accessors;\n- `np.where` / `np.select` for conditionals;\n- `Series.map(dict)` or `merge` for lookups;\n- `groupby().agg()` / `transform()` for per-group logic;\n- if a loop is truly required, `itertuples(index=False)` (namedtuples, much faster) or a list comprehension over `zip(df.a, df.b)`.\n\n```python\ndf[\"net\"] = np.where(df.type.eq(\"refund\"), -df.amount, df.amount)\n```"
+    },
+    {
+      "question": "How do you bulk-load 1M rows into PostgreSQL from Python efficiently?",
+      "difficulty": "medium",
+      "answer_md": "- **COPY** is fastest: stream a CSV (`io.StringIO` or a generator-backed file-like object) via `cur.copy_expert(\"COPY staging_orders FROM STDIN WITH (FORMAT csv)\", buf)`. Load into an **unlogged/temp staging table**, then `INSERT … SELECT … ON CONFLICT DO UPDATE` into the target for upsert semantics.\n- **execute_values** with `page_size` 1k-10k is the simpler option when you need `ON CONFLICT` directly; ~an order of magnitude faster than `executemany`.\n- Do it in **one transaction** (or one per large chunk for restartability), never commit per row.\n- Consider dropping/rebuilding secondary indexes for very large one-off loads, and make the load idempotent so retries are safe.\n- Stream input with generators so Python memory stays flat."
+    },
+    {
+      "question": "When would you use `functools.lru_cache`, and what are the pitfalls?",
+      "difficulty": "medium",
+      "answer_md": "Use it for pure functions called repeatedly with the same hashable arguments: config/secret parsing, FX rate for (currency, date), SKU → product id within a job, compiled regex per pattern, expensive pure computations.\n\nPitfalls:\n- **Unhashable args** (lists, dicts, DataFrames) raise `TypeError`.\n- **Unbounded growth** with `cache`/`maxsize=None` in long-running processes → memory leak; set `maxsize`.\n- **Staleness**: no TTL; values changing in the DB won't refresh (call `cache_clear()` per job or use a TTL cache).\n- **Side effects** run only once — don't cache functions that must execute.\n- On **methods**, the cache holds `self`, keeping instances alive; use `functools.cached_property` or a module-level function.\n- Per-process only: workers in multiprocessing/ECS tasks don't share it (use Redis for that)."
+    }
+  ]
+}

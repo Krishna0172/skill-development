@@ -1,0 +1,184 @@
+{
+  "slug": "py-datetime-json-regex",
+  "title": "Stdlib essentials: datetime, json, re and pathlib",
+  "skill": "python",
+  "extra_skills": [
+    "python-advanced"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "datetime",
+    "zoneinfo",
+    "json",
+    "re",
+    "regex",
+    "pathlib"
+  ],
+  "summary": "Four standard-library modules cover most glue work in backend code: datetime and zoneinfo for time, json for data exchange, re for text patterns and pathlib for file paths. Learn the correct, safe way to use each.",
+  "why_md": "- Timestamps, JSON payloads, log/CSV parsing and file paths appear in nearly every service.\n- Naive vs aware datetimes and `json` serialisation gaps cause real production bugs.\n- Knowing these modules well avoids pulling in dependencies for simple tasks.",
+  "details_md": "### datetime, timedelta, timezone, zoneinfo\n- `datetime(2024, 5, 1, 9, 30)` is **naive** (no timezone) until you attach one. An **aware** datetime has `tzinfo`. Naive and aware values cannot be compared or subtracted (`TypeError`).\n- Store and compute in UTC: `datetime.now(timezone.utc)`. `datetime.utcnow()` is deprecated since 3.12 because it returns a naive value.\n- Convert for display with `zoneinfo`: `dt.astimezone(ZoneInfo(\"Asia/Kolkata\"))`. `zoneinfo` uses the IANA database; on Windows install the `tzdata` package. Handles daylight saving correctly, unlike a fixed offset.\n- `timedelta(days=1, hours=2)` is a duration. `dt + timedelta(...)`, `dt2 - dt1` gives a `timedelta`; use `.total_seconds()`.\n- Parse/format: `datetime.fromisoformat(\"2024-05-01T09:30:00+00:00\")` and `dt.isoformat()` are the safest. `strftime` / `strptime` use codes like `%Y-%m-%d %H:%M:%S`.\n\n### json\n- `json.dumps(obj)` returns a str; `json.loads(s)` parses a str; `json.dump(obj, fp)` / `json.load(fp)` use file objects.\n- Mapping: dict to object, list/tuple to array, str, int/float, True to `true`, None to `null`. Tuples come back as lists and dict keys become strings.\n- Not serialisable by default: `datetime`, `Decimal`, `set`, custom classes. Pass `default=fn` to convert them (e.g. `default=str` or a function returning `isoformat()`).\n- Useful options: `indent=2`, `sort_keys=True`, `ensure_ascii=False`, `separators=(\",\", \":\")` for compact output.\n- `json.loads` raises `json.JSONDecodeError` (a `ValueError`) on bad input; catch that, not a bare `except`.\n\n### re (regular expressions)\n- `re.search(p, s)` finds the first match anywhere; `re.match` only at the start; `re.fullmatch` requires the whole string; `re.findall` returns all matches; `re.finditer` yields match objects; `re.sub(p, repl, s)` replaces; `re.split` splits.\n- Use raw strings `r\"\\d+\"`.\n- Groups: `(...)` captures, `(?P<name>...)` names it, `m.group(\"name\")` or `m.groupdict()`. `(?:...)` groups without capturing.\n- Quantifiers are **greedy** by default (`.*`), add `?` for lazy (`.*?`).\n- Flags: `re.IGNORECASE`, `re.MULTILINE`, `re.VERBOSE`. Compile once with `re.compile` if reused in a loop.\n- Do not parse HTML or nested structures with regex, and beware catastrophic backtracking on nested quantifiers like `(a+)+`.\n\n### pathlib\n`Path` objects replace string juggling with `os.path`: `Path(\"data\") / \"in\" / \"orders.csv\"`, `.name`, `.stem`, `.suffix`, `.parent`, `.with_suffix(\".json\")`, `.exists()`, `.read_text(encoding=\"utf-8\")`, `.write_text(...)`, `.mkdir(parents=True, exist_ok=True)`, `.glob(\"*.csv\")`, `.iterdir()`. `Path.home()` and `Path.cwd()` give common anchors. `PurePosixPath`/`PureWindowsPath` manipulate paths without touching the filesystem.",
+  "code_md": "```python\n# 1. aware datetimes and timedelta\nfrom datetime import datetime, timedelta, timezone\nstart = datetime(2024, 1, 31, 10, 30, tzinfo=timezone.utc)\nprint(start.isoformat())\nprint((start + timedelta(days=30)).date())\nprint(datetime.fromisoformat(\"2024-05-01T09:30:00+00:00\") - start)\n```\n\n```python\n# 2. json with a default= hook for unsupported types\nimport json\nfrom datetime import datetime, timezone\nfrom decimal import Decimal\n\ndef encode(o):\n    if isinstance(o, datetime):\n        return o.isoformat()\n    if isinstance(o, Decimal):\n        return str(o)\n    raise TypeError(f\"{type(o).__name__} not serialisable\")\n\nrow = {\"id\": 7, \"total\": Decimal(\"19.99\"), \"at\": datetime(2024, 5, 1, tzinfo=timezone.utc)}\nprint(json.dumps(row, default=encode, sort_keys=True))\n```\n\n```python\n# 3. regex: named groups, lazy quantifier, sub\nimport re\nm = re.search(r\"(?P<sku>[A-Z]{2}-\\d+)\\s+x(?P<qty>\\d+)\", \"item AB-1234 x3\")\nprint(m.groupdict())\nprint(re.findall(r\"<(.+?)>\", \"<a><b>\"))\nprint(re.sub(r\"\\s+\", \" \", \"a   b \\n c\"))\n```\n\n```python\n# 4. pathlib (no filesystem needed for pure paths)\nfrom pathlib import PurePosixPath\np = PurePosixPath(\"/data/in/orders_2024.csv\")\nprint(p.name, p.stem, p.suffix, p.parent.name, p.with_suffix(\".json\"))\n```",
+  "use_cases_md": "- Normalising marketplace report timestamps to UTC before storing them in PostgreSQL `timestamptz`.\n- Building JSON API payloads containing `Decimal` and `datetime` fields via a `default=` hook.\n- Extracting order ids, SKUs and quantities from semi-structured text or log lines.\n- Finding and organising uploaded files with `Path.glob` and `with_suffix`.\n- Computing date windows (`today - timedelta(days=30)`) for report queries.",
+  "mistakes_md": "- **Mixing naive and aware datetimes** (`TypeError`) or silently treating local time as UTC.\n- **`datetime.utcnow()`** (deprecated; naive): use `datetime.now(timezone.utc)`.\n- **Fixed offsets for DST zones**: use `zoneinfo`.\n- **`json.dumps` on `Decimal`/`datetime`/`set`** raising TypeError; add `default=`.\n- **`re.match` when you wanted `search`**.\n- **Greedy `.*`** swallowing more than intended.\n- **String-concatenating paths** with `+` or hard-coded `\\\\`; use `/` with `Path`.\n- **Bare `except`** around `json.loads`.",
+  "best_practices_md": "- Keep datetimes aware and in UTC internally; convert at the edges.\n- Use ISO 8601 strings (`isoformat`, `fromisoformat`) for interchange.\n- Provide `default=` (or convert upstream) for non-JSON types; catch `json.JSONDecodeError`.\n- Compile and name regexes (`re.VERBOSE`) when they get complex; test them.\n- Use `Path` objects and `encoding=\"utf-8\"` explicitly when reading/writing text.",
+  "my_context_md": "- `ECSMarketplaceDataUpload` and the other report processors parse many date and number formats from marketplace files; check how timezone and parse formats are handled and whether datetimes are naive.\n- The LLM chat backend (`GetLlmData`) stores history and generated SQL; JSON (de)serialisation of messages is a natural place to apply `default=` and `JSONDecodeError` handling.",
+  "revision_notes_md": "- Naive vs aware: cannot mix. Use `datetime.now(timezone.utc)`; `utcnow()` is deprecated.\n- `zoneinfo.ZoneInfo(\"Asia/Kolkata\")` + `astimezone` for display (needs `tzdata` on Windows).\n- `isoformat()` / `fromisoformat()` for interchange.\n- `json.dumps/loads` (str) vs `dump/load` (file); `default=` for Decimal/datetime/set.\n- JSON turns tuples into lists and keys into strings.\n- `re.search` anywhere, `match` start, `fullmatch` whole; `findall`, `sub`.\n- Greedy `.*` vs lazy `.*?`; named groups `(?P<n>..)`.\n- `Path / \"x\"`, `.stem`, `.suffix`, `.with_suffix`, `.read_text`, `.glob`.",
+  "exercises_md": "1. Parse the string `\"2024-03-10 23:30\"` as IST (Asia/Kolkata), convert to UTC and print the ISO string. Then add 1 day.\n2. Serialise a dict with a `Decimal`, a `datetime` and a `set` to JSON using one `default=` function, then load it back.\n3. Write a regex with named groups that extracts `order_id`, `sku` and `qty` from lines like `ORD-9921 AB-12 x3`; test with `re.VERBOSE`.\n4. With `pathlib`, list all `.csv` files under a folder recursively and print each with its suffix changed to `.json`.",
+  "related": [
+    "py-file-handling",
+    "py-strings-formatting",
+    "rest-api-design",
+    "py-logging"
+  ],
+  "flashcards": [
+    {
+      "front": "Naive vs aware datetime?",
+      "back": "Naive has no tzinfo; aware does. They cannot be compared or subtracted."
+    },
+    {
+      "front": "What replaces `datetime.utcnow()`?",
+      "back": "`datetime.now(timezone.utc)` (utcnow is deprecated since 3.12)."
+    },
+    {
+      "front": "How to JSON-encode a Decimal or datetime?",
+      "back": "Use `json.dumps(obj, default=fn)` where fn converts it (str / isoformat)."
+    },
+    {
+      "front": "`re.match` vs `re.search` vs `re.fullmatch`?",
+      "back": "match: at start; search: anywhere; fullmatch: entire string."
+    },
+    {
+      "front": "Greedy vs lazy quantifier?",
+      "back": "`.*` takes as much as possible; `.*?` takes as little as possible."
+    },
+    {
+      "front": "Path pieces of `a/b.tar.gz`?",
+      "back": "`.name` = b.tar.gz, `.stem` = b.tar, `.suffix` = .gz, `.suffixes` = ['.tar', '.gz']."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which is the recommended way to get the current time for storage?",
+      "options": [
+        "datetime.now()",
+        "datetime.utcnow()",
+        "datetime.now(timezone.utc)",
+        "time.time() string"
+      ],
+      "answer_index": 2,
+      "explanation": "An aware UTC datetime avoids ambiguity; utcnow() is deprecated and naive."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What happens with `json.dumps({\"t\": datetime.now()})`?",
+      "options": [
+        "Serialises to ISO string",
+        "Serialises to epoch",
+        "TypeError",
+        "Returns null"
+      ],
+      "answer_index": 2,
+      "explanation": "datetime is not JSON serialisable by default; supply `default=`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which pattern matches the shortest text between angle brackets?",
+      "options": [
+        "<.*>",
+        "<.+?>",
+        "<[^]]>",
+        "<.{0}>"
+      ],
+      "answer_index": 1,
+      "explanation": "`+?` is lazy; `.*` would be greedy and span multiple tags."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`re.____(pattern, text)` succeeds only if the pattern matches the entire string.",
+      "answers": [
+        "fullmatch"
+      ],
+      "explanation": "match anchors at the start only; fullmatch requires the whole string."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`json.____(obj)` converts a Python object to a JSON string.",
+      "answers": [
+        "dumps"
+      ],
+      "explanation": "`dump` writes to a file; `dumps` returns a string."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from datetime import datetime, timedelta, timezone\nstart = datetime(2024, 1, 31, 10, 30, tzinfo=timezone.utc)\nprint(start.isoformat())\nprint((start + timedelta(days=30)).date())\nprint(start.strftime(\"%d %b %Y\"))\nprint(datetime(2024, 5, 1, 9, 30, tzinfo=timezone.utc) - start)\n",
+      "answers": [
+        "2024-01-31T10:30:00+00:00\n2024-03-01\n31 Jan 2024\n90 days, 23:00:00"
+      ],
+      "explanation": "2024 is a leap year: Jan 31 + 30 days is Mar 1. The timedelta shows days and time."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import json, re\ns = json.dumps({\"b\": 1, \"a\": [1, None, True], \"t\": (1, 2)}, sort_keys=True)\nprint(s)\nprint(json.loads(s)[\"t\"])\nm = re.search(r\"(?P<sku>[A-Z]{2}-\\d+)\\s+x(?P<qty>\\d+)\", \"item AB-1234 x3\")\nprint(m.groupdict())\nprint(re.findall(r\"<(.+?)>\", \"<a><b>\"))\n",
+      "answers": [
+        "{\"a\": [1, null, true], \"b\": 1, \"t\": [1, 2]}\n[1, 2]\n{'sku': 'AB-1234', 'qty': '3'}\n['a', 'b']"
+      ],
+      "explanation": "Keys sorted; tuples become arrays then lists; named groups captured; lazy quantifier finds both tags."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "import json\nfrom datetime import datetime\npayload = {\"at\": datetime(2024, 5, 1)}\nprint(json.dumps(payload))\n\nimport re\nhtml = \"<b>one</b><b>two</b>\"\nprint(re.findall(r\"<b>(.*)</b>\", html))\n",
+      "answer": "(1) `datetime` is not JSON serialisable: TypeError. Use `json.dumps(payload, default=lambda o: o.isoformat())` (and prefer an aware UTC datetime). (2) `.*` is greedy so it returns one long match `['one</b><b>two']`; use the lazy `(.*?)` to get `['one', 'two']` (or a real HTML parser for anything complex).",
+      "rubric": [
+        "Provides default= or isoformat conversion",
+        "Identifies greedy vs lazy quantifier",
+        "Mentions an HTML parser for real HTML"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain naive vs aware datetimes and how you would handle timezones in a backend.",
+      "answer": "A naive datetime carries no timezone, so its meaning depends on assumptions (is it UTC or local?). An aware datetime has tzinfo and an unambiguous instant. Python refuses to compare or subtract naive and aware values. Good practice: parse input into aware datetimes, convert to UTC for storage and calculations (and use PostgreSQL `timestamptz`), and convert to a user's zone with `zoneinfo.ZoneInfo` only when displaying. Use IANA zone names, not fixed offsets, so daylight-saving changes are handled.",
+      "rubric": [
+        "Naive lacks tz, aware has tzinfo",
+        "Store and compute in UTC",
+        "Convert at the edges with zoneinfo/IANA names"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How do you make `json.dumps` handle `Decimal`, `datetime` and `set`?",
+      "answer": "Pass `default=` with a function that returns a JSON-friendly equivalent for unknown types and raises TypeError otherwise: Decimal to str (or float if precision is not critical), datetime to `isoformat()`, set to a sorted list. Alternatively convert the data before dumping, or subclass `json.JSONEncoder` and override `default`.",
+      "rubric": [
+        "default= callback",
+        "Convert Decimal, datetime, set explicitly"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Why is `datetime.utcnow()` discouraged?",
+      "difficulty": "medium",
+      "answer_md": "It returns a *naive* datetime that happens to hold UTC values, so nothing in the object says it is UTC. Passing it around invites bugs: `astimezone()` treats naive values as local time, and comparisons with aware datetimes raise TypeError. It is deprecated from Python 3.12. Use `datetime.now(timezone.utc)`, which is aware and unambiguous."
+    },
+    {
+      "question": "What are the limits of JSON for round-tripping Python data?",
+      "difficulty": "medium",
+      "answer_md": "JSON has only objects, arrays, strings, numbers, booleans and null. Tuples become lists, dict keys become strings (`{1: 'a'}` loads as `{'1': 'a'}`), `set`, `datetime`, `Decimal`, `bytes` and custom classes are not supported without conversion, and floats lose Decimal precision. NaN/Infinity are emitted by default but are not valid strict JSON. For stronger typing use Pydantic models or store ISO strings and convert explicitly on load."
+    },
+    {
+      "question": "What is catastrophic backtracking in regex?",
+      "difficulty": "hard",
+      "answer_md": "Python's `re` is a backtracking engine. Patterns with nested or overlapping quantifiers, like `(a+)+$` or `(\\w+\\s?)*$`, can take exponential time on inputs that almost match, because the engine tries every way to split the text. On untrusted input this becomes a ReDoS vulnerability. Mitigate by writing unambiguous patterns, anchoring, limiting input length, using atomic/possessive constructs (available in `re` from Python 3.11) or avoiding regex for structured data."
+    },
+    {
+      "question": "Why use `pathlib.Path` instead of `os.path` and strings?",
+      "difficulty": "easy",
+      "answer_md": "`Path` is an object that handles separators per OS, supports `/` joining, and bundles operations: `.exists()`, `.read_text()`, `.glob()`, `.suffix`, `.parent`, `.mkdir(parents=True, exist_ok=True)`. Code reads left to right instead of nested `os.path.join(os.path.dirname(...))`, and you avoid hard-coded separators. Convert with `str(path)` for APIs that still want strings (most accept `os.PathLike`)."
+    }
+  ]
+}

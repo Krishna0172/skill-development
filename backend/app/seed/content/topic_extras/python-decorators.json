@@ -1,0 +1,55 @@
+{
+  "slug": "python-decorators",
+  "why_md": "Decorators are how Python frameworks attach behaviour: FastAPI routes, pytest fixtures, `lru_cache`, retry and timing wrappers, and tool registration in LLM agent frameworks. Writing one correctly (`functools.wraps`, factories with arguments, preserving signatures) shows you understand closures and first-class functions - a standard mid-level interview question.",
+  "revision_notes_md": "- `@deco` on `def f` means `f = deco(f)`; runs once at import/definition time.\n- Wrapper pattern: `def wrapper(*args, **kwargs): ...; return fn(*args, **kwargs)`.\n- Always `@functools.wraps(fn)` to keep `__name__`, `__doc__`, `__wrapped__`.\n- Decorator with arguments = factory: `retry(times=3)` returns the real decorator (3 levels).\n- Stacking applies bottom-up: `@a @b def f` -> `a(b(f))`.\n- Registration decorators store the function and return it unchanged.\n- `lru_cache` needs hashable args; on methods it keeps `self` alive.\n- Async functions need an `async def` wrapper that awaits.",
+  "exercises_md": "1. Write `@retry(exceptions=(ConnectionError,), attempts=3, base_delay=0.5)` with exponential backoff and use it on a function that fails twice then succeeds.\n2. Write a `@register(\"amazon_orders\")` decorator that adds processors to a module-level dict, and a `@timed` decorator that logs duration with `logging` (not print).",
+  "my_context_md": "The ECSMarketplaceDataUpload registry dispatcher could use a `@register(report_type)` decorator so each processor declares its own key. That service's deadlock retry and the 88% broad `except` blocks found in the repo are good targets for one reusable `@retry` decorator that catches only specific exceptions (e.g. psycopg2's deadlock error) and logs via `logging`.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To copy the wrapped function's __name__ and __doc__ onto the wrapper, decorate the wrapper with @functools.____(fn).",
+      "answers": [
+        "wraps"
+      ],
+      "explanation": "functools.wraps also sets __wrapped__."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`@a` above `@b` above `def f` is equivalent to f = ____.",
+      "answers": [
+        "a(b(f))"
+      ],
+      "explanation": "Decorators apply bottom-up."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import functools\n\ndef tag(label):\n    def deco(fn):\n        @functools.wraps(fn)\n        def wrapper(*args):\n            return f\"<{label}>\" + fn(*args)\n        return wrapper\n    return deco\n\n@tag(\"a\")\n@tag(\"b\")\ndef name(x):\n    return x.upper()\n\nprint(name(\"sku\"))\nprint(name.__name__)",
+      "answers": [
+        "<a><b>SKU\nname"
+      ],
+      "explanation": "tag('b') wraps first, so its prefix is added inside; tag('a') adds its prefix outermost. wraps keeps the name."
+    },
+    {
+      "type": "debug",
+      "prompt": "`@retry` is used without parentheses and the function never runs properly. Why?",
+      "code": "def retry(times=3):\n    def deco(fn):\n        def wrapper(*a, **kw):\n            for i in range(times):\n                try:\n                    return fn(*a, **kw)\n                except Exception:\n                    pass\n        return wrapper\n    return deco\n\n@retry\ndef sync_orders(): ...",
+      "answer": "`retry` is a factory: `@retry` passes `sync_orders` as `times`, so the name `sync_orders` becomes `deco`. Use `@retry()` (or `@retry(times=3)`). Also: catch specific exceptions, re-raise after the last attempt instead of returning None, and add `functools.wraps`.\n\n```python\ndef retry(times=3, exceptions=(ConnectionError,)):\n    def deco(fn):\n        @functools.wraps(fn)\n        def wrapper(*a, **kw):\n            for i in range(times):\n                try:\n                    return fn(*a, **kw)\n                except exceptions:\n                    if i == times - 1:\n                        raise\n        return wrapper\n    return deco\n\n@retry()\ndef sync_orders(): ...\n```",
+      "rubric": [
+        "Factory decorator must be called: @retry()",
+        "Swallowing Exception and returning None hides failures - re-raise last error",
+        "Catch specific exceptions and use functools.wraps"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain what happens, step by step, when Python executes a decorated function definition.",
+      "answer": "Python first evaluates the decorator expression (for `@retry(3)` that calls the factory). It then creates the function object from the `def`, calls the decorator with it, and binds the *return value* to the function's name. This happens once at definition (usually import) time. Later calls go to whatever the decorator returned - normally a wrapper closure that runs extra logic around the original. Registration decorators return the original function after recording it.",
+      "rubric": [
+        "Decorator expression is evaluated first (factory called if parenthesised)",
+        "Function object is passed to decorator and the name is rebound to the result",
+        "Runs at definition/import time; calls hit the wrapper"
+      ]
+    }
+  ]
+}

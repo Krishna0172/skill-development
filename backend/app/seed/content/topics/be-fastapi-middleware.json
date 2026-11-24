@@ -1,0 +1,152 @@
+{
+  "slug": "be-fastapi-middleware",
+  "title": "FastAPI middleware: ordering, logging, CORS and pure ASGI",
+  "skill": "fastapi",
+  "extra_skills": [
+    "api-design",
+    "python-exceptions-logging"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "middleware",
+    "asgi",
+    "cors",
+    "request-id",
+    "logging",
+    "exception-handlers"
+  ],
+  "summary": "Middleware wraps every request and response, which makes it the right place for cross-cutting concerns: timing, request IDs, structured access logs, CORS, compression. Order matters — the last-added middleware is outermost. Exception handlers, not middleware, should turn domain errors into responses, and performance-sensitive or streaming middleware should be written as pure ASGI instead of `BaseHTTPMiddleware`.",
+  "why_md": "- Request IDs and per-request timing are the foundation of debugging production APIs.\n- Misordered middleware causes real bugs: CORS headers missing on errors, logs without request IDs, auth after rate limiting.\n- Knowing the difference between middleware, dependencies and exception handlers is a common interview probe.\n- AI endpoints stream responses; `BaseHTTPMiddleware` pitfalls show up exactly there.",
+  "details_md": "### What middleware is\nIn ASGI, middleware is an app that wraps another app: it can inspect/modify the `scope`, wrap `receive`/`send`, short-circuit with its own response, or measure what happens inside. In FastAPI you add it with `app.add_middleware(Cls, **opts)` or the `@app.middleware(\"http\")` decorator (which uses `BaseHTTPMiddleware`).\n\n### Ordering\nStarlette builds the stack as: `ServerErrorMiddleware` → user middleware → `ExceptionMiddleware` → router. Among user middleware, **the last added is outermost** — it sees the request first and the response last. So add CORS last if you want it to wrap everything, and request-id/timing middleware outside logging that depends on them.\n\n### Typical middleware\n- **Request ID**: read `X-Request-ID` or generate a UUID, store it in a `contextvars.ContextVar` so log records include it, echo it in the response header.\n- **Timing/access log**: `perf_counter()` around `call_next`, log method, path template, status, duration.\n- **CORS** (`CORSMiddleware`): only for browser clients on another origin. Never combine `allow_origins=[\"*\"]` with credentials.\n- **GZip**, **TrustedHost**, **HTTPSRedirect**.\n\n### Middleware vs dependencies vs exception handlers\n- Middleware: applies to *every* request, has no access to route params or validated models.\n- Dependencies: per-route logic needing typed inputs (auth, DB session, tenant).\n- Exception handlers (`@app.exception_handler(MyError)`): map exceptions to responses. They run inside `ExceptionMiddleware`, so your outer middleware still sees the resulting response. Unhandled exceptions bypass them and reach `ServerErrorMiddleware` (500) — a timing middleware must use `try/finally` to log those too.\n\n### BaseHTTPMiddleware vs pure ASGI\n`@app.middleware(\"http\")` is convenient but adds overhead, has historically had issues with streaming responses and background tasks, and can't easily wrap `receive`. A pure ASGI middleware is a class with `__init__(self, app)` and `async __call__(self, scope, receive, send)` that wraps `send` to observe `http.response.start`. It works for streaming/SSE without buffering.",
+  "code_md": "```python\nimport logging, time, uuid\nfrom contextvars import ContextVar\nfrom fastapi import FastAPI, Request\nfrom fastapi.middleware.cors import CORSMiddleware\n\nrequest_id: ContextVar[str] = ContextVar(\"request_id\", default=\"-\")\nlog = logging.getLogger(\"access\")\napp = FastAPI()\n\n@app.middleware(\"http\")                       # BaseHTTPMiddleware under the hood\nasync def timing_and_request_id(request: Request, call_next):\n    rid = request.headers.get(\"x-request-id\") or uuid.uuid4().hex\n    token = request_id.set(rid)\n    start = time.perf_counter()\n    status = 500\n    try:\n        response = await call_next(request)\n        status = response.status_code\n        response.headers[\"X-Request-ID\"] = rid\n        return response\n    finally:                                   # logs even when an exception escapes\n        ms = (time.perf_counter() - start) * 1000\n        log.info(\"%s %s %s %.1fms rid=%s\", request.method, request.url.path, status, ms, rid)\n        request_id.reset(token)\n\n# added last -> outermost, so CORS headers are applied around everything\napp.add_middleware(CORSMiddleware, allow_origins=[\"https://app.example.com\"],\n                   allow_methods=[\"GET\", \"POST\"], allow_headers=[\"*\"], allow_credentials=True)\n```\n\n```python\nimport time\n\nclass TimingASGIMiddleware:\n    \"\"\"Pure ASGI: no buffering, safe with StreamingResponse/SSE.\"\"\"\n    def __init__(self, app):\n        self.app = app\n\n    async def __call__(self, scope, receive, send):\n        if scope[\"type\"] != \"http\":\n            return await self.app(scope, receive, send)\n        start = time.perf_counter()\n\n        async def send_wrapper(message):\n            if message[\"type\"] == \"http.response.start\":\n                ms = (time.perf_counter() - start) * 1000\n                headers = list(message.get(\"headers\", []))\n                headers.append((b\"server-timing\", f\"app;dur={ms:.1f}\".encode()))\n                message = {**message, \"headers\": headers}\n            await send(message)\n\n        await self.app(scope, receive, send_wrapper)\n\napp.add_middleware(TimingASGIMiddleware)\n```",
+  "use_cases_md": "- Access logs with request ID, seller/org ID and duration shipped to CloudWatch for every API call.\n- Correlating a slow report-download request with the matching Postgres query via the request ID in both logs.\n- CORS for an internal dashboard on a different domain calling the API.\n- Server-Timing headers on an LLM endpoint to separate retrieval vs generation time.\n- Rejecting oversized uploads early in a pure ASGI middleware before the body is read.",
+  "mistakes_md": "- **Logging only on success**: without `try/finally`, unhandled exceptions produce no access log line.\n- **Putting auth in middleware** when it needs route info or per-route rules — use dependencies.\n- **`allow_origins=[\"*\"]` with `allow_credentials=True`**: browsers reject it and it signals misunderstanding; list explicit origins.\n- **Reading `await request.body()` in `BaseHTTPMiddleware`** for logging: can consume/buffer large bodies; log sizes, not bodies.\n- **Misordering**: adding CORS first means it's innermost, so responses created by outer middleware lack CORS headers.\n- **Logging the raw path with IDs** as a metric label — high cardinality; use the route template.",
+  "best_practices_md": "- Keep middleware few, fast and generic; anything route-specific is a dependency.\n- Use `contextvars` for request-scoped data (request ID) so logging filters can read it.\n- Prefer pure ASGI middleware for hot paths and streaming.\n- Use `try/finally` for timing and logging.\n- Document the intended order next to the `add_middleware` calls.\n- Map domain exceptions in exception handlers, not middleware `try/except`.",
+  "my_context_md": "Your codebase uses `print()` 11x more than `logging`. A request-id + timing middleware feeding structured `logging` is the HTTP-service equivalent of what your ECS services lack: one log line per request you can search by ID. The Flask services (`ECSLlmQueryProcess`) would get the same benefit from Flask's `before_request`/`after_request` hooks.",
+  "revision_notes_md": "- Stack: ServerErrorMiddleware → user middleware (last added = outermost) → ExceptionMiddleware → router.\n- `@app.middleware(\"http\")` = BaseHTTPMiddleware; `await call_next(request)`.\n- Pure ASGI: `__call__(scope, receive, send)`, wrap `send` to see `http.response.start`.\n- Request ID in a `ContextVar`, echoed in `X-Request-ID`.\n- Timing/logging inside `try/finally`.\n- CORS only for browsers; explicit origins with credentials.\n- Exception handlers map errors → responses; middleware is for cross-cutting concerns.\n- Route-specific logic (auth, DB) → dependencies.",
+  "exercises_md": "1. Write a request-ID middleware plus a `logging.Filter` that injects the ID into every log record; prove two concurrent requests keep their own IDs.\n2. Rewrite the timing middleware as pure ASGI and verify it works with a `StreamingResponse` that yields 5 chunks with sleeps.\n3. Add three middlewares that print on enter/exit, then reorder them and record the order printed.\n4. Raise an unhandled exception in a route and confirm your access log still records status 500 and duration.",
+  "related": [
+    "be-request-lifecycle",
+    "be-api-error-handling",
+    "py-logging",
+    "fastapi-essentials",
+    "server-sent-events",
+    "web-security-owasp"
+  ],
+  "flashcards": [
+    {
+      "front": "Which user middleware runs first on the request in Starlette/FastAPI?",
+      "back": "The one added last — it's the outermost layer."
+    },
+    {
+      "front": "Why use a ContextVar for request IDs?",
+      "back": "It's request-scoped across awaits and threads started via context copy, so log filters can read the current request's ID safely."
+    },
+    {
+      "front": "Why prefer pure ASGI middleware over BaseHTTPMiddleware for streaming?",
+      "back": "It wraps `send` directly without buffering or extra task overhead, so streaming/SSE and background tasks behave correctly."
+    },
+    {
+      "front": "Where do domain exceptions become HTTP responses?",
+      "back": "In exception handlers registered with `@app.exception_handler`, run by ExceptionMiddleware inside the user middleware."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You need per-route authorization that depends on a path parameter (`/orgs/{org_id}/...`). Where should it go?",
+      "options": [
+        "A dependency attached to the route or router",
+        "A global middleware",
+        "An exception handler",
+        "The Uvicorn config"
+      ],
+      "answer_index": 0,
+      "explanation": "Dependencies get typed route params and can be scoped per router; middleware runs before routing and has no validated params."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A timing middleware logs only after `response = await call_next(request)`. What's missing from its logs?",
+      "options": [
+        "Requests that returned 404",
+        "Requests that returned 422",
+        "Requests where an unhandled exception escaped the handler",
+        "Requests with CORS preflight"
+      ],
+      "answer_index": 2,
+      "explanation": "404 and 422 are normal responses. An unhandled exception propagates out of `call_next`, skipping the log line unless it's in `finally`."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In Starlette, among middlewares added with `add_middleware`, the one added ____ is the outermost.",
+      "answers": [
+        "last",
+        "last one",
+        "most recently"
+      ],
+      "explanation": "Each add_middleware call wraps the existing stack."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A pure ASGI middleware observes the response status by wrapping the `____` callable and checking for `http.response.start` messages.",
+      "answers": [
+        "send"
+      ],
+      "explanation": "Responses are emitted through `send`; wrapping it lets you read/modify status and headers."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib code mimics a pure ASGI middleware that wraps `send`. What does it print?",
+      "code": "import asyncio\n\nasync def app(scope, receive, send):\n    await send({\"type\": \"http.response.start\", \"status\": 201, \"headers\": []})\n    await send({\"type\": \"http.response.body\", \"body\": b\"ok\"})\n\ndef add_header(app):\n    async def mw(scope, receive, send):\n        async def send_wrapper(msg):\n            if msg[\"type\"] == \"http.response.start\":\n                msg = {**msg, \"headers\": msg[\"headers\"] + [(b\"x-request-id\", b\"abc\")]}\n            await send(msg)\n        await app(scope, receive, send_wrapper)\n    return mw\n\nasync def server_send(msg):\n    print(msg[\"type\"], msg.get(\"status\", \"-\"), msg.get(\"headers\", msg.get(\"body\")))\n\nasyncio.run(add_header(app)({\"type\": \"http\"}, None, server_send))\n",
+      "answers": [
+        "http.response.start 201 [(b'x-request-id', b'abc')]\nhttp.response.body - b'ok'"
+      ],
+      "explanation": "The wrapper only modifies the start message, adding the header; the body message passes through unchanged (it has no status, so the default \"-\" prints)."
+    },
+    {
+      "type": "debug",
+      "prompt": "The browser reports CORS errors only when the API returns a 500 from a custom error middleware. Why?",
+      "code": "app = FastAPI()\napp.add_middleware(CORSMiddleware, allow_origins=[\"https://app.example.com\"],\n                   allow_methods=[\"*\"], allow_headers=[\"*\"])\napp.add_middleware(CatchAllErrorsMiddleware)   # returns JSONResponse(500) on exceptions\n",
+      "answer": "`CatchAllErrorsMiddleware` was added last, so it is **outermost**. When it builds the 500 response itself, that response never passes through `CORSMiddleware` (which is inside it), so it lacks `Access-Control-Allow-Origin` and the browser blocks it.\n\nFix: add CORS last so it wraps everything, or (better) replace the catch-all middleware with exception handlers, which run inside the user middleware stack:\n```python\napp.add_middleware(CatchAllErrorsMiddleware)\napp.add_middleware(CORSMiddleware, allow_origins=[\"https://app.example.com\"],\n                   allow_methods=[\"*\"], allow_headers=[\"*\"])\n```",
+      "rubric": [
+        "Last-added middleware is outermost",
+        "Responses created by an outer middleware skip inner CORS middleware",
+        "Fix: add CORS last or use exception handlers"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain when you'd use middleware, a dependency, or an exception handler in FastAPI, with one example of each.",
+      "answer": "- **Middleware**: cross-cutting, route-agnostic behaviour for every request — request IDs, timing/access logs, CORS, gzip. It runs before routing, so it has no typed params.\n- **Dependency**: per-route logic needing validated inputs or resources — current user, tenant-scoped repository, DB session per request. Can be applied at router level.\n- **Exception handler**: translating exceptions to HTTP responses consistently — e.g. `OrderNotFound` → 404 with the standard error body, `RequestValidationError` → custom 422 format.\nRule of thumb: if it needs route context, it's a dependency; if it's about mapping errors, it's a handler; if it's about every byte in and out, it's middleware.",
+      "rubric": [
+        "Middleware for cross-cutting concerns before routing",
+        "Dependencies for per-route typed logic (auth, DB)",
+        "Exception handlers for mapping errors to responses",
+        "Concrete example for each"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you make every log line emitted during a request (including from deep service code) contain that request's ID?",
+      "answer": "Generate/read the ID in middleware and store it in a `contextvars.ContextVar`. Add a `logging.Filter` (or use a `LogRecord` factory) that sets `record.request_id = request_id.get()` and include `%(request_id)s` in the formatter. ContextVars are isolated per asyncio task and copied into threadpool calls, so concurrent requests don't mix IDs. Echo the ID in the `X-Request-ID` response header and forward it to downstream calls.",
+      "rubric": [
+        "ContextVar set in middleware",
+        "logging Filter/formatter reads it",
+        "Concurrency-safe per request; echo/propagate the header"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Design the observability middleware for a new FastAPI service. What does it record and how?",
+      "difficulty": "medium",
+      "answer_md": "One pure ASGI middleware (outermost after CORS) that: reads `X-Request-ID` or generates a UUID; stores it in a ContextVar; wraps `send` to capture the status code from `http.response.start` and to add `X-Request-ID`; measures duration with `perf_counter()` in `try/finally` so exceptions are timed as 500s. At the end it emits one structured JSON log: method, **route template** (from `scope[\"route\"].path` when available, to keep cardinality low), status, duration_ms, request_id, org_id if known. A logging filter adds request_id to all other log lines. Metrics (request count/latency histogram by route and status) come from the same place, and the request ID is forwarded on outbound httpx calls for correlation. Pure ASGI keeps streaming responses unbuffered."
+    },
+    {
+      "question": "What problems can `BaseHTTPMiddleware` cause, and how do you avoid them?",
+      "difficulty": "hard",
+      "answer_md": "`BaseHTTPMiddleware` (what `@app.middleware(\"http\")` uses) runs the downstream app in a separate task and passes the response back through `call_next`. Historically this caused problems: overhead on every request, `contextvars` changes made downstream not visible upstream, issues with streaming responses and background tasks, and difficulty reading the request body without consuming it for the endpoint. Many were fixed in newer Starlette versions, but it's still heavier and less transparent than ASGI. Avoid it by writing pure ASGI middleware: a class with `async __call__(scope, receive, send)` wrapping `send` (and `receive` if needed). It doesn't buffer, works naturally with SSE/StreamingResponse, and has negligible overhead. Use `BaseHTTPMiddleware` only for quick, simple cases."
+    }
+  ]
+}

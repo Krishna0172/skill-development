@@ -1,0 +1,67 @@
+{
+  "slug": "postgres-upsert",
+  "why_md": "- Idempotent loads are the backbone of data ingestion: re-running a file must not duplicate rows.\n- `INSERT ... ON CONFLICT` is atomic under concurrency, unlike SELECT-then-INSERT, which races.\n- Choosing DO NOTHING vs DO UPDATE and how to merge columns is a design decision interviewers probe.\n- The same idea (idempotent writes keyed on a natural key) carries over to AI pipelines that ingest documents or store model outputs.",
+  "revision_notes_md": "- Conflict target `(cols)` must match a unique index/constraint (or `ON CONSTRAINT name`).\n- `EXCLUDED.col` = the value proposed for insertion; `t.col` (table alias) = existing value.\n- `DO NOTHING` keeps the first version; `DO UPDATE SET ...` merges.\n- `COALESCE(EXCLUDED.col, t.col)` = only overwrite when the new value is non-NULL.\n- `DO UPDATE ... WHERE t.col IS DISTINCT FROM EXCLUDED.col` skips no-op updates (fewer dead tuples).\n- The same key twice in one INSERT statement → 'ON CONFLICT DO UPDATE command cannot affect row a second time'; de-duplicate first.\n- `RETURNING (xmax = 0) AS inserted` tells inserts from updates.\n- Sort batch rows by key to reduce deadlocks between concurrent batches.",
+  "exercises_md": "1. Build a bulk upsert with `psycopg2.extras.execute_values` for 50k order rows that (a) de-duplicates keys inside the batch, (b) sorts by key, (c) skips no-op updates with a WHERE clause. Time it vs `execute_batch`.\n2. Write a pytest that loads the same CSV twice and asserts row counts and column values are unchanged after the second run.",
+  "my_context_md": "Your `python-postgres` services use `INSERT ... ON CONFLICT DO UPDATE SET col = COALESCE(EXCLUDED.col, t.col)` with `execute_batch` / `execute_values`, so partial reports fill columns without wiping earlier values. `ECSMarketplaceDataUpload` also has a deadlock retry; de-duplicating and sorting each batch by its conflict key is the standard way to reduce how often that retry fires.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "Inside `ON CONFLICT ... DO UPDATE`, the pseudo-table holding the row you tried to insert is called ____.",
+      "answers": [
+        "excluded",
+        "excluded.*"
+      ],
+      "explanation": "EXCLUDED refers to the proposed row; the table name/alias refers to the existing row."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`INSERT ... ON CONFLICT (sku) DO ____` silently skips rows whose sku already exists.",
+      "answers": [
+        "nothing"
+      ],
+      "explanation": "DO NOTHING ignores conflicting rows without error."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.execute(\"CREATE TABLE inv(sku TEXT PRIMARY KEY, qty INT, price INT)\")\ndb.execute(\"INSERT INTO inv VALUES ('A', 5, 100)\")\nsql = '''INSERT INTO inv AS t VALUES (?, ?, ?)\nON CONFLICT(sku) DO UPDATE SET\n  qty = excluded.qty,\n  price = COALESCE(excluded.price, t.price)'''\ndb.execute(sql, (\"A\", 7, None))\ndb.execute(sql, (\"B\", 1, None))\nprint(db.execute(\"SELECT * FROM inv ORDER BY sku\").fetchall())",
+      "answers": [
+        "[('A', 7, 100), ('B', 1, None)]"
+      ],
+      "explanation": "For A, qty is overwritten while COALESCE keeps the old price because the new one is NULL. B has no conflict, so it is inserted as-is."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.execute(\"CREATE TABLE t(k TEXT PRIMARY KEY, v INT)\")\ndb.execute(\"INSERT INTO t VALUES ('a', 1)\")\nrows = db.execute('''INSERT INTO t VALUES ('a', 2), ('b', 3)\nON CONFLICT(k) DO NOTHING RETURNING k, v''').fetchall()\nprint(rows, db.execute(\"SELECT v FROM t WHERE k='a'\").fetchone()[0])",
+      "answers": [
+        "[('b', 3)] 1"
+      ],
+      "explanation": "RETURNING only returns rows actually inserted or updated; the skipped 'a' row is not returned and keeps v = 1."
+    },
+    {
+      "type": "debug",
+      "prompt": "This batch upsert fails with 'ON CONFLICT DO UPDATE command cannot affect row a second time'. Why, and how do you fix it in Python?",
+      "code": "rows = [(101, 7, 'shipped'), (102, 7, 'paid'), (101, 7, 'delivered')]\nexecute_values(cur, '''\n  INSERT INTO orders (id, orgid, status) VALUES %s\n  ON CONFLICT (id, orgid) DO UPDATE SET status = EXCLUDED.status\n''', rows)",
+      "answer": "The same key `(101, 7)` appears twice in **one** INSERT statement. PostgreSQL can't decide which proposed row should win, so it refuses to update the same row twice in one command.\n\nDe-duplicate (keeping the last occurrence) and sort before sending:\n```python\nlatest = {}\nfor r in rows:\n    latest[(r[0], r[1])] = r          # last one wins\nrows = sorted(latest.values(), key=lambda r: (r[0], r[1]))\nexecute_values(cur, SQL, rows)\n```\nSorting by key also reduces deadlocks between concurrent batches.",
+      "rubric": [
+        "Duplicate conflict key within one statement",
+        "De-duplicate the batch by key before sending",
+        "Decide which duplicate wins (e.g. last)",
+        "Sorting by key helps avoid deadlocks"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Why is `INSERT ... ON CONFLICT` better than 'SELECT to check, then INSERT or UPDATE' in application code?",
+      "answer": "The check-then-act version has a race: two workers both SELECT, both see no row, both INSERT → one gets a unique violation (or, without a constraint, you get duplicates). It also costs two round-trips per row.\n\n`ON CONFLICT` does the check and the write atomically inside PostgreSQL using the unique index (speculative insertion): if a concurrent insert of the same key commits first, your statement takes the conflict branch instead of failing. It works in batches (`execute_values`), returns results with `RETURNING`, and makes loads idempotent — re-running a file produces the same table.\n\nRequirements: a unique index/constraint matching the conflict target, and NOT NULL key columns (NULLs never conflict).",
+      "rubric": [
+        "Check-then-insert races under concurrency",
+        "ON CONFLICT is atomic using the unique index",
+        "Fewer round-trips; batchable; idempotent reloads",
+        "Needs a matching unique constraint (and non-NULL keys)"
+      ]
+    }
+  ]
+}

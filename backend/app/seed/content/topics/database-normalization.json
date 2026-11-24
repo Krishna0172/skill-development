@@ -1,0 +1,123 @@
+{
+  "slug": "database-normalization",
+  "title": "Database Design and Normalization (1NF to 3NF, Keys, Constraints)",
+  "skill": "database-design",
+  "extra_skills": [
+    "postgresql",
+    "sql"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "database-design",
+    "normalization",
+    "3nf",
+    "keys",
+    "constraints",
+    "multi-tenant"
+  ],
+  "summary": "Normalization means storing each fact in exactly one place so updates can't make data contradict itself. In practice you aim for third normal form: every column depends on the key, the whole key, and nothing but the key. You then denormalize deliberately (summary tables, cached columns) where reads need it, and let constraints (PK, FK, UNIQUE, CHECK, NOT NULL) enforce the rules.",
+  "details_md": "### Why normalize\nRedundant data causes **anomalies**:\n- **Update anomaly**: a customer's city is stored on every order; changing it means updating thousands of rows, and missing one leaves contradictions.\n- **Insert anomaly**: you can't record a new product until someone orders it.\n- **Delete anomaly**: deleting the last order of a customer deletes the only record of that customer.\n\n### The normal forms that matter\n- **1NF**: atomic values, no repeating groups. No `sku1, sku2, sku3` columns and no comma-separated lists in a text column; use a child table (`order_items`). (Arrays/JSONB are allowed in PostgreSQL, but think before using them for data you filter or join on.)\n- **2NF**: no partial dependency on part of a composite key. In `order_items(order_id, sku, qty, product_name)`, `product_name` depends only on `sku`, so it belongs in `products`.\n- **3NF**: no transitive dependency. In `orders(id, customer_id, customer_city)`, city depends on customer, not the order, so move it to `customers`.\n- **BCNF** tightens 3NF for edge cases with overlapping candidate keys; 4NF/5NF deal with multi-valued dependencies and are rarely discussed in practice.\n\n### Keys\n- **Natural key**: meaningful in the domain (marketplace order ID + org). **Surrogate key**: generated (`bigint GENERATED ALWAYS AS IDENTITY`, UUID).\n- A common pattern: surrogate primary key for joins, plus a `UNIQUE` constraint on the natural key for idempotent loads.\n- UUIDv7 (time-ordered; native `uuidv7()` arrived in PG 18) avoids the index-locality problems of random UUIDv4.\n\n### Constraints are part of the design\n`NOT NULL`, `UNIQUE`, `CHECK (qty >= 0)`, `FOREIGN KEY ... ON DELETE RESTRICT/CASCADE`, and exclusion constraints. They're enforced for every writer (scripts, ETL, manual fixes), which application-level validation can't guarantee.\n\n### Data types\n`numeric(12,2)` for money (never `float`), `timestamptz` for instants, `date` for calendar dates, `text` rather than `varchar(n)` unless the limit is a real rule, `jsonb` for genuinely schemaless attributes, enums or lookup tables (or CHECK) for statuses.\n\n### When to denormalize\nNormalized schemas favour write correctness; analytics favour fewer joins. Deliberate denormalization: summary/rollup tables, materialized views, a cached `order_total` column, or star schemas (facts + dimensions) for reporting. Always know which copy is the **source of truth** and how the copies are kept in sync (trigger, ETL job, refresh).\n\n### Multi-tenant design\nCommon options: a `tenant_id/orgid` column on every table (shared schema), a schema per tenant, or a database per tenant. With a shared schema, include `orgid` in primary/unique keys and indexes, and filter on it in every query. Distributed PostgreSQL (Citus) builds on this: tables are **distributed by the tenant column**, related tables are **co-located** on it, and unique constraints must include it.\n\n### Schema evolution\nDesign changes should go through versioned **migrations** (Alembic, Flyway, sqitch, or plain numbered SQL files), not ad-hoc ALTERs, so every environment's schema is reproducible.",
+  "code_md": "```sql\n-- 1) Unnormalized: repeated customer data and a repeating group\nCREATE TABLE orders_flat (\n    order_id      text,\n    customer_name text,\n    customer_city text,          -- depends on the customer, not the order (3NF violation)\n    skus          text           -- 'SKU1,SKU2,SKU3' (1NF violation)\n);\n```\n\n```sql\n-- 2) Normalized (3NF) with constraints\nCREATE TABLE customers (\n    id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    orgid int    NOT NULL,\n    name  text   NOT NULL,\n    city  text\n);\n\nCREATE TABLE products (\n    sku   text PRIMARY KEY,\n    name  text NOT NULL,\n    price numeric(12,2) NOT NULL CHECK (price >= 0)\n);\n\nCREATE TABLE orders (\n    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    orgid       int    NOT NULL,\n    external_id text   NOT NULL,                       -- marketplace order id\n    customer_id bigint NOT NULL REFERENCES customers(id),\n    status      text   NOT NULL CHECK (status IN ('PENDING','SHIPPED','DELIVERED','RTO','CANCELLED')),\n    ordered_at  timestamptz NOT NULL,\n    UNIQUE (orgid, external_id)                         -- natural key for idempotent loads\n);\n\nCREATE TABLE order_items (\n    order_id   bigint NOT NULL REFERENCES orders(id) ON DELETE CASCADE,\n    sku        text   NOT NULL REFERENCES products(sku),\n    qty        int    NOT NULL CHECK (qty > 0),\n    unit_price numeric(12,2) NOT NULL,                 -- price at time of sale (intentional copy)\n    PRIMARY KEY (order_id, sku)\n);\nCREATE INDEX ON orders (customer_id);                  -- FKs are not indexed automatically\n```\n\n```sql\n-- 3) Deliberate denormalization for reporting\nCREATE MATERIALIZED VIEW daily_sales AS\nSELECT o.orgid, o.ordered_at::date AS day, SUM(i.qty * i.unit_price) AS revenue\nFROM orders o JOIN order_items i ON i.order_id = o.id\nGROUP BY 1, 2;\n\nCREATE UNIQUE INDEX ON daily_sales (orgid, day);       -- required for CONCURRENTLY\nREFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales;    -- readers aren't blocked\n```",
+  "use_cases_md": "- Designing tables for a new feature (orders, items, payments, settlements) without update anomalies.\n- Defining natural unique keys that make ETL upserts idempotent.\n- Adding CHECK/FK constraints so bad marketplace data is rejected at the database edge.\n- Building reporting tables or materialized views on top of a normalized core.\n- Choosing a multi-tenant layout and keys for a SaaS product.",
+  "mistakes_md": "- **Comma-separated values in a column**: can't index, join or constrain them. Use a child table (or a typed array/JSONB when you truly never query by element).\n- **Copying mutable attributes everywhere** (customer city on orders): inconsistencies. Reference them by key; copy only values that are *historical facts* (price at time of sale).\n- **No unique constraint on the natural key**: duplicates on re-runs and no possible `ON CONFLICT`. Add `UNIQUE (orgid, external_id)`.\n- **Using float for money**: rounding errors in reconciliation. Use `numeric`.\n- **`timestamp` without time zone for events**: ambiguous across servers and regions. Use `timestamptz`.\n- **Skipping FKs \"for performance\"** without a reason: orphan rows accumulate. Keep them, and index the FK columns.\n- **Over-normalizing lookups** (a table for every two-value field): add joins with no benefit. A CHECK constraint is often enough.",
+  "best_practices_md": "- Normalize to 3NF by default; denormalize only for measured read needs, with a clear source of truth.\n- Put integrity rules in constraints, not only in application code.\n- Combine a surrogate PK with a UNIQUE natural key.\n- Include the tenant column in keys and indexes in multi-tenant schemas.\n- Name constraints and indexes consistently; version every change as a migration.\n- Store historical facts (price paid, fee charged) on the transaction row, since they must not change when the master data changes.",
+  "my_context_md": "Your schemas are multi-tenant: inventory and orders are keyed on `(id, orgid)`, which is a composite natural key that makes your `ON CONFLICT` upserts idempotent. On Citus that key also has to include the distribution column for uniqueness to be enforceable. Per-org settings live in their own table (`fs-organisations-channels-db`) rather than being copied onto every row, which is normalization in practice. A known gap is that you haven't used migrations; adding versioned migrations (e.g. Alembic, if you pick up SQLAlchemy) would be the natural next step for managing schema changes like these.",
+  "related": [
+    "postgres-indexes",
+    "postgres-upsert",
+    "sql-joins",
+    "sqlalchemy-essentials",
+    "dynamodb-essentials",
+    "transactions-isolation"
+  ],
+  "flashcards": [
+    {
+      "front": "3NF in one sentence?",
+      "back": "Every non-key column depends on the key, the whole key, and nothing but the key."
+    },
+    {
+      "front": "What is an update anomaly?",
+      "back": "The same fact stored in many rows; updating some but not all leaves contradictory data."
+    },
+    {
+      "front": "Surrogate vs natural key?",
+      "back": "Surrogate: generated, meaningless ID. Natural: domain-meaningful (e.g. marketplace order ID + org). Common pattern: surrogate PK + UNIQUE natural key."
+    },
+    {
+      "front": "Correct PostgreSQL type for money?",
+      "back": "numeric(p, s), e.g. numeric(12,2); never float."
+    },
+    {
+      "front": "When is copying a value onto a row correct (not a 3NF violation)?",
+      "back": "When it's a historical fact at transaction time, e.g. unit_price paid on an order item."
+    },
+    {
+      "front": "Does PostgreSQL auto-index foreign key columns?",
+      "back": "No; only PRIMARY KEY and UNIQUE constraints get indexes automatically."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "`order_items(order_id, sku, qty, product_name)` with PK (order_id, sku) violates which normal form?",
+      "options": [
+        "1NF",
+        "2NF",
+        "3NF only",
+        "None"
+      ],
+      "answer_index": 1,
+      "explanation": "product_name depends on part of the composite key (sku): a partial dependency."
+    },
+    {
+      "question": "Storing `customer_city` on the orders table is mainly a...",
+      "options": [
+        "1NF violation",
+        "BCNF-only issue",
+        "Partial dependency (2NF violation)",
+        "Transitive dependency (3NF violation)"
+      ],
+      "answer_index": 3,
+      "explanation": "order -> customer -> city: city depends on the order only through the customer."
+    },
+    {
+      "question": "Best way to make re-running an orders import idempotent?",
+      "options": [
+        "Add UNIQUE (orgid, external_id) and upsert on it",
+        "Use UUIDv4 primary keys",
+        "Truncate the table first",
+        "Use SERIALIZABLE"
+      ],
+      "answer_index": 0,
+      "explanation": "A natural-key unique constraint lets ON CONFLICT detect rows already loaded."
+    },
+    {
+      "question": "Requirement for REFRESH MATERIALIZED VIEW CONCURRENTLY?",
+      "options": [
+        "No indexes on the view",
+        "SERIALIZABLE isolation",
+        "A unique index on the materialized view",
+        "PostgreSQL 17"
+      ],
+      "answer_index": 2,
+      "explanation": "CONCURRENTLY diffs old and new contents using a unique index."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain 1NF, 2NF and 3NF with an e-commerce example.",
+      "difficulty": "easy",
+      "answer_md": "Start from `orders_flat(order_id, customer_id, customer_city, skus, product_names)`.\n\n- **1NF (atomic values)**: `skus = 'A,B,C'` is a repeating group in one column. Split it out into `order_items(order_id, sku, qty)`, one row per item.\n- **2NF (no partial dependencies)**: in `order_items` with key `(order_id, sku)`, a `product_name` column would depend only on `sku`, part of the key. Move it to `products(sku, name, price)`.\n- **3NF (no transitive dependencies)**: `orders(order_id, customer_id, customer_city)`: city depends on the customer, not on the order. Move it to `customers(id, city)`.\n\nResult: `customers`, `products`, `orders(id, customer_id, ...)`, `order_items(order_id, sku, qty, unit_price)`. Each fact lives in one place, so changing a city is a single-row update.\n\nNote that `unit_price` on order_items is *not* a violation: the price paid is a historical fact of that sale, distinct from the current list price in `products`."
+    },
+    {
+      "question": "When and how would you denormalize a schema?",
+      "difficulty": "medium",
+      "answer_md": "Denormalize when **measured** read performance or simplicity needs it, typically dashboards and reports that join and aggregate millions of rows on every request. Keep the normalized tables as the **source of truth** and derive the denormalized copies from them.\n\nOptions, from least to most effort:\n1. **Materialized view**: `CREATE MATERIALIZED VIEW daily_sales AS ...`, refreshed on a schedule (`REFRESH ... CONCURRENTLY` needs a unique index). Simple, but stale between refreshes.\n2. **Summary table maintained by ETL**: upsert per `(orgid, day)` after each load. Incremental and fast.\n3. **Cached columns** (e.g. `orders.items_total`) kept in sync by triggers or application code. Fast reads, but more write complexity and risk of drift.\n4. **Separate analytics store** (star schema in a warehouse) for heavy BI.\n\nAlways define how drift is detected and corrected, e.g. a periodic job that recomputes and compares. Reconciliation itself is a good example of why a single source of truth matters."
+    },
+    {
+      "question": "How would you design keys for a multi-tenant SaaS table that's loaded from external marketplace reports?",
+      "difficulty": "hard",
+      "answer_md": "Requirements: tenant isolation, idempotent re-loads of the same report, efficient tenant-scoped queries, and possibly horizontal scaling.\n\n```sql\nCREATE TABLE orders (\n  orgid       int    NOT NULL,\n  external_id text   NOT NULL,              -- ID from the marketplace\n  channel     text   NOT NULL,\n  status      text   NOT NULL,\n  total       numeric(12,2),\n  updated_at  timestamptz NOT NULL DEFAULT now(),\n  PRIMARY KEY (orgid, channel, external_id)\n);\nCREATE INDEX ON orders (orgid, updated_at DESC);\n```\n\n- **Natural composite key** including the tenant: external IDs are only unique within a tenant (and possibly within a channel), so the key must include `orgid` (and `channel` if two marketplaces can reuse IDs).\n- **Idempotency**: loads use `INSERT ... ON CONFLICT (orgid, channel, external_id) DO UPDATE`.\n- **Indexes lead with orgid** because every query is tenant-scoped.\n- **Sharding**: in Citus, distribute by `orgid` and co-locate related tables on it, so joins and upserts route to a single shard. Unique keys must include the distribution column, which this design already does.\n- Optionally add a surrogate `bigint` id if other tables need a compact FK, keeping the natural key UNIQUE.\n- Consider row-level security (`CREATE POLICY ... USING (orgid = current_setting('app.orgid')::int)`) as defence in depth against missing tenant filters."
+    }
+  ]
+}

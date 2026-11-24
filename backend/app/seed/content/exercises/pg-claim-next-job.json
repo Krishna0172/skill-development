@@ -1,0 +1,98 @@
+{
+  "slug": "pg-claim-next-job",
+  "title": "Claim the next job from a job queue table",
+  "category": "postgresql",
+  "language": "sql",
+  "difficulty": "hard",
+  "skill": "transactions-locking",
+  "concepts": [
+    "job queue",
+    "UPDATE with subquery",
+    "ORDER BY ... LIMIT 1",
+    "FOR UPDATE SKIP LOCKED",
+    "retry limits"
+  ],
+  "related_topics": [
+    "be-postgres-locking-deadlocks",
+    "transactions-isolation",
+    "message-queues"
+  ],
+  "problem_md": "A job runner polls a `jobs` table. Write the **claim** step for `worker-1`.\n\n```sql\nCREATE TABLE jobs (\n  job_id     INTEGER PRIMARY KEY,\n  job_type   TEXT    NOT NULL,\n  status     TEXT    NOT NULL,      -- 'pending' | 'running' | 'done' | 'failed'\n  priority   INTEGER NOT NULL,      -- higher runs first\n  run_at     TEXT    NOT NULL,      -- earliest time the job may run\n  attempts   INTEGER NOT NULL DEFAULT 0,\n  locked_by  TEXT\n);\n```\n\n**Claimable** jobs: `status = 'pending'`, **or** `status = 'failed' AND attempts < 3` (retryable); and `run_at <= '2024-06-01 10:00:00'` (treat that literal as *now*). Pick **one**: highest `priority`, then earliest `run_at`, then lowest `job_id`.\n\nWrite a single `UPDATE` that claims it: `status = 'running'`, `locked_by = 'worker-1'`, `attempts = attempts + 1`. Only that one row may change. The checker then runs `SELECT job_id, status, attempts, locked_by FROM jobs ORDER BY job_id`.\n\nSQLite (the checker) has no `FOR UPDATE SKIP LOCKED`; write the portable version, and study the PostgreSQL version in the solution.",
+  "examples": [
+    {
+      "input": "now = '2024-06-01 10:00:00'",
+      "output": "exactly one row becomes status='running', locked_by='worker-1', attempts + 1; all others unchanged",
+      "explanation": "Work out by hand why jobs 3 and 6 can't be claimed and how the priority-7 tie is broken."
+    }
+  ],
+  "hints": [
+    "Write the SELECT first: `SELECT job_id FROM jobs WHERE (status = 'pending' OR (status = 'failed' AND attempts < 3)) AND run_at <= '...' ORDER BY priority DESC, run_at, job_id LIMIT 1`.",
+    "Then `UPDATE jobs SET ... WHERE job_id = (<that select>)`. Mind the parentheses around the OR."
+  ],
+  "starter_code": "-- Claim one job for worker-1 (single UPDATE)\nUPDATE jobs\nSET status = 'running', locked_by = 'worker-1', attempts = attempts + 1\nWHERE job_id = (\n  SELECT job_id FROM jobs\n  WHERE status = 'pending' OR status = 'failed' AND attempts < 3\n    AND run_at <= '2024-06-01 10:00:00'\n  ORDER BY priority DESC\n  LIMIT 1\n);\n",
+  "solution_code": "UPDATE jobs\nSET status    = 'running',\n    locked_by = 'worker-1',\n    attempts  = attempts + 1\nWHERE job_id = (\n  SELECT job_id\n  FROM jobs\n  WHERE (status = 'pending' OR (status = 'failed' AND attempts < 3))\n    AND run_at <= '2024-06-01 10:00:00'\n  ORDER BY priority DESC, run_at, job_id\n  LIMIT 1\n);",
+  "solution_md": "Job 6 is out (3 attempts), job 3 isn't due, 1/4 aren't claimable. Among priority 7, job 8 (09:40) is earliest - so 8 is claimed. The starter's unparenthesised `OR` (AND binds tighter) lets job 3 through, and its order lacks tie-breakers.\n\n**Concurrency.** Two workers running this simultaneously can pick the same row. In PostgreSQL:\n\n```sql\nUPDATE jobs SET status='running', locked_by=%s, attempts=attempts+1\nWHERE job_id = (SELECT job_id FROM jobs\n                WHERE (status='pending' OR (status='failed' AND attempts<3)) AND run_at <= now()\n                ORDER BY priority DESC, run_at, job_id\n                LIMIT 1 FOR UPDATE SKIP LOCKED)\nRETURNING job_id, job_type;\n```\n\n`FOR UPDATE` locks the chosen row; `SKIP LOCKED` makes other workers skip rows already locked instead of waiting, so N workers claim N different jobs with no blocking. Keep the claim transaction short (commit, then run the job) and index `(priority DESC, run_at) WHERE status IN ('pending','failed')`.",
+  "tests": {
+    "schema_sql": "CREATE TABLE jobs (\n  job_id     INTEGER PRIMARY KEY,\n  job_type   TEXT    NOT NULL,\n  status     TEXT    NOT NULL,      -- 'pending' | 'running' | 'done' | 'failed'\n  priority   INTEGER NOT NULL,      -- higher runs first\n  run_at     TEXT    NOT NULL,      -- earliest time the job may run\n  attempts   INTEGER NOT NULL DEFAULT 0,\n  locked_by  TEXT\n);\n\nINSERT INTO jobs VALUES\n (1, 'amazon_settlement', 'done',    9, '2024-06-01 08:00:00', 1, 'worker-2'),\n (2, 'flipkart_orders',   'pending', 5, '2024-06-01 09:00:00', 0, NULL),\n (3, 'myntra_returns',    'pending', 7, '2024-06-01 11:00:00', 0, NULL),\n (4, 'amazon_inventory',  'running', 9, '2024-06-01 09:30:00', 1, 'worker-3'),\n (5, 'amazon_orders',     'pending', 7, '2024-06-01 09:45:00', 0, NULL),\n (6, 'nykaa_orders',      'failed',  8, '2024-06-01 09:50:00', 3, NULL),\n (7, 'ajio_orders',       'pending', 7, '2024-06-01 09:45:00', 2, NULL),\n (8, 'meesho_payments',   'failed',  7, '2024-06-01 09:40:00', 1, NULL);",
+    "ordered": true,
+    "check_sql": "SELECT job_id, status, attempts, locked_by FROM jobs ORDER BY job_id",
+    "expected": {
+      "columns": [
+        "job_id",
+        "status",
+        "attempts",
+        "locked_by"
+      ],
+      "rows": [
+        [
+          1,
+          "done",
+          1,
+          "worker-2"
+        ],
+        [
+          2,
+          "pending",
+          0,
+          null
+        ],
+        [
+          3,
+          "pending",
+          0,
+          null
+        ],
+        [
+          4,
+          "running",
+          1,
+          "worker-3"
+        ],
+        [
+          5,
+          "pending",
+          0,
+          null
+        ],
+        [
+          6,
+          "failed",
+          3,
+          null
+        ],
+        [
+          7,
+          "pending",
+          2,
+          null
+        ],
+        [
+          8,
+          "running",
+          2,
+          "worker-1"
+        ]
+      ]
+    }
+  }
+}

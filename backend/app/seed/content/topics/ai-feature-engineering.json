@@ -1,0 +1,149 @@
+{
+  "slug": "ai-feature-engineering",
+  "title": "Feature engineering: dates, SQL aggregates, text n-grams",
+  "skill": "ml-fundamentals",
+  "extra_skills": [
+    "sql-window-functions",
+    "nlp-basics"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "feature-engineering",
+    "date-features",
+    "window-functions",
+    "target-encoding",
+    "n-grams",
+    "tf-idf",
+    "leakage"
+  ],
+  "summary": "Turning raw tables into signals a model can use: calendar features, historical aggregates built with SQL window functions, careful encoding of high-cardinality categories, text features from n-grams and TF-IDF, and the point-in-time discipline that prevents feature leakage.",
+  "why_md": "- On tabular data, good features beat fancy models; it's where most accuracy comes from.\n- Your PostgreSQL window-function skills are directly a feature-engineering superpower.\n- Leaky features are the #1 reason offline results don't survive production.\n- Text features (n-grams/TF-IDF) remain strong, cheap baselines next to embeddings and LLMs.",
+  "details_md": "### Date and time features\nRaw timestamps mean nothing to a model. Extract: day of week, week of year, month, is_weekend, days to/from festivals or sale events (Diwali, Prime Day), days since product launch, hour of day. Cyclical features (hour, month) can be encoded with sin/cos so December is close to January.\n\n### Aggregations — SQL window functions as features\nMost predictive signals are histories: a customer's past return rate, a SKU's 4-week average sales, price change vs last week. In PostgreSQL:\n- `LAG(units, 1) OVER (PARTITION BY sku ORDER BY week)` → last week's sales.\n- `AVG(units) OVER (PARTITION BY sku ORDER BY week ROWS BETWEEN 4 PRECEDING AND 1 PRECEDING)` → trailing mean **excluding the current row**.\n- `COUNT(*) FILTER (WHERE returned) OVER (PARTITION BY customer_id ORDER BY order_ts ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)` → prior returns.\nThe frame must end **before** the current row — otherwise the feature includes the label.\n\n### Point-in-time correctness\nEvery feature must be computed using only data available at the prediction moment. A customer's lifetime return rate computed today, joined onto 2024 orders, leaks the future. Use window frames or as-of joins, and know when data actually lands (settlement data may arrive 7 days late).\n\n### High-cardinality categoricals and target encoding\nSKU, seller id and pincode have thousands of values. Options: frequency encoding, grouping rare values into \"other\", hashing, or **target encoding** (replace category with the mean target). Target encoding leaks badly if computed on the same rows it's used to train on — the category mean includes each row's own label. Use out-of-fold encoding with smoothing (scikit-learn's `TargetEncoder` does cross-fitting automatically in `fit_transform`).\n\n### Text features\n- **Bag of words / n-grams**: counts of single words and phrases (\"not working\", \"poor quality\"). Bigrams capture negation that unigrams miss.\n- **TF-IDF** down-weights words common everywhere.\n- `TfidfVectorizer(ngram_range=(1, 2), min_df=5)` + logistic regression is a strong, fast, explainable text classifier.\n- Embeddings capture meaning beyond exact words (covered later); combine both.\n\n### Ratios and interactions\n`price / category_median_price`, `discount_pct`, `units / stock` often matter more than raw values. Trees find some interactions themselves; linear models need them explicitly.",
+  "code_md": "```sql\n-- Point-in-time SKU features for weekly demand (PostgreSQL)\nSELECT sku, week, units AS target,\n       LAG(units, 1)  OVER w                                        AS lag_1,\n       LAG(units, 52) OVER w                                        AS lag_52,\n       AVG(units) OVER (w ROWS BETWEEN 4 PRECEDING AND 1 PRECEDING) AS avg_prev_4,\n       price / NULLIF(LAG(price, 1) OVER w, 0) - 1                  AS price_change,\n       EXTRACT(WEEK FROM week)::int                                  AS week_of_year\nFROM sku_weekly_sales\nWINDOW w AS (PARTITION BY sku ORDER BY week);\n```\n\n```python\n# Text n-gram features + out-of-fold target encoding\nfrom sklearn.compose import ColumnTransformer\nfrom sklearn.feature_extraction.text import TfidfVectorizer\nfrom sklearn.preprocessing import TargetEncoder\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.pipeline import Pipeline\n\npre = ColumnTransformer([\n    (\"text\", TfidfVectorizer(ngram_range=(1, 2), min_df=5, sublinear_tf=True), \"review_text\"),\n    (\"seller\", TargetEncoder(smooth=\"auto\"), [\"seller_id\"]),   # cross-fitted in fit_transform\n])\nclf = Pipeline([(\"pre\", pre), (\"lr\", LogisticRegression(max_iter=2000))])\nclf.fit(train_df, train_df[\"is_negative\"])\n\n# Which bigrams drive negative predictions?\nvocab = clf.named_steps[\"pre\"].named_transformers_[\"text\"].get_feature_names_out()\n```",
+  "use_cases_md": "- Demand forecasting: lags, rolling means, price change, festival proximity from SQL windows.\n- Return prediction: customer prior return count (point-in-time), price vs category median, category × marketplace.\n- Review classification: TF-IDF uni+bigrams on review text.\n- Seller risk: target-encoded seller id with smoothing.\n- Settlement anomalies: days-to-settle vs marketplace median.",
+  "mistakes_md": "- **Window frames that include the current row** (`ROWS BETWEEN 3 PRECEDING AND CURRENT ROW`) for target-derived features — leakage.\n- **Aggregates computed over all time** and joined to historical rows — future leakage.\n- **Naive target encoding** on the training rows themselves — the model learns its own labels.\n- **Ignoring data arrival delays** — using settlement data that wouldn't exist yet at prediction time.\n- **Fitting TF-IDF vocab on all data** before the split.\n- **Exploding one-hot on 50k SKUs** for linear models without regularisation.",
+  "best_practices_md": "- For every feature, write down \"known at time T?\" — enforce it in SQL frames.\n- Build features in SQL close to the data; keep the same query for training and batch scoring.\n- Use out-of-fold/smoothed target encoding; prefer `TargetEncoder` in a Pipeline.\n- Start text with TF-IDF + logistic regression as a baseline before embeddings/LLMs.\n- Ratios and differences often beat raw values.\n- Check feature importance (permutation) and drop features that only add noise.",
+  "my_context_md": "He writes heavy PostgreSQL (CTEs, `DISTINCT ON`, JSONB) — window functions with `PARTITION BY sku ORDER BY week` and frames ending at `1 PRECEDING` are the direct path to leak-free features. `ECSAmazonReviewRatingPostgres/UpdateNgrams.py` already computes nltk n-grams on review text; those n-grams are exactly bag-of-words features — feeding them (or a `TfidfVectorizer(ngram_range=(1,2))`) into logistic regression turns that existing work into a review classifier.",
+  "revision_notes_md": "- Dates → dow, week, month, festival distance, days since launch; sin/cos for cycles.\n- SQL: `LAG`, `AVG … ROWS BETWEEN k PRECEDING AND 1 PRECEDING`.\n- Frame must end before current row for target-derived features.\n- Point-in-time: only data available at prediction moment (mind arrival delays).\n- High cardinality: frequency, rare→other, hashing, target encoding.\n- Target encoding: out-of-fold + smoothing (`TargetEncoder`).\n- Text: n-grams/TF-IDF + logistic regression baseline.\n- Ratios/differences > raw values.",
+  "exercises_md": "1. Write a PostgreSQL query producing lag_1, lag_52, trailing-4-week average (excluding current week) and price change per SKU-week; verify against a pandas implementation.\n2. Add a point-in-time 'customer prior return count' feature to an orders table using a window frame ending at 1 PRECEDING.\n3. Take the n-grams from the review pipeline idea and train TF-IDF(1,2) + LogisticRegression to predict ratings ≤ 2; list the top 20 negative bigrams.\n4. Compare naive vs out-of-fold target encoding of seller_id on validation AUC.",
+  "related": [
+    "sql-window-functions",
+    "ai-data-preprocessing",
+    "ai-supervised-learning",
+    "ai-embeddings",
+    "ai-model-evaluation"
+  ],
+  "flashcards": [
+    {
+      "front": "SQL frame for a trailing 4-period mean that excludes the current row?",
+      "back": "AVG(x) OVER (PARTITION BY k ORDER BY t ROWS BETWEEN 4 PRECEDING AND 1 PRECEDING)"
+    },
+    {
+      "front": "What is point-in-time correctness?",
+      "back": "Each training row's features use only data that would have been available at that row's prediction moment."
+    },
+    {
+      "front": "Why does naive target encoding leak?",
+      "back": "The category mean includes the row's own label; the model effectively sees the target. Use out-of-fold encoding with smoothing."
+    },
+    {
+      "front": "Why add bigrams to text features?",
+      "back": "They capture phrases and negation ('not good', 'stopped working') that single words miss."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which window frame is safe for a 'previous 3 weeks average sales' feature when the target is this week's sales?",
+      "options": [
+        "ROWS BETWEEN 3 PRECEDING AND CURRENT ROW",
+        "ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING",
+        "ROWS BETWEEN CURRENT ROW AND 3 FOLLOWING",
+        "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+      ],
+      "answer_index": 1,
+      "explanation": "The frame must end before the current row so the target isn't included."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You target-encode seller_id using the mean return rate computed on the full training set, then train on that set. Validation AUC is far lower than training AUC. Why?",
+      "options": [
+        "The encoding included each row's own label, so the model overfit to it",
+        "Target encoding can't be used with trees",
+        "Seller id should be one-hot encoded only",
+        "Validation needs its own target encoding fit on validation labels"
+      ],
+      "answer_index": 0,
+      "explanation": "In-sample target encoding leaks labels, especially for rare sellers; use out-of-fold encoding with smoothing."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In PostgreSQL, ____(units, 1) OVER (PARTITION BY sku ORDER BY week) returns the previous week's units for each SKU.",
+      "answers": [
+        "LAG",
+        "lag"
+      ],
+      "explanation": "LAG reads a previous row in the window partition."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "TfidfVectorizer(ngram_range=(1, ____)) produces both unigrams and bigrams.",
+      "answers": [
+        "2"
+      ],
+      "explanation": "ngram_range=(min_n, max_n)."
+    },
+    {
+      "type": "output",
+      "prompt": "Lag and trailing-mean features in plain Python. What does this print?",
+      "code": "units = [5, 7, 6, 10, 8]\nrows = []\nfor i, u in enumerate(units):\n    lag_1 = units[i - 1] if i >= 1 else None\n    prev = units[max(0, i - 2):i]\n    avg_prev_2 = sum(prev) / len(prev) if len(prev) == 2 else None\n    rows.append((u, lag_1, avg_prev_2))\nprint(rows[3:])",
+      "answers": [
+        "[(10, 6, 6.5), (8, 10, 8.0)]"
+      ],
+      "explanation": "For week 3 (units 10): lag 6, mean of previous two (7, 6) = 6.5. For week 4: lag 10, mean of (6, 10) = 8.0. The current target is never included."
+    },
+    {
+      "type": "output",
+      "prompt": "Word bigrams from a review (like nltk.bigrams). What does this print?",
+      "code": "from collections import Counter\nreviews = [\"not good at all\", \"good product\", \"not good quality\"]\ncounts = Counter()\nfor r in reviews:\n    words = r.split()\n    counts.update(zip(words, words[1:]))\nprint(counts.most_common(1))\nprint(len(counts))",
+      "answers": [
+        "[(('not', 'good'), 2)]\n5"
+      ],
+      "explanation": "Bigrams: (not,good),(good,at),(at,all),(good,product),(not,good),(good,quality). ('not','good') appears twice; 5 distinct bigrams. The bigram captures negation that 'good' alone hides."
+    },
+    {
+      "type": "debug",
+      "prompt": "This feature query is used to train a return-prediction model. Spot the leakage and fix it.",
+      "code": "SELECT o.order_id, o.returned,\n       c.lifetime_return_rate\nFROM orders o\nJOIN (\n    SELECT customer_id, AVG(returned::int) AS lifetime_return_rate\n    FROM orders\n    GROUP BY customer_id\n) c USING (customer_id);",
+      "answer": "`lifetime_return_rate` is computed over **all** of the customer's orders — including the current order's own label and future orders. At prediction time only earlier orders are known. Use a window frame that ends before the current row:\n\n```sql\nSELECT order_id, returned,\n       AVG(returned::int) OVER (\n           PARTITION BY customer_id ORDER BY order_ts\n           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING\n       ) AS prior_return_rate,\n       COUNT(*) OVER (\n           PARTITION BY customer_id ORDER BY order_ts\n           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING\n       ) AS prior_orders\nFROM orders;\n```\nAlso consider return windows: an order from 3 days ago may not have its `returned` label settled yet.",
+      "rubric": [
+        "Identifies aggregate over all time including the current label/future",
+        "Uses a window frame ending at 1 PRECEDING (point-in-time)",
+        "Mentions label maturity / data availability timing"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a data engineer why SQL window functions are so useful for ML feature engineering, and the main trap.",
+      "answer": "Most predictive signals are histories of an entity — a SKU's recent sales, a customer's prior returns, a seller's average settlement delay. Window functions compute these per row without collapsing rows: `PARTITION BY` defines the entity, `ORDER BY` the time axis, and the frame (`ROWS BETWEEN 4 PRECEDING AND 1 PRECEDING`) the lookback. They run in the database next to the data, scale well, and the same query can produce both training data and batch-scoring data, avoiding train/serve skew. The trap is **leakage**: frames that include the current row or later rows (or `GROUP BY` aggregates joined back) put the label or future information into the features. Frames must end before the current row, and you must respect when data actually arrives.",
+      "rubric": [
+        "Window functions compute per-entity histories per row (PARTITION/ORDER/frame)",
+        "Same SQL for training and scoring; runs close to the data",
+        "Trap: frames including current/future rows leak the label"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is target encoding and how do you do it safely?",
+      "difficulty": "medium",
+      "answer_md": "Target encoding replaces a categorical value with a statistic of the target for that category — e.g. seller_id → that seller's mean return rate. It handles high cardinality compactly (one column instead of 50k one-hot columns).\n\nRisks: (1) **leakage** — if computed on the same rows used for training, each row's own label is baked in; rare categories become perfect predictors. (2) **noise** for categories with few rows.\n\nSafe approach:\n- **Out-of-fold**: for each fold, compute encodings from the other folds only (scikit-learn's `TargetEncoder.fit_transform` cross-fits automatically).\n- **Smoothing**: blend the category mean with the global mean weighted by category count.\n- Fit inside the Pipeline; at serving time use encodings learned from the full training set; unseen categories get the global mean.\n- For time series, compute encodings from the past only."
+    },
+    {
+      "question": "You have product reviews and want to flag negative ones. What features would you start with?",
+      "difficulty": "easy",
+      "answer_md": "Start simple and strong: **TF-IDF over word unigrams + bigrams** (`ngram_range=(1,2)`, `min_df` to drop rare noise, `sublinear_tf=True`) feeding **logistic regression**. Bigrams matter because of negation (\"not good\", \"stopped working\"). Optionally add character n-grams to handle typos and Hinglish spellings.\n\nAdd metadata features: star rating if not the label, review length, product category, verified purchase.\n\nThis baseline trains in seconds, is explainable (top-weighted n-grams), and is often within a few points of fancier models. Then compare against sentence embeddings + logistic regression, or an LLM zero-shot classifier on a sample — and only pay for the more complex approach if it clearly wins on the validation metric."
+    }
+  ]
+}

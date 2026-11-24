@@ -1,0 +1,148 @@
+{
+  "slug": "ai-math-linear-algebra",
+  "title": "Linear algebra for ML: vectors, dot products, matrices",
+  "skill": "ml-math-stats",
+  "extra_skills": [
+    "numpy"
+  ],
+  "category": "AI",
+  "difficulty": "beginner",
+  "tags": [
+    "vectors",
+    "dot-product",
+    "cosine-similarity",
+    "matrices",
+    "norms",
+    "embeddings"
+  ],
+  "summary": "The small slice of linear algebra you actually need for ML and GenAI: vectors, dot products, cosine similarity, norms and matrix multiplication. Every embedding is a vector, every neural-network layer is a matrix multiply, and every semantic search is a dot product.",
+  "why_md": "- Embeddings (the core of RAG and semantic search) are just vectors of floats; similarity search is a dot product or cosine similarity.\n- A neural network layer is `y = activation(W @ x + b)`; reading model code means reading matrix shapes.\n- Shape errors (`(32, 768) @ (512, 768)`) are the #1 bug in ML code; knowing the rules makes them obvious.\n- Interviewers for AI engineering roles routinely ask \"why cosine and not Euclidean?\" or \"what does normalising embeddings buy you?\".",
+  "details_md": "### Vectors\nA vector is an ordered list of numbers, e.g. a product described as `[price, rating, days_since_launch]`, or a 768-dimensional sentence embedding. Geometrically it is a point (or arrow) in n-dimensional space. Similar things should sit close together.\n\n### Dot product\n`a · b = Σ a_i * b_i`. It is large when the vectors point the same way and have large magnitude, zero when they are orthogonal (unrelated), negative when they oppose. A linear model's prediction `w · x + b` is a dot product between learned weights and features.\n\n### Norms\nThe L2 norm `‖a‖ = sqrt(Σ a_i²)` is the vector's length. The L1 norm `Σ |a_i|` is the Manhattan length. Norms appear in distance (`‖a − b‖`) and in regularisation (L1/L2 penalties on weights).\n\n### Cosine similarity\n`cos(a, b) = (a · b) / (‖a‖ ‖b‖)` — the dot product with magnitude removed, ranging from −1 to 1. For text embeddings, direction carries the meaning, so cosine is the default similarity. If you **L2-normalise** every vector to length 1 up front, cosine similarity equals the plain dot product — which is why vector databases ask you to normalise and then use inner-product search (cheaper).\n\n### Matrices and matrix multiplication\nA matrix is a 2-D grid: a batch of 1,000 embeddings of size 384 is a `(1000, 384)` matrix. `A @ B` requires the inner dimensions to match: `(m, k) @ (k, n) → (m, n)`. Each output cell is a dot product of a row of A with a column of B. So `queries (q, d) @ docs.T (d, n)` gives a `(q, n)` matrix of all pairwise similarities in one call — the heart of brute-force vector search.\n\n### Why embeddings are vectors\nModels map text/images to fixed-length float vectors so that geometric closeness ≈ semantic closeness. Once something is a vector you can search, cluster, deduplicate and classify it with the operations above. A transpose (`A.T`) swaps rows and columns; you'll use it constantly to line up shapes.",
+  "code_md": "```python\n# Plain-Python intuition first\nimport math\n\ndef dot(a, b):\n    return sum(x * y for x, y in zip(a, b))\n\ndef cosine(a, b):\n    return dot(a, b) / (math.sqrt(dot(a, a)) * math.sqrt(dot(b, b)))\n\nprint(cosine([1, 2, 3], [2, 4, 6]))   # 1.0 — same direction, different length\n```\n\n```python\n# The numpy way: all-pairs similarity in one matmul\nimport numpy as np\n\ndocs = np.random.default_rng(0).normal(size=(1000, 384))   # 1000 doc embeddings\nquery = np.random.default_rng(1).normal(size=(1, 384))\n\n# L2-normalise rows -> dot product == cosine similarity\ndocs_n = docs / np.linalg.norm(docs, axis=1, keepdims=True)\nquery_n = query / np.linalg.norm(query, axis=1, keepdims=True)\n\nscores = query_n @ docs_n.T          # (1, 384) @ (384, 1000) -> (1, 1000)\ntop5 = np.argsort(-scores[0])[:5]    # indices of the 5 most similar docs\nprint(scores.shape, top5)\n```",
+  "use_cases_md": "- **Semantic product search**: embed product titles, embed the user query, rank by cosine similarity.\n- **Duplicate listing detection**: pairs of SKUs whose title embeddings have cosine > 0.95 are likely the same product.\n- **Recommendations**: \"customers who bought X\" via similarity between item vectors.\n- **Linear models**: a demand forecast `w · features + b` is one dot product per row.\n- **Neural nets / LLMs**: every layer is a batched matrix multiply on GPU.",
+  "mistakes_md": "- **Comparing un-normalised embeddings with dot product** — long vectors win regardless of meaning. Normalise or use cosine.\n- **Mismatched shapes** — `(n, d) @ (n, d)` fails; you needed `A @ B.T`. Write the shapes next to every matmul.\n- **Using `*` instead of `@` in numpy** — `*` is element-wise, `@` is matrix multiplication.\n- **Mixing embeddings from different models** — vectors from two models live in different spaces; similarity between them is meaningless.\n- **Normalising along the wrong axis** — `np.linalg.norm(X)` without `axis=1` gives one number for the whole matrix.",
+  "best_practices_md": "- Keep a shape comment on every matrix operation: `# (batch, dim)`.\n- L2-normalise embeddings once at write time; then use inner product search.\n- Use float32 for embeddings — half the memory of float64, no practical accuracy loss.\n- Vectorise: one `Q @ D.T` beats a Python loop of dot products by 100x+.\n- Sanity check: cosine of a vector with itself must be 1.0.",
+  "my_context_md": "His repo uses no embeddings or vector search yet (per the audit), so this is new ground. The closest bridge is `GetLlmData` / `ECSLlmQueryProcess`, the LLM chat backend: retrieving similar past questions or similar SQL for text-to-SQL would be a cosine-similarity search over embeddings. The pandas pipelines in `ECSMarketplaceDataUpload` already treat each row as a feature vector — a numeric DataFrame `.to_numpy()` is literally a matrix you could multiply.",
+  "revision_notes_md": "- Vector = list of numbers = point in n-D space.\n- Dot: `Σ a_i b_i`; big = aligned, 0 = orthogonal.\n- L2 norm: `sqrt(Σ a_i²)`; L1: `Σ|a_i|`.\n- Cosine = dot / (‖a‖‖b‖), range [−1, 1], ignores length.\n- Normalised vectors: cosine == dot product.\n- Matmul rule: `(m,k) @ (k,n) → (m,n)`.\n- `Q @ D.T` = all query–doc similarities at once.\n- `*` element-wise, `@` matmul in numpy.\n- Embeddings from different models are not comparable.",
+  "exercises_md": "1. Write `dot`, `l2_norm`, `cosine` in pure Python, then verify against numpy on 10 random vectors.\n2. Take 2,000 product titles from a marketplace upload, embed them with `sentence-transformers` (all-MiniLM-L6-v2), and print the 5 most similar pairs using one matrix multiply.\n3. Benchmark a Python double loop vs `A @ B.T` for 1,000 x 1,000 vectors of dim 384.\n4. Show numerically that after L2 normalisation, `‖a − b‖² = 2 − 2·cos(a, b)`.",
+  "related": [
+    "ai-numpy-for-ml",
+    "ai-embeddings",
+    "ai-statistics-probability",
+    "ai-neural-networks",
+    "ai-vector-databases"
+  ],
+  "flashcards": [
+    {
+      "front": "Formula for cosine similarity?",
+      "back": "(a · b) / (‖a‖ · ‖b‖); range −1 to 1; measures direction, ignores magnitude."
+    },
+    {
+      "front": "Shape rule for matrix multiplication?",
+      "back": "(m, k) @ (k, n) → (m, n). Inner dimensions must match."
+    },
+    {
+      "front": "Why normalise embeddings before storing them?",
+      "back": "With unit-length vectors, dot product equals cosine similarity, so the cheaper inner-product search gives cosine ranking."
+    },
+    {
+      "front": "numpy `*` vs `@`?",
+      "back": "`*` is element-wise multiplication (with broadcasting); `@` is matrix multiplication."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You have 500 query embeddings of shape (500, 384) and 10,000 document embeddings of shape (10000, 384). Which expression gives all query–document dot products?",
+      "options": [
+        "Q @ D",
+        "Q * D",
+        "Q @ D.T",
+        "Q.T @ D"
+      ],
+      "answer_index": 2,
+      "explanation": "(500, 384) @ (384, 10000) → (500, 10000). Inner dims must match, so D must be transposed."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Two embeddings have cosine similarity 0. What does that mean?",
+      "options": [
+        "They are orthogonal — no directional relation",
+        "They are identical",
+        "They are exact opposites",
+        "One of them is the zero vector necessarily"
+      ],
+      "answer_index": 0,
+      "explanation": "Cosine 0 means a 90° angle: dot product is zero. Opposites give −1, identical direction gives 1."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "If all vectors are scaled to unit L2 length, cosine similarity equals the plain ____ product.",
+      "answers": [
+        "dot",
+        "inner",
+        "scalar"
+      ],
+      "explanation": "Dividing by ‖a‖‖b‖ = 1 changes nothing, so cosine = a · b."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Multiplying a (32, 768) matrix by a (768, 10) matrix produces a result of shape (32, ____).",
+      "answers": [
+        "10"
+      ],
+      "explanation": "(m, k) @ (k, n) → (m, n)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import math\na = [3, 4]\nb = [4, 3]\ndot = sum(x * y for x, y in zip(a, b))\nnorm_a = math.sqrt(sum(x * x for x in a))\nnorm_b = math.sqrt(sum(x * x for x in b))\nprint(dot, norm_a, round(dot / (norm_a * norm_b), 2))",
+      "answers": [
+        "24 5.0 0.96"
+      ],
+      "explanation": "dot = 12 + 12 = 24; both norms are 5.0; cosine = 24/25 = 0.96."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (a tiny matrix multiply in plain Python)",
+      "code": "A = [[1, 2], [3, 4]]\nB = [[5, 6], [7, 8]]\nC = [[sum(A[i][k] * B[k][j] for k in range(2)) for j in range(2)] for i in range(2)]\nprint(C)",
+      "answers": [
+        "[[19, 22], [43, 50]]"
+      ],
+      "explanation": "Each cell is row·column: 1*5+2*7=19, 1*6+2*8=22, 3*5+4*7=43, 3*6+4*8=50."
+    },
+    {
+      "type": "debug",
+      "prompt": "This search ranks long product descriptions first regardless of the query. What's wrong and how do you fix it?",
+      "code": "import numpy as np\n# doc_vecs: (n, 384) raw embeddings, q: (384,)\nscores = doc_vecs @ q\ntop = np.argsort(-scores)[:10]",
+      "answer": "The embeddings are not normalised, so the raw dot product rewards vectors with large magnitude, not just matching direction. Normalise both sides (or compute cosine):\n\n```python\ndoc_n = doc_vecs / np.linalg.norm(doc_vecs, axis=1, keepdims=True)\nq_n = q / np.linalg.norm(q)\nscores = doc_n @ q_n          # now cosine similarity\ntop = np.argsort(-scores)[:10]\n```",
+      "rubric": [
+        "Identifies missing normalisation / magnitude bias of raw dot product",
+        "Normalises per row with axis=1 (keepdims)",
+        "Notes that normalised dot product equals cosine similarity"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a backend developer why text embeddings are compared with cosine similarity rather than Euclidean distance.",
+      "answer": "An embedding model encodes meaning mostly in the **direction** of the vector; its length can vary with things like text length or token frequency that are irrelevant to meaning. Cosine similarity divides out both lengths, comparing only the angle. Euclidean distance mixes direction and magnitude, so two texts with the same meaning but different vector lengths look far apart. In practice we L2-normalise every vector once; then cosine = dot product and Euclidean distance becomes a monotonic function of cosine (`‖a−b‖² = 2 − 2cos`), so all three give the same ranking and we can use fast inner-product search.",
+      "rubric": [
+        "Direction carries meaning; magnitude is noise",
+        "Cosine removes magnitude, Euclidean does not",
+        "After normalisation the metrics give the same ranking / dot product is enough"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is a dot product and where does it show up in ML?",
+      "difficulty": "easy",
+      "answer_md": "The dot product of two equal-length vectors is the sum of element-wise products: `[1,2]·[3,4] = 3 + 8 = 11`. Geometrically it equals `‖a‖‖b‖cos θ`, so it measures alignment scaled by length.\n\nIt shows up everywhere:\n- **Linear/logistic regression**: prediction is `w · x + b`.\n- **Neural networks**: each neuron computes a dot product of inputs and weights; a layer batches these as a matrix multiply.\n- **Attention in transformers**: query · key scores decide which tokens attend to which.\n- **Vector search**: similarity between query and document embeddings, usually on normalised vectors so the dot product equals cosine similarity.\n\nIn numpy, `a @ b` for 1-D arrays, and `Q @ D.T` to compute all pairs at once."
+    },
+    {
+      "question": "You need to find near-duplicate product titles among 200k SKUs. How would you use embeddings and linear algebra?",
+      "difficulty": "medium",
+      "answer_md": "1. Embed each title with a sentence-embedding model into, say, a `(200000, 384)` float32 matrix.\n2. L2-normalise rows so dot product = cosine.\n3. A full `X @ X.T` would be 200k x 200k = 40B entries — too big. Instead process in blocks (e.g. 2,000 rows at a time: `X[i:i+2000] @ X.T`) and keep only pairs above a threshold like 0.95, or use an approximate nearest-neighbour index (FAISS, pgvector HNSW) to fetch top-k neighbours per item.\n4. Ignore the diagonal (self-similarity = 1).\n5. Tune the threshold on a labelled sample and review borderline pairs manually.\n\nKey points: normalisation, shape/memory awareness, blocking or ANN, and threshold validation."
+    }
+  ]
+}

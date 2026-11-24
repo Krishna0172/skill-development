@@ -1,0 +1,55 @@
+{
+  "slug": "python-generators-iterators",
+  "why_md": "Generators let you stream data with constant memory: reading a multi-GB report, paging an API, or batching rows for `execute_values`. They are also the mechanism behind context managers, async generators and streaming LLM responses, and interviewers like the iterator protocol, laziness and exhaustion gotchas.",
+  "revision_notes_md": "- Iterable has `__iter__`; iterator has `__next__` and raises `StopIteration` when done.\n- A generator function (`yield`) returns a lazy iterator; it runs only on `next()`.\n- Generators are single-pass - a second `list(gen)` is empty.\n- Generator expressions `(x for x in ...)` avoid building a list.\n- `yield from sub` delegates to a sub-iterator.\n- `itertools.islice`, `chain`, `groupby` (needs sorted input), `batched` (3.12+).\n- Wrap cleanup in `try/finally` inside a generator; it runs on exhaustion or `close()`.\n- Pipelines: read -> parse -> filter -> batch, each stage a generator.",
+  "exercises_md": "1. Write `read_rows(path)` yielding dicts from a CSV and `batches(it, n)` yielding lists of n rows; pipe them into a fake `execute_values` that prints batch sizes, and confirm memory stays flat on a large file.\n2. Write a generator that pages through a fake API (`fetch(page)` returns items until empty) and yields items one by one.",
+  "my_context_md": "Your upserts use `execute_batch` / `execute_values`; feeding them from a generator that yields fixed-size batches keeps memory bounded when an ECSMarketplaceDataUpload report has hundreds of thousands of rows. The async SP-API client in `ECSInventoryPriceTracking/app/fetchers/spapi.py` is a natural place for an async generator that yields pages of results.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "The exception an iterator raises to signal it has no more items is ____.",
+      "answers": [
+        "StopIteration"
+      ],
+      "explanation": "for-loops catch it to end iteration."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To delegate iteration to a sub-generator inside a generator you write `____ sub()`.",
+      "answers": [
+        "yield from"
+      ],
+      "explanation": "yield from forwards values (and send/throw) to the sub-iterator."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "def batches(it, n):\n    batch = []\n    for x in it:\n        batch.append(x)\n        if len(batch) == n:\n            yield batch\n            batch = []\n    if batch:\n        yield batch\n\ng = batches(range(7), 3)\nprint(next(g))\nprint(list(g))\nprint(list(g))",
+      "answers": [
+        "[0, 1, 2]\n[[3, 4, 5], [6]]\n[]"
+      ],
+      "explanation": "First call yields [0,1,2]; list() drains the rest; the exhausted generator then yields nothing."
+    },
+    {
+      "type": "debug",
+      "prompt": "The second report is always empty. Why, and how do you fix it?",
+      "code": "rows = (parse(line) for line in open(\"orders.csv\"))\nvalid = [r for r in rows if r[\"qty\"] > 0]\ntotal = sum(r[\"qty\"] for r in rows)   # always 0",
+      "answer": "`rows` is a generator - single pass. The first comprehension exhausts it, so the second sees nothing. Also the file is never closed.\n\n```python\nwith open(\"orders.csv\") as f:\n    rows = [parse(line) for line in f]   # materialise if you need two passes\nvalid = [r for r in rows if r[\"qty\"] > 0]\ntotal = sum(r[\"qty\"] for r in rows)\n```\nOr compute both in a single loop to keep streaming.",
+      "rubric": [
+        "Generators can be consumed only once",
+        "Materialise to a list or do both computations in one pass",
+        "Use `with open` so the file is closed"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how a generator function executes differently from a normal function.",
+      "answer": "Calling a generator function runs no body code; it returns a generator object. Each `next()` resumes execution until the next `yield`, hands out that value and suspends, keeping locals and the instruction pointer in the frame. When the function returns, `StopIteration` is raised. This gives lazy, constant-memory streaming and makes pipelines composable; the cost is single-pass iteration and that errors surface only when consumed.",
+      "rubric": [
+        "Calling returns a generator object without running the body",
+        "Execution suspends at yield and resumes on next() with state preserved",
+        "Return -> StopIteration; lazy, single-pass"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,155 @@
+{
+  "slug": "py-internals-memory",
+  "title": "Python object model and memory",
+  "skill": "python-internals",
+  "extra_skills": [
+    "python-performance"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "object-model",
+    "reference-counting",
+    "gc",
+    "slots",
+    "getsizeof",
+    "interning",
+    "tracemalloc",
+    "pandas-memory"
+  ],
+  "summary": "How CPython represents and frees objects: every value is a heap object with a type and a reference count, freed immediately when the count hits zero, with a generational cyclic garbage collector for reference cycles. Covers `__slots__`, why `sys.getsizeof` under-reports, string interning, measuring with `tracemalloc`, and measuring/reducing pandas memory.",
+  "why_md": "- Long-running ECS workers that grow until OOM-killed are usually holding references (caches, globals, cycles with `__del__`, growing lists) — you need the model to find them.\n- Choosing `__slots__`, tuples, generators or categorical dtypes can cut memory several-fold on millions of rows.\n- 'How does Python manage memory?' and 'what is the GIL protecting?' are standard senior interview questions.\n- AI workloads (embeddings, large DataFrames) make memory the first bottleneck you hit.",
+  "details_md": "### Everything is an object\nIn CPython every value is a `PyObject` on the heap with at least a reference count and a pointer to its type. Variables are names in a namespace dict (or fast-locals array) that *point* to objects. `id(x)` is the object's address in CPython.\n\n### Reference counting\nEach new reference (name binding, container slot, argument) increments the count; dropping it decrements. At zero the object is deallocated **immediately** — that's why `with open()`-less files usually close promptly in CPython, and why freeing a big list returns memory right away (to Python's allocator, not always to the OS). `sys.getrefcount(x)` reports one extra for its own argument. Recent CPython versions also have *immortal* objects (None, small ints, interned strings) whose counts never change.\n\n### Cyclic garbage collector\nRefcounting can't free cycles (`a.ref = b; b.ref = a`, a dict containing itself, exception → traceback → frame → exception). The `gc` module periodically scans *container* objects in generations, finds groups only reachable from each other, and frees them. `gc.collect()` forces a pass; `gc.freeze()` helps pre-fork servers. Keeping a caught exception in a variable that outlives the frame can retain whole frames and their locals.\n\n### Small-object allocator\nObjects ≤ 512 bytes come from pymalloc arenas. Memory freed by Python objects is often kept for reuse, so RSS may not drop after a big job — design workers to process in chunks or recycle processes.\n\n### Sizes\n`sys.getsizeof` returns only the object's own header + direct storage — a list's size counts pointer slots, not the elements. Real footprint requires walking references (`tracemalloc`, or `pympler.asizeof`). A plain instance carries a `__dict__` (~100+ bytes); `__slots__ = ('sku', 'qty')` replaces it with fixed slots, saving memory and making attribute typos raise `AttributeError` (dataclasses support `slots=True`).\n\n### Interning\nIdentifier-like string constants and attribute names are interned (one shared copy); `sys.intern(s)` lets you intern runtime strings, useful for millions of repeated keys. Pandas' `category` dtype is the DataFrame-level equivalent.\n\n### tracemalloc\n`tracemalloc.start()` hooks the allocator; `take_snapshot()` and `snapshot.compare_to(old, 'lineno')` show which lines allocated the most and how that changed — ideal for finding a leak between job iterations.\n\n### pandas memory\n`df.memory_usage(deep=True)` counts the Python string objects in `object` columns (without `deep=True` it counts only pointers). Reduce with `category` for low-cardinality strings (marketplace, status), downcasting numerics (`pd.to_numeric(downcast=...)`), `usecols`, and chunked reading. Delete intermediate frames (`del df_tmp`) inside long functions.",
+  "code_md": "```python\nimport sys, tracemalloc\nfrom dataclasses import dataclass\n\n@dataclass(slots=True)              # no per-instance __dict__\nclass OrderLine:\n    sku: str\n    qty: int\n\nrows = [1, 2, 3]\nprint(sys.getsizeof(rows))          # list header + 3 pointers only, not the ints\n\n# Find what grows between iterations of a worker loop\ntracemalloc.start()\nbase = tracemalloc.take_snapshot()\nfor _ in range(50):\n    process_one_job()               # suspected leak\nsnap = tracemalloc.take_snapshot()\nfor stat in snap.compare_to(base, \"lineno\")[:5]:\n    print(stat)                     # file:line, size diff, count diff\n```\n\n```python\nimport pandas as pd\n\ndf = pd.read_csv(\"orders.csv\")\nprint(df.memory_usage(deep=True).sum() / 1e6, \"MB\")    # deep=True counts strings\n\ndf[\"marketplace\"] = df[\"marketplace\"].astype(\"category\")  # few distinct values\ndf[\"status\"] = df[\"status\"].astype(\"category\")\ndf[\"qty\"] = pd.to_numeric(df[\"qty\"], downcast=\"integer\")\ndf[\"price\"] = pd.to_numeric(df[\"price\"], downcast=\"float\")\nprint(df.memory_usage(deep=True).sum() / 1e6, \"MB\")    # often 3-10x smaller\n```",
+  "use_cases_md": "- Diagnosing an ECS task whose memory climbs per job until OOM: tracemalloc snapshot diff between jobs.\n- Holding 5M parsed order lines in memory: slotted dataclasses or tuples instead of dicts.\n- Shrinking a report DataFrame with `category` dtypes before a merge/groupby.\n- Avoiding module-level caches (dicts) that grow without bound in a long-lived worker.\n- Explaining why RSS stays high after a big job and choosing chunking or process recycling.",
+  "mistakes_md": "- **Trusting `sys.getsizeof` for containers**: under-reports by orders of magnitude. Fix: tracemalloc / deep measurement.\n- **`df.memory_usage()` without `deep=True`**: object columns look tiny. Fix: `deep=True`.\n- **Unbounded module-level caches/global lists** in long-running services. Fix: `lru_cache(maxsize=...)`, TTL caches, or clear per job.\n- **Storing exceptions/tracebacks** (e.g. in a list of failures) keeps frames and their DataFrames alive. Fix: store `str(e)`/formatted traceback.\n- **Calling `gc.collect()` in hot loops** to 'fix' memory: slow and usually not the issue. Fix: find the reference holder.\n- **Assuming freed memory returns to the OS**: often it doesn't. Fix: chunk work, or recycle worker processes.",
+  "best_practices_md": "- Model memory as references: ask 'who still points to this?'\n- Use `tracemalloc` snapshot diffs for leaks; container metrics for RSS.\n- `slots=True` dataclasses for many small records.\n- Category dtypes, downcasting, `usecols`, chunking for pandas.\n- Bound every cache; avoid globals that accumulate.\n- Process big inputs in chunks/generators; `del` large intermediates in long functions.",
+  "my_context_md": "The `python-postgres` repo has **342 `global` statements** — module-level state in long-lived ECS services is a common way memory accumulates across jobs, so those are the first places to inspect if a task's memory grows. The `ECSMarketplaceDataUpload` processors use pandas `read_csv/read_excel → merge/groupby/apply`; measuring `df.memory_usage(deep=True)` before and after converting low-cardinality columns (marketplace, status, SKU type) to `category` is a cheap experiment there. The DB secret cache with TTL in `AmazonVendorBankRecon/db.py` is an example of a *bounded* cache done right.",
+  "revision_notes_md": "- Every value = heap object with refcount + type pointer; names are references.\n- Refcount 0 → freed immediately; `sys.getrefcount` shows +1.\n- Cycles freed by generational `gc`; exceptions/tracebacks often create cycles.\n- `sys.getsizeof` is shallow — use tracemalloc for real usage.\n- `__slots__` / `@dataclass(slots=True)` removes `__dict__`, saves memory.\n- `sys.intern` / pandas `category` dedupe repeated strings.\n- `tracemalloc.take_snapshot().compare_to(old, 'lineno')` finds growth.\n- `df.memory_usage(deep=True)`; downcast numerics; `usecols`; chunks.\n- Freed memory may not return to the OS → chunk or recycle processes.",
+  "exercises_md": "1. Load one real marketplace report into pandas, print `memory_usage(deep=True)` per column, convert suitable columns to `category`/downcast numerics, and record the reduction.\n2. Create 1M order-line records as dicts, as a regular class, and as `@dataclass(slots=True)`; compare peak memory with `tracemalloc.get_traced_memory()`.\n3. Write a fake worker loop that leaks by appending to a module-level list; find the leak line with a tracemalloc snapshot diff.\n4. Build a reference cycle with a class that holds a reference to itself, observe `gc.collect()` return value, then break the cycle with `weakref`.",
+  "related": [
+    "py-fundamentals-refresher",
+    "py-performance",
+    "py-profiling-debugging",
+    "pandas-cleaning-performance",
+    "python-oop-dataclasses"
+  ],
+  "flashcards": [
+    {
+      "front": "When is a CPython object freed?",
+      "back": "Immediately when its reference count drops to zero; objects in reference cycles are freed later by the cyclic garbage collector."
+    },
+    {
+      "front": "Why is `sys.getsizeof(list_of_strings)` misleading?",
+      "back": "It's shallow: it counts the list header and pointer array, not the string objects it references."
+    },
+    {
+      "front": "What does `__slots__` do?",
+      "back": "Replaces the per-instance `__dict__` with fixed attribute slots: less memory, faster attribute access, and assigning undeclared attributes raises AttributeError."
+    },
+    {
+      "front": "How do you find which line is leaking memory?",
+      "back": "`tracemalloc.start()`, take a snapshot, run the workload, take another, and `snap2.compare_to(snap1, 'lineno')`."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which objects can reference counting alone NOT reclaim?",
+      "options": [
+        "Large lists",
+        "Objects that participate in reference cycles",
+        "Strings created at runtime",
+        "Objects created inside functions"
+      ],
+      "answer_index": 1,
+      "explanation": "In a cycle each object keeps the other's count above zero; the cyclic GC handles them."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You want the true memory used by an `object` (string) column in a DataFrame. Which call?",
+      "options": [
+        "`sys.getsizeof(df)`",
+        "`df.memory_usage()`",
+        "`df.info()`",
+        "`df.memory_usage(deep=True)`"
+      ],
+      "answer_index": 3,
+      "explanation": "`deep=True` introspects the Python objects in object columns; the default counts only the 8-byte pointers."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To compare two memory snapshots by source line, call `snapshot2.____(snapshot1, \"lineno\")`.",
+      "answers": [
+        "compare_to"
+      ],
+      "explanation": "`tracemalloc.Snapshot.compare_to` returns StatisticDiff objects sorted by size difference."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Converting a low-cardinality string column like `marketplace` to the pandas `____` dtype stores each distinct value once plus small integer codes.",
+      "answers": [
+        "category",
+        "categorical"
+      ],
+      "explanation": "`df['marketplace'].astype('category')`."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sys\n\na = []\nbefore = sys.getrefcount(a)\nb = a\nc = [a, a]\nprint(sys.getrefcount(a) - before)\ndel b\nprint(sys.getrefcount(a) - before)\nc.clear()\nprint(sys.getrefcount(a) - before)",
+      "answers": [
+        "3\n2\n0"
+      ],
+      "explanation": "`b` adds one reference and the list `c` holds two; deleting `b` drops one; clearing `c` drops the other two."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sys\n\nclass Row:\n    __slots__ = (\"sku\", \"qty\")\n    def __init__(self, sku, qty):\n        self.sku, self.qty = sku, qty\n\nr = Row(\"A1\", 3)\ntry:\n    r.price = 9.5\nexcept AttributeError:\n    print(\"AttributeError\")\nprint(hasattr(r, \"__dict__\"))\nprint(sys.getsizeof([0] * 3) == sys.getsizeof([\"x\" * 10_000] * 3))",
+      "answers": [
+        "AttributeError\nFalse\nTrue"
+      ],
+      "explanation": "Slotted instances have no `__dict__`, so new attributes fail. `getsizeof` of a list counts pointers only, so element size doesn't matter."
+    },
+    {
+      "type": "debug",
+      "prompt": "This ECS worker's memory grows on every job until it is OOM-killed. What's wrong and how do you fix it?",
+      "code": "FAILED = []\n_cache = {}\n\ndef handle(job):\n    df = load_report(job.key)              # ~200 MB DataFrame\n    _cache[job.key] = df                   # 'speeds up retries'\n    try:\n        write(transform(df))\n    except Exception as e:\n        FAILED.append(e)                   # report later",
+      "answer": "Two unbounded references keep every job's data alive:\n- `_cache` stores every DataFrame forever (keys never repeat across jobs).\n- `FAILED` stores exception objects; each exception's `__traceback__` references the frame, whose locals include `df`.\n\n```python\nfrom collections import deque\nFAILED = deque(maxlen=100)          # bounded, stores text only\n\ndef handle(job):\n    df = load_report(job.key)\n    try:\n        write(transform(df))\n    except Exception as e:\n        logger.exception(\"job %s failed\", job.key)\n        FAILED.append((job.key, repr(e)))\n    finally:\n        del df\n```\nIf caching is really needed, bound it (`lru_cache(maxsize=...)`, TTL) and cache small results, not whole frames.",
+      "rubric": [
+        "Unbounded module-level cache retains every DataFrame",
+        "Stored exceptions keep tracebacks → frames → locals alive",
+        "Bound or remove caches and store strings instead of exception objects"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how CPython manages memory, as you would in an interview.",
+      "answer": "Every Python value is a heap-allocated object with a reference count and a type pointer; variables are just references. CPython increments the count when a reference is created (binding, container insertion, argument passing) and decrements when it goes away; at zero the object is deallocated immediately, which gives deterministic cleanup. Reference counting can't reclaim cycles, so a generational cyclic garbage collector periodically scans container objects and frees groups unreachable from outside. Small objects come from the pymalloc allocator, which keeps freed blocks in arenas for reuse, so process RSS may not shrink after a big job. The GIL makes refcount updates thread-safe without per-object locks. Tools: `sys.getrefcount`, `gc`, `tracemalloc`, `__slots__` to shrink instances.",
+      "rubric": [
+        "Reference counting with immediate deallocation at zero",
+        "Generational cyclic GC for reference cycles",
+        "pymalloc/arenas: freed memory not always returned to OS",
+        "Tools: tracemalloc / gc / __slots__"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Your long-running Python worker's memory keeps growing. How do you investigate?",
+      "difficulty": "hard",
+      "answer_md": "1. **Confirm** with container metrics that it grows per job and doesn't plateau (pymalloc reuse can look like a leak but plateaus).\n2. **Snapshot diff** with tracemalloc around N jobs:\n```python\ntracemalloc.start(25)\ns1 = tracemalloc.take_snapshot()\nfor _ in range(20): run_job()\ns2 = tracemalloc.take_snapshot()\nfor st in s2.compare_to(s1, \"traceback\")[:3]:\n    print(\"\\n\".join(st.traceback.format()))\n```\n3. **Find the holder**: usual suspects are module-level dicts/lists (globals, caches without maxsize), stored exceptions (traceback → frames → locals), closures/callbacks registered and never removed, cycles involving objects with `__del__`. `gc.get_referrers(obj)` helps locate who holds a specific object.\n4. **Fix and bound**: `lru_cache(maxsize)`, store strings not exceptions, `del` large intermediates.\n5. If fragmentation is the cause, process in chunks or recycle workers (`max_tasks_per_child` for pools)."
+    },
+    {
+      "question": "What does `__slots__` do and when would you use it?",
+      "difficulty": "medium",
+      "answer_md": "Defining `__slots__ = ('sku', 'qty')` makes the class store attributes in fixed descriptors in the instance layout instead of a per-instance `__dict__`. Benefits: noticeably smaller instances (no dict per object), slightly faster attribute access, and typos like `row.qyt = 1` raise `AttributeError`.\n\nUse it for classes instantiated in very large numbers (millions of parsed rows, graph nodes). With dataclasses: `@dataclass(slots=True)`.\n\nCaveats: you can't add arbitrary attributes, every class in the hierarchy needs `__slots__` to get the savings, `__weakref__` must be listed if you need weak references, and multiple inheritance with non-empty slots in several bases fails. For tabular data at scale, a DataFrame or NumPy array is still far more compact than any per-row object."
+    },
+    {
+      "question": "How would you reduce the memory of a large pandas DataFrame?",
+      "difficulty": "medium",
+      "answer_md": "Measure first: `df.memory_usage(deep=True)` per column — `object` string columns usually dominate.\n\n- **Read less**: `usecols=`, `dtype=` at `read_csv`, `chunksize=` to stream.\n- **Categoricals** for low-cardinality strings (marketplace, status, currency): stored as int codes + one copy of each value.\n- **Downcast numerics**: `pd.to_numeric(s, downcast='integer'/'float')`; nullable `Int32` for ints with NaN.\n- **Arrow-backed strings** (`dtype='string[pyarrow]'`) are more compact than Python objects when pyarrow is available.\n- **Drop intermediates**: `del` temporary frames; avoid chained copies.\n- **Push work to Postgres** (aggregate in SQL) when the data originates there.\n\nIn practice categoricals + downcasting often give a several-fold reduction on report-style data."
+    }
+  ]
+}

@@ -1,0 +1,187 @@
+{
+  "slug": "merge-intervals",
+  "title": "Merge overlapping sync windows",
+  "category": "problem-solving",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "dsa",
+  "concepts": [
+    "sorting",
+    "interval merging",
+    "greedy"
+  ],
+  "related_topics": [],
+  "problem_md": "Several ingestion jobs each record the time window they covered as `[start, end]` (inclusive, integers — e.g. epoch minutes). To find gaps in coverage, you first need to merge overlapping windows.\n\nImplement:\n\n```python\ndef merge_intervals(intervals: list[list[int]]) -> list[list[int]]:\n```\n\nRules:\n- The input may be in any order.\n- Intervals that overlap **or touch** (`[1, 3]` and `[3, 5]`) merge into one.\n- Return the merged intervals sorted by start.\n- Every interval has `start <= end`. Values may be negative.\n- An empty input returns `[]`.",
+  "examples": [
+    {
+      "input": "intervals = [[1, 3], [2, 6], [8, 10], [15, 18]]",
+      "output": "[[1, 6], [8, 10], [15, 18]]"
+    },
+    {
+      "input": "intervals = [[1, 4], [4, 5]]",
+      "output": "[[1, 5]]",
+      "explanation": "Touching intervals merge."
+    }
+  ],
+  "hints": [
+    "If the intervals were sorted by start, you'd only ever need to compare each one with the last merged interval.",
+    "Sort by start. Keep a `merged` list. If the current start is <= the last merged end, they overlap.",
+    "On overlap, extend: `merged[-1][1] = max(merged[-1][1], end)` — the `max` matters when one interval contains another. Otherwise append a copy of the current interval."
+  ],
+  "starter_code": "def merge_intervals(intervals: list[list[int]]) -> list[list[int]]:\n    # your code here\n    ...\n",
+  "solution_code": "def merge_intervals(intervals: list[list[int]]) -> list[list[int]]:\n    merged = []\n    for start, end in sorted(intervals, key=lambda iv: iv[0]):\n        if merged and start <= merged[-1][1]:\n            merged[-1][1] = max(merged[-1][1], end)\n        else:\n            merged.append([start, end])\n    return merged\n",
+  "solution_md": "Sort by start, then sweep once. After sorting, an interval can only overlap the *most recent* merged interval, so a single comparison per element suffices.\n\n- `start <= merged[-1][1]` (not `<`) makes touching intervals merge.\n- `max(...)` handles containment: `[1, 10]` followed by `[2, 3]` must not shrink the end to 3.\n- Appending `[start, end]` (a new list) avoids mutating the caller's input when we later extend it.\n\n- **Time:** O(n log n) for the sort, O(n) for the sweep\n- **Space:** O(n) for the output\n\n**Follow-up:** finding coverage *gaps* is then trivial — for consecutive merged intervals `a`, `b`, the gap is `(a[1], b[0])`.",
+  "tests": {
+    "function": "merge_intervals",
+    "cases": [
+      {
+        "args": [
+          [
+            [
+              1,
+              3
+            ],
+            [
+              2,
+              6
+            ],
+            [
+              8,
+              10
+            ],
+            [
+              15,
+              18
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            1,
+            6
+          ],
+          [
+            8,
+            10
+          ],
+          [
+            15,
+            18
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            [
+              1,
+              4
+            ],
+            [
+              4,
+              5
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            1,
+            5
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            [
+              8,
+              10
+            ],
+            [
+              1,
+              3
+            ],
+            [
+              2,
+              4
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            1,
+            4
+          ],
+          [
+            8,
+            10
+          ]
+        ]
+      },
+      {
+        "args": [
+          [
+            [
+              1,
+              10
+            ],
+            [
+              2,
+              3
+            ],
+            [
+              4,
+              5
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            1,
+            10
+          ]
+        ]
+      },
+      {
+        "args": [
+          []
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [
+            [
+              -5,
+              -1
+            ],
+            [
+              -2,
+              0
+            ],
+            [
+              3,
+              3
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            -5,
+            0
+          ],
+          [
+            3,
+            3
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,188 @@
+{
+  "slug": "pg-recursive-ctes-lateral",
+  "title": "WITH RECURSIVE and LATERAL joins (deep dive)",
+  "skill": "postgresql",
+  "extra_skills": [
+    "query-optimization"
+  ],
+  "category": "Database",
+  "difficulty": "advanced",
+  "tags": [
+    "recursive-cte",
+    "lateral",
+    "hierarchy",
+    "graph",
+    "top-n-per-group"
+  ],
+  "summary": "WITH RECURSIVE lets a query reference its own output, which is how SQL walks trees and graphs (categories, org charts, bill of materials). LATERAL lets a subquery in FROM refer to columns of earlier FROM items, enabling per-row subqueries such as 'top 3 orders per customer'. Both are powerful and easy to get subtly wrong.",
+  "why_md": "- Hierarchical data (category trees, threaded comments, bill of materials) is common in e-commerce.\n- `LATERAL` is the idiomatic, index-friendly solution for top-N-per-group and for calling set-returning functions per row.\n- Interviewers use recursive CTEs to test whether you understand iterative evaluation and cycle risk.\n- Runaway recursion can take a production database down; you need to know the safeguards.",
+  "details_md": "### Anatomy of WITH RECURSIVE\n```\nWITH RECURSIVE t(cols) AS (\n    <non-recursive term>      -- the anchor/seed\n    UNION [ALL]\n    <recursive term>          -- references t\n)\nSELECT ... FROM t;\n```\nEvaluation is **iterative**, not recursive in the programming sense:\n1. Run the anchor term; its rows form the result and the initial **working table**.\n2. Run the recursive term with `t` bound to the working table only (the rows produced by the previous step, not the entire result so far).\n3. Add the new rows to the result and make them the next working table.\n4. Stop when a step produces no rows.\nWith `UNION ALL` every produced row is kept; with `UNION` rows already seen are discarded, which also stops simple cycles but costs a hash/sort of everything produced. Only one reference to the CTE is allowed in the recursive term, and aggregates, window functions and outer joins on it are restricted.\n\n### Trees: depth and paths\nCarry accumulators as columns: `depth + 1`, a `path` array (`path || id`), or a text breadcrumb. Walk down from a parent (`JOIN tree c ON c.parent_id = t.id`) or up from a leaf (`JOIN tree p ON p.id = t.parent_id`).\n\n### Cycles and runaway recursion\nA graph with a cycle never reaches an empty step with `UNION ALL`. Defences: keep a `path` array and add `WHERE NOT n.id = ANY(path)`; use PostgreSQL 14+ `CYCLE id SET is_cycle USING path`; limit `depth < 20`; or use `UNION`. Also `SEARCH DEPTH FIRST BY id SET ordercol` / `BREADTH FIRST` (PG14+) orders results.\n\n### Other uses\nGenerating series, expanding date ranges, finding connected components, transitive closure of 'is part of', computing running state where each row depends on the previous.\n\n### LATERAL\nNormally a subquery in FROM cannot see other FROM items. `LATERAL` removes that rule, so it behaves like a for-each loop: for every row on the left, evaluate the subquery with that row's values.\n```\nFROM customers c\nCROSS JOIN LATERAL (SELECT ... FROM orders o WHERE o.customer_id = c.id ORDER BY created_at DESC LIMIT 3) x\n```\n- `JOIN LATERAL ... ON true` / `LEFT JOIN LATERAL ... ON true` (the latter keeps customers with no orders).\n- Set-returning functions in FROM are implicitly lateral: `FROM orders o, jsonb_array_elements(o.items) AS item`.\n- Performance: the inner query runs once per outer row, so it is excellent when the outer side is small or filtered and the inner side has an index matching `WHERE` + `ORDER BY` (e.g. `(customer_id, created_at DESC)`). `window row_number()` alternatives scan everything.\n\n### Choosing\nTop-N per group: LATERAL with an index, or `row_number()` if you need all groups over most of the table. Hierarchies: recursive CTE (or `ltree` extension for frequent subtree queries).",
+  "code_md": "```sql\n-- Category tree with depth and path, and protection against cycles\nWITH RECURSIVE tree AS (\n    SELECT id, parent_id, name, 0 AS depth, ARRAY[id] AS path\n    FROM categories\n    WHERE parent_id IS NULL\n  UNION ALL\n    SELECT c.id, c.parent_id, c.name, t.depth + 1, t.path || c.id\n    FROM categories c\n    JOIN tree t ON c.parent_id = t.id\n    WHERE NOT c.id = ANY (t.path)      -- cycle guard\n      AND t.depth < 20                 -- hard limit\n)\nSELECT repeat('  ', depth) || name AS indented_name, path\nFROM tree\nORDER BY path;\n```\n```sql\n-- PostgreSQL 14+: built-in cycle detection and ordering\nWITH RECURSIVE tree AS (\n    SELECT id, parent_id, name FROM categories WHERE parent_id IS NULL\n  UNION ALL\n    SELECT c.id, c.parent_id, c.name FROM categories c JOIN tree t ON c.parent_id = t.id\n) SEARCH DEPTH FIRST BY id SET ordercol\n  CYCLE id SET is_cycle USING cycle_path\nSELECT * FROM tree WHERE NOT is_cycle ORDER BY ordercol;\n```\n```sql\n-- LATERAL: latest 3 orders for each customer (needs index on orders(customer_id, created_at DESC))\nSELECT c.id, c.name, o.id AS order_id, o.created_at\nFROM customers c\nLEFT JOIN LATERAL (\n    SELECT id, created_at\n    FROM orders\n    WHERE customer_id = c.id\n    ORDER BY created_at DESC\n    LIMIT 3\n) o ON true\nWHERE c.country = 'IN';\n```\n```sql\n-- Expand a jsonb array per row (implicit LATERAL)\nSELECT o.id, item->>'sku' AS sku, (item->>'qty')::int AS qty\nFROM orders o, jsonb_array_elements(o.items) AS item;\n```",
+  "use_cases_md": "- Rendering a product category tree with breadcrumbs.\n- Finding all sub-assemblies of a bundle (bill of materials) and summing quantities.\n- 'Latest 3 reviews for each of 50 selected products' via LATERAL + index.\n- Explaining threaded comments or reply chains.\n- Expanding JSON line items per order into rows.",
+  "mistakes_md": "- **No termination guard on cyclic data**: infinite recursion until memory or disk is exhausted. Use path arrays, `CYCLE`, or a depth limit.\n- **Expecting the recursive term to see all previous rows**: it sees only the last iteration's rows.\n- **`UNION` instead of `UNION ALL` by habit**: needless deduplication cost (though sometimes it is the cycle guard).\n- **LATERAL without a supporting index**: the inner query becomes N sequential scans.\n- **Using `INNER JOIN LATERAL` when you want to keep empty groups**: use `LEFT JOIN LATERAL ... ON true`.\n- **`ORDER BY` missing before `LIMIT` inside LATERAL**: arbitrary rows.",
+  "best_practices_md": "- Always carry a depth counter or path and bound the recursion.\n- Index the join column used by the recursive term (`parent_id`).\n- Select only needed columns in the recursive CTE; they are materialised per iteration.\n- For top-N per group on a filtered outer set use LATERAL with a matching composite index.\n- Use `LEFT JOIN LATERAL ... ON true` to keep outer rows without matches.\n- Check with `EXPLAIN (ANALYZE)` to see loops count of the inner side.",
+  "my_context_md": "The learner already writes CTEs, joins and JSONB-heavy raw SQL in psycopg2 across ForceSight services. The recursive CTE and LATERAL forms here are natural next tools; look in those services for places that loop in Python to fetch a hierarchy or 'latest N per parent' and consider replacing the loop with one query.",
+  "revision_notes_md": "- Recursive CTE = anchor `UNION [ALL]` recursive term; iterates until a step yields no rows.\n- Recursive term sees only the previous iteration (working table).\n- Carry `depth` and `path`; guard with `NOT id = ANY(path)`, `CYCLE` (PG14+) or depth limit.\n- `SEARCH DEPTH/BREADTH FIRST` (PG14+) controls ordering.\n- LATERAL = for-each-row subquery referencing earlier FROM items.\n- `LEFT JOIN LATERAL ... ON true` keeps rows with no matches.\n- Top-N per group: LATERAL + index on (group_key, sort_key DESC) with LIMIT.\n- Set-returning functions in FROM are implicitly lateral.",
+  "exercises_md": "1. Build a `categories(id, parent_id, name)` table and write a recursive CTE that prints an indented tree; then add a cycle and make the query safe.\n2. Write a query returning all ancestors of one leaf category as a breadcrumb string.\n3. Return the latest 3 orders for each customer with LATERAL; compare the plan and timing with a `row_number()` version, with and without a composite index.\n4. Expand a `jsonb` array column of line items into rows with `jsonb_array_elements`.",
+  "related": [
+    "sql-ctes",
+    "sql-window-functions",
+    "sql-subqueries",
+    "pg-jsonb-deep",
+    "postgres-indexes"
+  ],
+  "flashcards": [
+    {
+      "front": "What does the recursive term of a recursive CTE see?",
+      "back": "Only the rows produced by the previous iteration (the working table), not the whole accumulated result."
+    },
+    {
+      "front": "How do you prevent infinite recursion on cyclic data?",
+      "back": "Track a path array and exclude visited ids, use `CYCLE` (PG14+), add a depth limit, or use UNION."
+    },
+    {
+      "front": "What is LATERAL?",
+      "back": "A FROM-subquery that may reference columns of preceding FROM items, evaluated per outer row."
+    },
+    {
+      "front": "Keep outer rows with no inner match in LATERAL?",
+      "back": "`LEFT JOIN LATERAL (...) x ON true`."
+    },
+    {
+      "front": "Best index for top-3 orders per customer via LATERAL?",
+      "back": "Composite index `(customer_id, created_at DESC)` matching WHERE + ORDER BY."
+    },
+    {
+      "front": "PostgreSQL 14 clauses for recursive ordering/cycles?",
+      "back": "`SEARCH DEPTH|BREADTH FIRST BY ... SET col` and `CYCLE ... SET ... USING ...`."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "In a recursive CTE, which rows does the recursive term read from the CTE name?",
+      "options": [
+        "The base table",
+        "All rows produced so far",
+        "Only the rows from the previous iteration",
+        "Only the anchor rows"
+      ],
+      "answer_index": 2,
+      "explanation": "Iteration uses the working table of the last step."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Recursion on a graph with a cycle never ends with UNION ALL because ...",
+      "options": [
+        "Each loop produces new rows so a step is never empty",
+        "PostgreSQL forbids cycles",
+        "The anchor repeats",
+        "UNION ALL sorts rows"
+      ],
+      "answer_index": 0,
+      "explanation": "Evaluation stops only when an iteration yields no rows."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which join returns customers even if they have no orders when using a LATERAL subquery?",
+      "options": [
+        "FULL JOIN",
+        "CROSS JOIN LATERAL",
+        "JOIN LATERAL ... ON true",
+        "LEFT JOIN LATERAL ... ON true"
+      ],
+      "answer_index": 3,
+      "explanation": "LEFT JOIN LATERAL keeps unmatched outer rows."
+    },
+    {
+      "type": "mcq",
+      "prompt": "LATERAL top-3-per-customer is fastest with which index on orders?",
+      "options": [
+        "(created_at)",
+        "(customer_id, created_at DESC)",
+        "(total)",
+        "(id) only"
+      ],
+      "answer_index": 1,
+      "explanation": "It serves the correlation filter and the ordering for the LIMIT."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A recursive CTE is introduced with WITH ____ name AS (...).",
+      "answers": [
+        "recursive"
+      ],
+      "explanation": "WITH RECURSIVE."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Combine the anchor and recursive terms with UNION ____ to avoid dedup cost.",
+      "answers": [
+        "all"
+      ],
+      "explanation": "UNION ALL keeps all rows without deduplication."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To guard against cycles with an id path array use: WHERE NOT c.id = ____ (t.path).",
+      "answers": [
+        "any"
+      ],
+      "explanation": "= ANY(array) tests membership."
+    },
+    {
+      "type": "debug",
+      "prompt": "This query hangs and then runs the server out of memory on some data. What is wrong and how do you fix it?",
+      "code": "WITH RECURSIVE up AS (\n    SELECT id, parent_id FROM categories WHERE id = 42\n  UNION ALL\n    SELECT c.id, c.parent_id FROM categories c JOIN up ON c.id = up.parent_id\n)\nSELECT * FROM up;\n-- some rows have parent_id pointing back to a descendant (cycle)",
+      "answer": "With a cycle the recursion never produces an empty step. Add a guard: track visited ids with a path array (or use `CYCLE id SET is_cycle USING path` in PG14+), and/or limit depth.\n```sql\nWITH RECURSIVE up AS (\n  SELECT id, parent_id, ARRAY[id] AS path FROM categories WHERE id = 42\n  UNION ALL\n  SELECT c.id, c.parent_id, up.path || c.id\n  FROM categories c JOIN up ON c.id = up.parent_id\n  WHERE NOT c.id = ANY(up.path)\n)\nSELECT id, parent_id FROM up;\n```",
+      "rubric": [
+        "Cycle makes recursion endless",
+        "Visited path / CYCLE / depth limit",
+        "Fix shown in a working query"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how a recursive CTE is evaluated.",
+      "answer": "PostgreSQL runs the anchor query to create the initial result and working table. It then repeatedly runs the recursive term against only the working table, appends the new rows to the result and makes them the next working table, stopping when an iteration returns nothing. UNION removes duplicates, UNION ALL does not.",
+      "rubric": [
+        "Anchor first",
+        "Recursive term reads the working table each iteration",
+        "Stops on empty iteration",
+        "UNION vs UNION ALL"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When would you choose LATERAL over row_number() for 'latest N per group'?",
+      "answer": "When the outer set is small or filtered and an index on (group_key, sort_key DESC) exists: LATERAL does an index scan with LIMIT N per group and never touches the rest. row_number() needs to read and sort every row in all groups, which is better only when you need most groups over most of the table.",
+      "rubric": [
+        "Per-group index scan with LIMIT",
+        "row_number scans everything",
+        "Depends on outer cardinality"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you list all descendants of a category in PostgreSQL?",
+      "difficulty": "medium",
+      "answer_md": "Use a recursive CTE: the anchor selects the starting category, the recursive term joins `categories c ON c.parent_id = tree.id`. Carry depth and a path array to avoid cycles, and make sure `parent_id` is indexed. For heavy subtree queries consider the `ltree` extension or a closure table."
+    },
+    {
+      "question": "What is LATERAL and give a practical example.",
+      "difficulty": "medium",
+      "answer_md": "LATERAL lets a FROM-item subquery reference columns of earlier FROM items, so it runs once per outer row. Typical example: for each customer fetch their 3 latest orders with `LEFT JOIN LATERAL (SELECT ... WHERE customer_id = c.id ORDER BY created_at DESC LIMIT 3) o ON true`."
+    },
+    {
+      "question": "What risks do recursive CTEs carry and how do you mitigate them?",
+      "difficulty": "hard",
+      "answer_md": "Infinite recursion on cyclic data, explosive row counts in DAGs (the same node reached by many paths) and memory/temp spill. Mitigate with CYCLE or path checks, depth limits, UNION to deduplicate, restricting the anchor with selective filters and statement_timeout."
+    },
+    {
+      "question": "Is a recursive CTE an optimisation fence?",
+      "difficulty": "hard",
+      "answer_md": "Since PostgreSQL 12 non-recursive, side-effect-free CTEs referenced once are inlined, but recursive CTEs are always materialised iteratively, so filters from the outer query are not pushed into the recursion. Put restrictions in the anchor term to limit the work."
+    }
+  ]
+}

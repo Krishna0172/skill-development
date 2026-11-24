@@ -1,0 +1,623 @@
+[
+  {
+    "slug": "work-marketplace-data-upload",
+    "name": "ECSMarketplaceDataUpload — marketplace report ingestion",
+    "role": "Primary developer",
+    "start_date": "2023-11-30",
+    "summary": "The company's main ingestion service: turns 170+ marketplace report types (orders, returns, inventory, ads, promos, fees, payouts) from 20+ channels into PostgreSQL rows that the reconciliation and analytics products read.",
+    "tech": [
+      "Python",
+      "PostgreSQL",
+      "psycopg2",
+      "pandas",
+      "numpy",
+      "AWS Lambda / ECS",
+      "S3",
+      "DynamoDB",
+      "Secrets Manager"
+    ],
+    "skills": [
+      "etl-data-processing",
+      "postgresql",
+      "postgres-upserts",
+      "psycopg2",
+      "transactions-locking",
+      "backend-architecture",
+      "aws-ecs",
+      "aws-lambda",
+      "error-handling"
+    ],
+    "topics": [
+      "registry-dispatcher-pattern",
+      "pandas-essentials",
+      "pandas-cleaning-performance",
+      "postgres-upsert",
+      "be-connection-pooling",
+      "be-postgres-locking-deadlocks",
+      "retries-backoff-idempotency",
+      "psycopg2-essentials",
+      "sql-ctes"
+    ],
+    "source_path": "D:\\forcesight\\fs-backend\\python-postgres\\ECSMarketplaceDataUpload",
+    "evidence_note": "Read-only analysis (2026-11-19): 203 .py files / ~81k lines; read lambda_function.py (dispatcher), helper.py (DatabaseManager), the service's CLAUDE.md. Git: 1,557 commits, 1,042 (67%) by you, first commit 2023-11-30.",
+    "purpose_md": "Brands upload (or auto-sync) channel reports — Myntra, Nykaa, Blinkit, Zepto, Swiggy, Snapdeal, Firstcry, BigBasket, Amazon Vendor, Unicommerce, payment gateways… Each report is parsed, normalised and written into shared tables (`orders`, `inventory`, `bank_statement`, `fs_upload`, …) so settlements, fees and returns can be reconciled per order.",
+    "architecture_md": "- **Entry:** `lambda_function.lambda_handler` (runs as Lambda or as an ECS task that receives the event through the `requests` env var).\n- **Routing:** resolves `orgid` from the authorizer/event, then\n  - automation requests (`requestId` + `channel`) → `AUTOMATION_DISPATCH` (snapdeal, swiggy, blinkit, zepto, shopify, firstcry);\n  - uploads (`body.moduleName`) → `MODULE_DISPATCH`, built from the `_MODULE_SPECS` registry.\n- **Registry:** each row is `(moduleName, module file, function, body keys[, need_db, optional_keys])`; `_make_dispatcher` returns a closure that **lazy-imports** the processor with `__import__` only when called, so a cold start doesn't import 150+ pandas modules.\n- **Data layer:** `helper.DatabaseManager` — Secrets Manager credentials, a psycopg2 connection pool, `db_transaction()`, `execute_query`, bulk helpers, `execute_with_comprehensive_deadlock_handling`.\n- **Status tracking:** every upload gets an `fs_upload` row (`upload_uuid`) that moves through processing → completed/failed with the real error text.",
+    "folder_structure_md": "```\nECSMarketplaceDataUpload/\n├── lambda_function.py      # handler + _MODULE_SPECS registry + dispatchers\n├── helper.py               # DatabaseManager: pool, transactions, upserts, deadlock retry (5k lines)\n├── debit_notes.py          # single place where deductions are recorded/allocated\n├── <Channel><Report>.py    # ~150 processors: Nykaa_Payout, BlinkitSellerPayments, SwiggyAds, Zepto_mpfees…\n├── *AutomationProcessor.py # auto-sync per channel\n├── Marketplace_PD/         # product docs for channel-specific logic\n├── Dockerfile, requirements.txt, CLAUDE.md (coding rules)\n```",
+    "modules_md": "- **Orders / returns** — `SnapdealOrders`, `Nykaa_Orders`, `BlinkitOrders`, `Zepto_Orders`, `CustomizeUnicommerceOrders`…\n- **Fees, promos, ads** — `BlinkitMPFees`, `Zepto_mpfees`, `SwiggyPromo`, `SwiggyAds`, `MyntraAdsV2`, `Intelligence_Fees`\n- **Payouts / settlements** — `Nykaa_Payout`, `BlinkitSellerPayments`, `EasebuzzFeesUpdation`, `GokwikfeesUpdation`, `MyntraLedgerSync`\n- **Debit notes** — `debit_notes.py`: record → allocate to invoice → supersede provisional entries\n- **Automation** — channel auto-sync processors driven by sync requests",
+    "database_md": "PostgreSQL through psycopg2 (raw SQL). Main tables: `orders` (heavy JSONB: `rawfees`, settlement and tax details), `inventory`, `bank_statement`, `fs_upload` (upload status), `fs_debit_note`, `fs_skuwise_ordertable`. Patterns counted in this service: `execute_batch` 130, `execute_values` 21, `ON CONFLICT` 44, `FOR UPDATE` 33, CTEs 32, JSONB 574, `jsonb_array_elements` + `LATERAL`.",
+    "apis_md": "Invoked via API Gateway/Lambda or ECS with a body like `{\"moduleName\": \"SNAPDEAL_ORDERS_REPORT\", \"URL\": \"s3://…\", \"upload_uuid\": …}`; automation calls carry `requestId` + `channel`. Responses are `{status, message}`.",
+    "business_logic_md": "Each processor: read the file (CSV/XLSX/XLSB) with pandas → detect/rename columns (header-row detection, case-insensitive required-column checks) → clean numbers, dates and ids → match to existing `orders` by order/sub-order id → compute fees, promo share, settled amount → bulk upsert → update `fs_upload`. Channel-specific rules (commission, claims, promo split by quantity, TDS, financing fees) are described in `Marketplace_PD/`.",
+    "challenges_md": "- 170+ report formats that change without notice (renamed columns, extra header rows, new sheets).\n- Huge files and many concurrent uploads writing the same `orders` rows → deadlocks.\n- Several code paths used to decide where a deduction lands, giving inconsistent results.\n- One codebase must stay importable for every report while keeping Lambda cold starts low.",
+    "solutions_md": "- Registry + lazy imports: adding a report = one new module + one registry row.\n- Header/column helpers in `helper.py` (`_skiprows_candidates`, `_headers_cover_required`, case-insensitive alignment).\n- `execute_with_comprehensive_deadlock_handling`: retries with exponential backoff + jitter, reconnects, tracks metrics.\n- `debit_notes.py` became the *one* place that records and allocates deductions (its docstring explains why).\n- Errors travel up as `(result, error)` and are saved to `fs_upload`, so users see the real reason.",
+    "contributions_md": "Primary developer: 1,042 of 1,557 commits (67%) since Nov 2023. Resume claims: 150+ report processors, the config-driven dispatcher with lazy loading, automated sync for 6 channels, pooling/transactional writes/bulk upserts. _Add what you designed vs. inherited._",
+    "learnings_md": "_Write in your own words._ Prompts: Why lazy imports instead of importing every processor? What did deadlocks teach you about lock ordering and batch size? What would you change if you rebuilt it with SQLAlchemy/FastAPI?",
+    "important_files_md": "- `lambda_function.py` — registry and dispatch\n- `helper.py` — `DatabaseManager`, `db_transaction`, deadlock retry, column helpers\n- `debit_notes.py` — deduction allocation\n- `Nykaa_Payout.py`, `BlinkitSellerPayments.py` — biggest payout processors",
+    "important_functions_md": "- `_make_dispatcher(module_name, attr, key_spec, …)` → closure doing the lazy import\n- `DatabaseManager.db_transaction()` — commit/rollback context manager\n- `execute_with_comprehensive_deadlock_handling(query, data, …, max_retries=5, backoff_multiplier=2, jitter=0.1)`\n- `debit_notes.allocate()` / `supersede_provisional()`",
+    "revise_md": "Deadlock causes and lock ordering; `execute_batch` vs `execute_values` vs `COPY`; pandas memory use on large files; replacing 861 `except Exception` with specific exceptions; parametrised SQL instead of the 467 f-string queries.",
+    "pending_improvements_md": "- Replace `print` (3,420) with structured logging.\n- Parametrise f-string SQL.\n- Narrow broad excepts.\n- Unit tests per processor using small fixture files.\n- Split `helper.py` (5k lines) into db / parsing / status modules.",
+    "items": [
+      {
+        "kind": "module",
+        "title": "Registry dispatcher with lazy imports",
+        "status": "done"
+      },
+      {
+        "kind": "module",
+        "title": "DatabaseManager: pool, transactions, deadlock retry",
+        "status": "done"
+      },
+      {
+        "kind": "improvement",
+        "title": "Parametrise f-string SQL queries",
+        "status": "todo"
+      },
+      {
+        "kind": "improvement",
+        "title": "Replace print with logging; narrow broad excepts",
+        "status": "todo"
+      },
+      {
+        "kind": "task",
+        "title": "Fixture-based tests for the top 10 processors",
+        "status": "todo"
+      }
+    ],
+    "interview": [
+      {
+        "q": "Walk me through how a report upload flows through your ingestion service, from the request to rows in PostgreSQL.",
+        "d": "medium"
+      },
+      {
+        "q": "Why did you route reports through a registry with lazy imports? What problem did it solve and what are the trade-offs?",
+        "d": "medium"
+      },
+      {
+        "q": "You handled deadlocks with retries and backoff. What causes deadlocks in bulk upserts, and how could you prevent them instead of retrying?",
+        "d": "hard"
+      },
+      {
+        "q": "How do you keep 150+ processors reliable when channels change their report formats without notice?",
+        "d": "medium"
+      },
+      {
+        "q": "Explain your upsert strategy: when do you use ON CONFLICT vs. execute_batch updates, and how do you avoid overwriting good data with NULLs?",
+        "d": "hard"
+      }
+    ],
+    "kind": "professional",
+    "organization": "ForceSight",
+    "status": "active"
+  },
+  {
+    "slug": "work-easebuzz-settlement",
+    "name": "ECSEaseBuzz — Easebuzz payout sync & fee reconciliation",
+    "role": "Main developer",
+    "start_date": "2024-10-14",
+    "summary": "Automated sync that pulls payout and settlement data from the Easebuzz payment gateway, stores bank-statement lines and writes gateway fees and settled amounts onto the matching orders.",
+    "tech": [
+      "Python",
+      "PostgreSQL",
+      "psycopg2",
+      "pandas",
+      "requests",
+      "AWS ECS",
+      "DynamoDB",
+      "Secrets Manager"
+    ],
+    "skills": [
+      "api-integration",
+      "etl-data-processing",
+      "postgresql",
+      "psycopg2",
+      "aws-ecs",
+      "dynamodb",
+      "error-handling"
+    ],
+    "topics": [
+      "pandas-essentials",
+      "postgres-upsert",
+      "psycopg2-essentials",
+      "retries-backoff-idempotency",
+      "dynamodb-essentials",
+      "ecs-fargate",
+      "sql-null-handling"
+    ],
+    "source_path": "D:\\forcesight\\fs-backend\\python-postgres\\ECSEaseBuzz",
+    "evidence_note": "Read-only analysis (2026-11-19): 9 .py files / ~3.7k lines; read eazebuzz_main.main. Git: 67 commits, 59 (88%) by you, since 2024-10-14.",
+    "purpose_md": "Brands selling through their own website (Shopify) collect payments via Easebuzz. This service fetches what Easebuzz actually paid out — per transaction and per refund, after fees — so each order shows its real gateway fees and settled amount, and bank-statement lines can be reconciled.",
+    "architecture_md": "- **Trigger:** an ECS task started with the sync request in the `requests` env var (`orgId`, `requestId`, `channel`, `key`).\n- **Sync request:** loaded from DynamoDB table `fs-sync-requests-db`; `SyncRequestHelper` reads params (date range, credentials key) and writes main/sub-process status back (RUNNING → COMPLETED / ERROR with a short dashboard message).\n- **Cost tags:** `cost_tags.tag_running_task` tags the running ECS task (org, channel) for cost reporting.\n- **DB:** shared `helpers.DatabaseManager` pattern — Secrets Manager credentials, psycopg2 pool, `db_transaction()`, deadlock-aware batch execution.\n- **Gateway client:** `Easybuzz_api.EaseBuzz` — login, API headers, `download_payout_history`, `download_payout_csv`, readable API error messages.",
+    "folder_structure_md": "```\nECSEaseBuzz/\n├── eazebuzz_main.py           # entry: sync request → fetch → process\n├── Easybuzz_api.py            # EaseBuzz API client\n├── Easebuzz_fees_updation.py  # payments/refunds → orders fees + settled amount\n├── Easybuuz_bankstatement.py  # bank statement lines\n├── easebuzz_helpers.py        # merge/aggregate rawfees, executeWithRetry\n├── helpers.py                 # DatabaseManager (pool, transactions, upserts)\n├── sync_request_helper_class.py, dynamodb.py, cost_tags.py\n```",
+    "modules_md": "- `main` — validates the event, loads the sync request, reads params, runs the pipeline, updates status\n- `easebuzzfeesupdation` → `processPaymentdf` / `processRefunddf` → `UpdatePaymentOrders` / `UpdateRefundOrders`\n- `processbankstatement` / `deleteBankStatementRecords` — re-runnable bank statement import\n- `aggregateRawfees`, `mergeRawfees`, `updateSettledAmount` — JSONB fee merge and settled-amount maths",
+    "database_md": "`orders` (JSONB `rawfees`, settlement details, `settledamount`), `bank_statement`, `fs_upload`. Uses `jsonb_array_elements`, `ON CONFLICT`, `execute_batch`, and delete-then-insert for re-runnable bank statement ranges.",
+    "apis_md": "Outbound only: Easebuzz merchant APIs (login, payout history, payout CSV). Inbound: the ECS task event.",
+    "business_logic_md": "Split payouts into payments and refunds; match by order id (cleaning ids like `123.0`); aggregate fees per order; merge new fee lines into existing JSONB without duplicating; recompute settled amount = paid − fees (− refunds); write bank-statement rows for the period.",
+    "challenges_md": "- Gateway order ids don't always match the store's format.\n- Re-running a date range must not double-count fees.\n- Login/API failures must show a short, useful message on the dashboard instead of a stack trace.",
+    "solutions_md": "- `keep_before_dot_zero_clean` and id normalisation before matching.\n- Merge fee JSON by key and delete-then-insert bank statements for the requested range (idempotent re-runs).\n- `dashboard_error_for_sync` / `short_dashboard_error` / `is_hard_dashboard_failure` separate user-facing messages from logs.",
+    "contributions_md": "59 of 67 commits (88%). _Describe which parts you designed (API client, fee merge, status handling) and which you extended._",
+    "learnings_md": "_Write in your own words._ Prompts: How do you make a sync idempotent? How would you test the fee maths without calling Easebuzz?",
+    "important_files_md": "`eazebuzz_main.py`, `Easybuzz_api.py`, `Easebuzz_fees_updation.py`, `easebuzz_helpers.py`",
+    "important_functions_md": "`main(event)`, `EaseBuzz.download_payout_history`, `processPaymentdf`, `UpdatePaymentOrders`, `mergeRawfees`, `updateSettledAmount`",
+    "revise_md": "Idempotency for re-runs; JSONB update patterns; replacing `print` (181) with logging; narrowing `except Exception` (73).",
+    "pending_improvements_md": "- Unit tests for fee aggregation with fixture CSVs.\n- Typed config (dataclass) instead of dict params.\n- Structured logs with orgId/requestId.",
+    "items": [
+      {
+        "kind": "feature",
+        "title": "Easebuzz payout API client",
+        "status": "done"
+      },
+      {
+        "kind": "feature",
+        "title": "Payments/refunds → order fees and settled amount",
+        "status": "done"
+      },
+      {
+        "kind": "task",
+        "title": "Fixture tests for fee aggregation",
+        "status": "todo"
+      }
+    ],
+    "interview": [
+      {
+        "q": "How does your Easebuzz sync make sure re-running the same date range doesn't double-count fees?",
+        "d": "medium"
+      },
+      {
+        "q": "Explain how you match gateway transactions to store orders when the ids don't line up exactly.",
+        "d": "medium"
+      },
+      {
+        "q": "How do your sync jobs report progress and errors back to the dashboard?",
+        "d": "easy"
+      }
+    ],
+    "kind": "professional",
+    "organization": "ForceSight",
+    "status": "active"
+  },
+  {
+    "slug": "work-shiprocket-settlement",
+    "name": "ECSShiprocketSettlementandBankstatement — Shiprocket COD settlement sync",
+    "role": "Main developer",
+    "start_date": "2024-09-13",
+    "summary": "Automated sync that logs in to Shiprocket, downloads COD remittance/settlement reports, writes bank-statement rows and updates each order's settlement and settled amount.",
+    "tech": [
+      "Python",
+      "Selenium (headless Chrome, CDP)",
+      "Gmail API",
+      "PostgreSQL",
+      "psycopg2",
+      "pandas",
+      "AWS ECS",
+      "DynamoDB",
+      "Secrets Manager"
+    ],
+    "skills": [
+      "web-scraping",
+      "api-integration",
+      "etl-data-processing",
+      "postgresql",
+      "aws-ecs",
+      "aws-secrets",
+      "error-handling"
+    ],
+    "topics": [
+      "pandas-essentials",
+      "postgres-upsert",
+      "retries-backoff-idempotency",
+      "dynamodb-essentials",
+      "ecs-fargate",
+      "web-security-owasp"
+    ],
+    "source_path": "D:\\forcesight\\fs-backend\\python-postgres\\ECSShiprocketSettlementandBankstatement",
+    "evidence_note": "Read-only analysis (2026-11-19): 10 .py files / ~4.4k lines; read Shiprocket_api auth capture and the getOtp package. Git: 59 commits, 51 (86%) by you, since 2024-09-13.",
+    "purpose_md": "Logistics partner Shiprocket collects cash on delivery and remits it to the brand in batches. This service fetches those remittances so every COD order shows when and how much was settled, and the bank statement can be reconciled.",
+    "architecture_md": "- **Trigger:** an ECS task started with the sync request in the `requests` env var (`orgId`, `requestId`, `channel`, `key`).\n- **Sync request:** loaded from DynamoDB table `fs-sync-requests-db`; `SyncRequestHelper` reads params (date range, credentials key) and writes main/sub-process status back (RUNNING → COMPLETED / ERROR with a short dashboard message).\n- **Cost tags:** `cost_tags.tag_running_task` tags the running ECS task (org, channel) for cost reporting.\n- **DB:** shared `helpers.DatabaseManager` pattern — Secrets Manager credentials, psycopg2 pool, `db_transaction()`, deadlock-aware batch execution.\n- **Login:** `Shiprocket_api` starts headless Chrome, enables the Chrome DevTools `Network` domain, logs in, and captures the auth token from network responses (`_install_auth_capture`, `_drain_network_auth`, `_read_session_token`).\n- **OTP:** `getOtp/` reads the login OTP from a Gmail inbox through the Gmail API (OAuth secret from Secrets Manager) and parses it from the message body.\n- **API calls:** with the captured token, plain HTTP calls download settlement data.",
+    "folder_structure_md": "```\nECSShiprocketSettlementandBankstatement/\n├── Shiprocket_main.py                         # entry\n├── Shiprocket_api.py                          # headless login, token capture, API calls\n├── Shiprocket_Settlement_and_Bankstatement.py # settlement → orders, bank statement\n├── getOtp/ (get_otp.py, gmail_client.py, otp_formatter.py, channelOtpConfig.json)\n├── helper.py, sync_request_helper_class.py, dynamodb.py\n```",
+    "modules_md": "- `settlement_and_bankstatement` → `processShiprocketSettlement` → `updateOrderswithSettlement`\n- `processBankStatement` — bank statement rows for the period\n- `calculate_settled_amount`, `check_shopify_hash_included` (order-id format with/without `#`)\n- `getOtp.get_otp` — Gmail search query per channel, OTP parsing",
+    "database_md": "`orders` (settlement JSON, `settledamount`), `bank_statement`, `fs_upload`, cashback table; `execute_batch` + `ON CONFLICT` upserts.",
+    "apis_md": "Outbound: Shiprocket web app/API (token from browser session), Gmail API. Inbound: the ECS task event.",
+    "business_logic_md": "Download remittances for the requested range → normalise order ids (Shopify `#` prefix) → attach settlement details and UTR/remittance info to orders → settled amount → bank-statement lines.",
+    "challenges_md": "- No simple API login: the portal needs a browser session and an emailed OTP.\n- Tokens and OTPs are sensitive and time-limited.\n- Selenium in a container (Chrome binary/driver paths).",
+    "solutions_md": "- Capture the token from DevTools network events instead of scraping pages, then use plain HTTP.\n- OTP read automatically from Gmail with a time-bounded search query.\n- Secrets in AWS Secrets Manager; Chrome paths via env vars (`CHROME_BIN`, `CHROMEDRIVER_PATH`).",
+    "contributions_md": "51 of 59 commits (86%). _Describe the parts you built: login automation, OTP reader, settlement mapping._",
+    "learnings_md": "_Write in your own words._ Prompts: What are the risks of automating a login with OTP? How would you detect that the portal changed?",
+    "important_files_md": "`Shiprocket_api.py`, `getOtp/get_otp.py`, `Shiprocket_Settlement_and_Bankstatement.py`",
+    "important_functions_md": "`_install_auth_capture`, `_drain_network_auth`, `get_otp`, `processShiprocketSettlement`, `updateOrderswithSettlement`",
+    "revise_md": "Security of stored credentials/tokens (`getOtp/token.json` and `client_secret.json` sit in the folder — should live in Secrets Manager only); Selenium reliability; logging instead of `print` (203).",
+    "pending_improvements_md": "- Move `client_secret.json` / `token.json` out of the code folder into Secrets Manager.\n- Alert when the login flow breaks.\n- Tests for settlement mapping with fixture files.",
+    "items": [
+      {
+        "kind": "feature",
+        "title": "Headless login with DevTools token capture",
+        "status": "done"
+      },
+      {
+        "kind": "feature",
+        "title": "Gmail OTP reader",
+        "status": "done"
+      },
+      {
+        "kind": "improvement",
+        "title": "Move OAuth client secret and token out of the repo folder",
+        "status": "todo"
+      }
+    ],
+    "interview": [
+      {
+        "q": "Shiprocket needed an OTP login. How did you automate it, and what are the security risks?",
+        "d": "hard"
+      },
+      {
+        "q": "Why capture the auth token from browser network events instead of scraping the pages?",
+        "d": "medium"
+      },
+      {
+        "q": "How do you reconcile COD remittances against orders and the bank statement?",
+        "d": "medium"
+      }
+    ],
+    "kind": "professional",
+    "organization": "ForceSight",
+    "status": "active"
+  },
+  {
+    "slug": "work-unicommerce-returns",
+    "name": "ECSUnicommerceReturns — Unicommerce returns, reverse orders & in-hand status",
+    "role": "Main developer",
+    "start_date": "2024-12-23",
+    "summary": "Pulls returns, reverse-pickup, manifest and return-GST reports from the Unicommerce OMS through its report API and updates orders with return status, return fees and whether the returned item is back in hand.",
+    "tech": [
+      "Python",
+      "PostgreSQL",
+      "psycopg2",
+      "pandas",
+      "requests",
+      "AWS ECS",
+      "Secrets Manager"
+    ],
+    "skills": [
+      "api-integration",
+      "etl-data-processing",
+      "postgresql",
+      "psycopg2",
+      "python-exceptions-logging",
+      "aws-ecs"
+    ],
+    "topics": [
+      "pandas-essentials",
+      "postgres-upsert",
+      "py-logging",
+      "retries-backoff-idempotency",
+      "rest-api-design",
+      "ecs-fargate"
+    ],
+    "source_path": "D:\\forcesight\\fs-backend\\python-postgres\\ECSUnicommerceReturns",
+    "evidence_note": "Read-only analysis (2026-11-19): 10 .py files / ~2.8k lines. Git: ECSUnicommerceReturns 42 commits, 40 (95%) by you since 2025-07-18; its predecessor UnicommerceReturns (now empty) 17 commits, 16 by you since 2024-12-23.",
+    "purpose_md": "Brands using Unicommerce as their OMS need returns reflected on each order: return status, return-related fees, and whether the item physically came back (\"in hand\") — this drives return reconciliation and claims.",
+    "architecture_md": "- **Entry:** `main.main` (ECS task) resolves the org(s) to sync and the report types.\n- **API client:** `unicommerce.UniCommerce` — `login`, `renew_refresh_token`, `create_report`, `get_report`, response parsing.\n- **Report flow:** `create_Report` asks Unicommerce to build a report, `poll_report` waits until it's ready, then the CSV is downloaded into pandas.\n- **Processors:** one module per report type updates `orders`.\n- **Errors:** `helpers` turns API/login/facility errors into short readable messages and decides which errors are skippable (empty report, per-batch failures); upload status is recorded per run.",
+    "folder_structure_md": "```\nECSUnicommerceReturns/\n├── main.py                              # entry, per-org loop, error recording\n├── unicommerce.py                       # UniCommerce API client (tokens, reports)\n├── create_Report.py                     # create + poll report\n├── UnicommerceReturns.py                # returns\n├── unicommerceReverse.py                # reverse pickups\n├── UnicommerceReturnReconciliation.py   # in-hand status\n├── UnicommerceTallyReturnGST.py         # return GST (Tally)\n├── UnicommerceManifest.py               # manifests\n└── helpers.py                           # DB, secrets, error formatting\n```",
+    "modules_md": "- `unicommerceReturns` / `unicommerceReverse` → `process_orders_df` → `update_orders_with_fees`\n- `unicommerceReturnReconciliation` / `unicommerceTallyReturnGST` / `unicommerceManifest` → `update_in_hand`\n- `resolve_create_report_outcome`, `is_empty_report_message`, `is_skippable_batch_error` — outcome classification",
+    "database_md": "`orders` (return status, return fees JSON, in-hand flag), upload status table; `execute_batch` / `execute_values` updates, CTEs for matching.",
+    "apis_md": "Outbound: Unicommerce OAuth (password + refresh token) and export/report APIs, per facility. Inbound: ECS task event.",
+    "business_logic_md": "Create report for the date range and facility → poll until ready → download → normalise order/sub-order ids → match to `orders` → set return status/fees or in-hand status → record outcome (including \"no data\" as a benign result).",
+    "challenges_md": "- Reports are asynchronous: you request one, then wait.\n- Multiple facilities per org, each with its own errors.\n- Tokens expire mid-run.",
+    "solutions_md": "- Create-then-poll pattern with a timeout.\n- `renew_refresh_token` before expiry.\n- Facility-aware error formatting (`with_facility`, `format_unicommerce_facility_error`) and skippable-error classification so one bad facility doesn't fail the whole run.\n- Uses `logging` (192 calls) rather than `print` — unlike most older services.",
+    "contributions_md": "56 of 59 commits across both versions (~95%). _Describe the move from UnicommerceReturns to the ECS version and why._",
+    "learnings_md": "_Write in your own words._ Prompts: How do you design a poll loop (interval, timeout, backoff)? Why classify errors instead of failing on the first one?",
+    "important_files_md": "`main.py`, `unicommerce.py`, `create_Report.py`, `UnicommerceReturnReconciliation.py`, `helpers.py`",
+    "important_functions_md": "`UniCommerce.create_report` / `get_report`, `poll_report`, `resolve_create_report_outcome`, `update_in_hand`",
+    "revise_md": "Polling vs webhooks; token refresh; narrowing `except Exception` (48); parametrised SQL (14 f-string queries).",
+    "pending_improvements_md": "- Tests for each processor with fixture CSVs (`test.py` is empty).\n- Exponential backoff in `poll_report`.",
+    "items": [
+      {
+        "kind": "feature",
+        "title": "Unicommerce report API client with token refresh",
+        "status": "done"
+      },
+      {
+        "kind": "feature",
+        "title": "Return in-hand reconciliation",
+        "status": "done"
+      },
+      {
+        "kind": "task",
+        "title": "Fill in test.py with processor tests",
+        "status": "todo"
+      }
+    ],
+    "interview": [
+      {
+        "q": "Unicommerce reports are generated asynchronously. How does your service request, wait for and download them?",
+        "d": "medium"
+      },
+      {
+        "q": "How do you stop one failing facility from failing the whole sync for an org?",
+        "d": "medium"
+      },
+      {
+        "q": "What does 'in hand' mean for a return and how do you determine it from the reports?",
+        "d": "easy"
+      }
+    ],
+    "kind": "professional",
+    "organization": "ForceSight",
+    "status": "active"
+  },
+  {
+    "slug": "work-product-config-intelligence",
+    "name": "ECSIntelligenceProductConfig — product config sync from OMS platforms",
+    "role": "Sole developer",
+    "start_date": "2026-04-28",
+    "summary": "Fetches product master and channel-listing reports from three OMS platforms (Unicommerce, EasyEcom, OMS Guru) and updates each product's configuration — package dimensions, tax %, SKU/listing mappings — in the inventory table, driven by per-org column-mapping settings.",
+    "tech": [
+      "Python",
+      "PostgreSQL",
+      "psycopg2",
+      "pandas",
+      "requests",
+      "BeautifulSoup",
+      "AWS ECS",
+      "S3",
+      "Secrets Manager"
+    ],
+    "skills": [
+      "api-integration",
+      "web-scraping",
+      "etl-data-processing",
+      "postgresql",
+      "web-security",
+      "backend-architecture",
+      "aws-ecs"
+    ],
+    "topics": [
+      "registry-dispatcher-pattern",
+      "pandas-essentials",
+      "postgres-upsert",
+      "web-security-owasp",
+      "py-clean-architecture",
+      "ecs-fargate"
+    ],
+    "source_path": "D:\\forcesight\\fs-backend\\python-postgres\\ECSIntelligenceProductConfig",
+    "evidence_note": "Read-only analysis (2026-11-19): 23 .py files / ~7.1k lines; read main.processAndUpdateProductConfigIntelligence and inventoryUpdateFunctions.build_dynamic_inventory_update_query. Git: 39 commits, all yours, since 2026-04-28.",
+    "purpose_md": "Accurate product configuration (weight/dimensions for shipping fees, tax rates, which marketplace listing maps to which SKU) is what fee and settlement reconciliation depends on. Brands keep this data in their OMS; this service copies it into ForceSight automatically.",
+    "architecture_md": "- **Entry:** `main.processAndUpdateProductConfigIntelligence(event)` — resolves org + channel, picks the channel handler (`_resolve_channel_handler`).\n- **One automation module per OMS** with the same shape: `unicommerce_automation.py` (API), `easyecom_automation.py` (Product Master export job), `oms_guru/` (HTTP client + export scrapers + notification-link download of ZIP/CSV).\n- **Settings-driven mapping:** per-org settings say which report column maps to which inventory column; `column_mappings.py` converts values (package dimensions JSON, tax % parsing); `channel_utils.py` resolves which channels a mapping applies to.\n- **Writes:** `inventoryUpdateFunctions` builds the UPDATE dynamically from the mapped columns.\n- **Connection hygiene:** the code deliberately doesn't hold a DB connection during long automation/pandas/S3 work.",
+    "folder_structure_md": "```\nECSIntelligenceProductConfig/\n├── main.py                       # entry + per-channel dispatch\n├── unicommerce_automation.py     # Unicommerce reports\n├── easyecom_automation.py        # EasyEcom product master export\n├── oms_guru/ (client.py, scrapers.py, export_download.py, settings.py)\n├── column_mappings.py            # report column → inventory column transforms\n├── channel_utils.py              # channel normalisation\n├── intelligence/channel_listing_match.py\n├── inventoryUpdateFunctions.py   # dynamic, whitelisted UPDATE builder\n└── db_manager.py, cost_tags.py\n```",
+    "modules_md": "- `processAndUpdateProductConfigIntelligence` — orchestration (425 lines)\n- `getUnicommerceProductConfigSettings`, `getEasyEcomProductConfigSettings`, `getOmsGuruProductConfigSettings`\n- `add_packagedimensions_json`, `parse_tax_pct_value`, `apply_extra_value_column_transforms`\n- `build_dynamic_inventory_update_query`, `update_inventory_columns`, `build_temp_cast_expression`\n- `channel_listing_match` — listing-id vs SKU match rules (ported from another service)",
+    "database_md": "`inventory` (product config columns, JSON package dimensions), settings tables per org. Dynamic `UPDATE … FROM (VALUES …)` with per-column casts.",
+    "apis_md": "Outbound: Unicommerce APIs, EasyEcom export jobs, OMS Guru web endpoints (HTML parsed with BeautifulSoup, export notifications). Inbound: ECS task event.",
+    "business_logic_md": "For each mapped report: download → normalise columns → apply transforms → melt per channel when a mapping covers several channels → match rows to inventory (by SKU or listing id) → update only the allowed columns, with force-insert rules per column.",
+    "challenges_md": "- Three OMS platforms with completely different access methods.\n- Column names come from configuration, so the UPDATE statement can't be hard-coded — a SQL-injection risk.\n- Long downloads holding DB connections.",
+    "solutions_md": "- Same module layout for each OMS, so adding a fourth is predictable.\n- Dynamic SQL guarded by `SAFE_IDENTIFIER_RE` (only plain identifiers), a check against the table's real columns, and an allowed-columns list; values always go through `%s` placeholders.\n- Open the DB connection only for the write phase.",
+    "contributions_md": "Sole author: 39 of 39 commits since April 2026.",
+    "learnings_md": "_Write in your own words._ Prompts: How do you build dynamic SQL safely? Why mirror one module layout across integrations?",
+    "important_files_md": "`main.py`, `inventoryUpdateFunctions.py`, `column_mappings.py`, `oms_guru/export_download.py`",
+    "important_functions_md": "`processAndUpdateProductConfigIntelligence`, `build_dynamic_inventory_update_query`, `add_packagedimensions_json`, `_find_notification_download_link`",
+    "revise_md": "`psycopg2.sql.Identifier` as an alternative to regex whitelisting; splitting the 425-line orchestration function; tests for column transforms.",
+    "pending_improvements_md": "- Use `psycopg2.sql.Identifier` for column names.\n- Unit tests for `column_mappings` (pure functions — easy wins).\n- Break up `processAndUpdateProductConfigIntelligence`.",
+    "items": [
+      {
+        "kind": "feature",
+        "title": "Unicommerce product config",
+        "status": "done"
+      },
+      {
+        "kind": "feature",
+        "title": "EasyEcom product master export",
+        "status": "done"
+      },
+      {
+        "kind": "feature",
+        "title": "OMS Guru scraping + export download",
+        "status": "done"
+      },
+      {
+        "kind": "task",
+        "title": "Unit tests for column_mappings",
+        "status": "todo"
+      }
+    ],
+    "interview": [
+      {
+        "q": "Your product-config service builds an UPDATE from column names in configuration. How did you prevent SQL injection?",
+        "d": "hard"
+      },
+      {
+        "q": "How did you structure integrations for three different OMS platforms so they stay maintainable?",
+        "d": "medium"
+      },
+      {
+        "q": "Why avoid holding a database connection during long downloads, and what can go wrong if you do?",
+        "d": "medium"
+      }
+    ],
+    "kind": "professional",
+    "organization": "ForceSight",
+    "status": "active"
+  },
+  {
+    "slug": "work-unicommerce-channel-sync",
+    "name": "UnicommerceChannelSync — orders, sales & inventory from Unicommerce (+ DB optimisation rollout)",
+    "role": "Main developer",
+    "start_date": "2024-06-14",
+    "summary": "Lambda that syncs orders, sales and inventory from the Unicommerce OMS into PostgreSQL for each connected org. It is also where your FS-5629 'Database Optimization' change landed: a shared PgBouncer-backed connection pool rolled out across many services.",
+    "tech": [
+      "Python",
+      "PostgreSQL",
+      "PgBouncer",
+      "psycopg2 (ThreadedConnectionPool)",
+      "pandas",
+      "AWS Lambda",
+      "Secrets Manager"
+    ],
+    "skills": [
+      "api-integration",
+      "etl-data-processing",
+      "postgresql",
+      "psycopg2",
+      "query-optimization",
+      "transactions-locking",
+      "aws-lambda",
+      "aws-secrets"
+    ],
+    "topics": [
+      "be-connection-pooling",
+      "python-context-managers",
+      "python-threading-gil",
+      "psycopg2-essentials",
+      "postgres-upsert",
+      "aws-lambda-essentials",
+      "pandas-essentials"
+    ],
+    "source_path": "D:\\forcesight\\fs-backend\\python-postgres\\UnicommerceChannelSync",
+    "evidence_note": "Read-only analysis (2026-11-19): 7 .py files / ~1.9k lines. Git: 38 commits, 28 (74%) by you since 2024-06-14. FS-5629 commits (13–22 Jul 2026, by you) changed 164 files: added the pooled-connection helpers here and in ECSUnicommerceReturns, UnicommerceOrders and others.",
+    "purpose_md": "Keeps Unicommerce-managed brands' orders, sales (with addresses/pincodes) and inventory current in ForceSight so fees, returns and settlements can be matched per order.",
+    "architecture_md": "- **Entry:** `lambda_function.lambda_handler` → `get_org_ids` (orgs with Unicommerce connected) → `get_db_data` (credentials/settings) → per org: orders, sales, inventory.\n- **API:** `unicommerce.UniCommerce` (login, refresh token, create/get report).\n- **Processors:** `orders.py`, `sales_processor.py`, `inventory.py`; `pincode.py` maps postal codes to city/state from `postalCodes.json`.\n- **DB layer after FS-5629:** module-level `ThreadedConnectionPool` created lazily under a `threading.Lock` (double-checked), pointing at PgBouncer (port 6432); credentials from Secrets Manager; `get_db_connection` / `release_db_connection` (reset transaction state on return); `db_transaction()` context manager commits or rolls back and always returns the connection.",
+    "folder_structure_md": "```\nUnicommerceChannelSync/\n├── lambda_function.py   # entry, org loop\n├── unicommerce.py       # API client\n├── orders.py            # orders + return fees + status\n├── sales_processor.py   # sales report\n├── inventory.py         # inventory report\n├── pincode.py + postalCodes.json\n└── helpers.py           # pool, transactions, DatabaseManager\n```",
+    "modules_md": "- `unicommerceOrders` → `process_orders_df` → `determine_fs_order_status`, `calculate_returnfees`, `updateSettledAmount`\n- `process_sales` / `extract_channel_to_sync`\n- `unicommerceInventory` → `processInventoryDataFrame`\n- `_get_connection_pool`, `db_transaction`, `execute_query`",
+    "database_md": "`orders`, `inventory`, upload status; `execute_batch` 9, `ON CONFLICT` 3; pooled connections through PgBouncer.",
+    "apis_md": "Outbound: Unicommerce OAuth + report APIs. Inbound: scheduled/invoked Lambda event.",
+    "business_logic_md": "Map Unicommerce order states to ForceSight order status; compute return quantity/fees; derive address fields from pincode; upsert orders and inventory per org.",
+    "challenges_md": "- Every function call opened its own database connection — slow under load and heavy for PostgreSQL.\n- Connections leaked or stayed in a failed transaction after errors.",
+    "solutions_md": "FS-5629: one shared, lazily created `ThreadedConnectionPool` per process behind PgBouncer; lock-protected initialisation (safe with threads); `db_transaction()` guarantees commit/rollback and return to the pool; reset state on release.",
+    "contributions_md": "28 of 38 commits (74%) here; the FS-5629 pooling rollout across services is yours. _If this is part of the '40% faster' resume claim, write down the before/after measurement you saw._",
+    "learnings_md": "_Write in your own words._ Prompts: Why pool connections *and* use PgBouncer? What breaks if a connection is returned mid-transaction? Why double-checked locking for lazy init?",
+    "important_files_md": "`helpers.py`, `lambda_function.py`, `orders.py`",
+    "important_functions_md": "`_get_connection_pool`, `get_db_connection`, `release_db_connection`, `db_transaction`, `determine_fs_order_status`",
+    "revise_md": "PgBouncer pooling modes (session vs transaction) and what they forbid; pool sizing for Lambda concurrency; `global` usage (lazy singleton) vs alternatives.",
+    "pending_improvements_md": "- Measure and record query/batch timings so the optimisation is provable.\n- Replace `print` (102) with logging.\n- Move the shared pool code into one package/Lambda Layer instead of copies per service.",
+    "items": [
+      {
+        "kind": "improvement",
+        "title": "FS-5629: pooled connections via PgBouncer across services",
+        "status": "done"
+      },
+      {
+        "kind": "task",
+        "title": "Record before/after timings for the optimisation",
+        "status": "todo"
+      },
+      {
+        "kind": "improvement",
+        "title": "Single shared DB helper package instead of per-service copies",
+        "status": "todo"
+      }
+    ],
+    "interview": [
+      {
+        "q": "You rolled out a shared connection pool behind PgBouncer across many services. Why both a client-side pool and PgBouncer?",
+        "d": "hard"
+      },
+      {
+        "q": "Explain your db_transaction() context manager. What does it guarantee when an exception happens?",
+        "d": "medium"
+      },
+      {
+        "q": "Why does lazy pool creation need a lock, and what is double-checked locking?",
+        "d": "medium"
+      },
+      {
+        "q": "How would you prove a database optimisation actually made things faster?",
+        "d": "medium"
+      }
+    ],
+    "kind": "professional",
+    "organization": "ForceSight",
+    "status": "active"
+  },
+  {
+    "slug": "work-payu-settlement",
+    "name": "ECSPayU — PayU settlement & charges sync",
+    "role": "Co-developer (about half the commits)",
+    "start_date": "2024-10-03",
+    "summary": "Automated sync that downloads PayU settlement and charges/fees reports and updates each order's settlement details, gateway fees and settled amount.",
+    "tech": [
+      "Python",
+      "PostgreSQL",
+      "psycopg2",
+      "pandas",
+      "requests",
+      "AWS ECS",
+      "DynamoDB",
+      "Secrets Manager"
+    ],
+    "skills": [
+      "api-integration",
+      "etl-data-processing",
+      "postgresql",
+      "psycopg2",
+      "transactions-locking",
+      "aws-ecs",
+      "dynamodb"
+    ],
+    "topics": [
+      "pandas-essentials",
+      "postgres-upsert",
+      "be-postgres-locking-deadlocks",
+      "retries-backoff-idempotency",
+      "dynamodb-essentials",
+      "ecs-fargate"
+    ],
+    "source_path": "D:\\forcesight\\fs-backend\\python-postgres\\ECSPayU",
+    "evidence_note": "Read-only analysis (2026-11-19): 8 .py files / ~4.2k lines. Git: 51 commits, 27 (53%) by you, 17 by Vel Prajan, since 2024-10-03. One of your commits reverted a colleague's PayU change (scope, credential printing, hard-coded event).",
+    "purpose_md": "Same goal as the Easebuzz sync for brands whose website payments go through PayU: record what PayU actually settled per transaction and what it charged, so order profitability and bank reconciliation are correct.",
+    "architecture_md": "- **Trigger:** an ECS task started with the sync request in the `requests` env var (`orgId`, `requestId`, `channel`, `key`).\n- **Sync request:** loaded from DynamoDB table `fs-sync-requests-db`; `SyncRequestHelper` reads params (date range, credentials key) and writes main/sub-process status back (RUNNING → COMPLETED / ERROR with a short dashboard message).\n- **Cost tags:** `cost_tags.tag_running_task` tags the running ECS task (org, channel) for cost reporting.\n- **DB:** shared `helpers.DatabaseManager` pattern — Secrets Manager credentials, psycopg2 pool, `db_transaction()`, deadlock-aware batch execution.\n- **Client:** `payu.PayU` — login, merchant id lookup (`fetch_mid`), report creation, structured error building.\n- **Reports:** `settlement.py` (settlement report → orders) and `ChargesFees.py` (charges → marketplace fees); reports arrive as bytes/ZIP and are parsed into pandas.",
+    "folder_structure_md": "```\nECSPayU/\n├── main.py          # validate event, credentials, process_reports\n├── payu.py          # PayU client\n├── settlement.py    # settlement report → orders\n├── ChargesFees.py   # charges/fees → orders\n├── helpers.py, sync_request_helper_class.py, dynamodb.py, cost_tags.py\n```",
+    "modules_md": "- `main` → `validate_event`, `get_payu_credentials`, `process_reports`\n- `download_payu_settlement_report` → `prepare_settlement_dataframe` → `settlement`\n- `Charges_Fees` → `extract_marketplace_fees` → `merge_fees` → `fee_update`",
+    "database_md": "`orders` (settlement JSON, fee JSON, `settledamount`), `bank_statement`; `execute_batch` 17, `ON CONFLICT` 6, one `FOR UPDATE`; deadlock-aware execution (your commit: \"Handled deadlock for all queries\").",
+    "apis_md": "Outbound: PayU merchant dashboard/report APIs. Inbound: ECS task event.",
+    "business_logic_md": "Normalise report columns (PayU renames them) → build matching ids (transaction id vs order id) → attach settlement → extract and merge fee lines → recompute settled amount.",
+    "challenges_md": "- Report column names change between downloads.\n- Matching PayU transactions to orders.\n- Concurrent updates to the same orders causing deadlocks.",
+    "solutions_md": "- `_normalize_settlement_report_columns` / `_normalize_charges_report_columns`.\n- `_build_matchingids_tuple` / `_build_txn_match_clause` for flexible matching.\n- Deadlock handling on all write queries.",
+    "contributions_md": "27 of 51 commits (53%) — shared with Vel Prajan. _Be precise in interviews about which parts were yours (e.g. deadlock handling, the revert)._",
+    "learnings_md": "_Write in your own words._ Prompts: Why did you revert the colleague's change — what was risky about printing credentials or hard-coding events?",
+    "important_files_md": "`main.py`, `payu.py`, `settlement.py`, `ChargesFees.py`",
+    "important_functions_md": "`download_payu_settlement_report`, `settlement`, `merge_fees`, `_build_txn_match_clause`",
+    "revise_md": "Never logging secrets; deadlock prevention through consistent row order; parametrised SQL (14 f-string queries).",
+    "pending_improvements_md": "- Fixture tests for column normalisation.\n- Logging instead of `print` (186).",
+    "items": [
+      {
+        "kind": "improvement",
+        "title": "Deadlock handling for all write queries",
+        "status": "done"
+      },
+      {
+        "kind": "task",
+        "title": "Tests for report column normalisation",
+        "status": "todo"
+      }
+    ],
+    "interview": [
+      {
+        "q": "In the PayU sync you reverted a change that printed credentials. Why is that dangerous, and how should secrets be handled in logs?",
+        "d": "medium"
+      },
+      {
+        "q": "How do you match payment-gateway transactions to orders when the report uses different ids?",
+        "d": "medium"
+      }
+    ],
+    "kind": "professional",
+    "organization": "ForceSight",
+    "status": "active"
+  }
+]

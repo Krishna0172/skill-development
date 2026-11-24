@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty, stat %}
+{% block title %}Interview prep{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Interview prep</h1><p>Answer out loud or in writing first, then compare with the model answer and rate your confidence. Low-confidence answers can go into revision.</p></div>
+  <div class="actions"><a class="btn" href="/claims">Resume claims</a><a class="btn primary" href="/interview/mock{{ '?role=' ~ role if role }}">Mock interview</a></div>
+</div>
+<div class="grid g3 mb">
+  {{ stat("Confident", counts.confident, href="/interview?status=confident") }}
+  {{ stat("Practising", counts.practising, href="/interview?status=practising") }}
+  {{ stat("Not practised", counts.new, href="/interview?status=new") }}
+</div>
+<form method="get" action="/interview" class="grid g5 mb">
+  <input name="q" value="{{ q }}" placeholder="Search questions…" style="grid-column:span 2">
+  <select name="role"><option value="">All roles</option>{% for k, v in roles.items() %}<option value="{{ k }}" {{ 'selected' if k == role }}>{{ v }}</option>{% endfor %}</select>
+  <select name="category"><option value="">All categories</option>{% for c in cats %}<option value="{{ c.category }}" {{ 'selected' if c.category == category }}>{{ c.category|label }} ({{ c.count }})</option>{% endfor %}</select>
+  <div class="row"><select name="status"><option value="">Any status</option>{% for s in ["new", "practising", "confident"] %}<option value="{{ s }}" {{ 'selected' if s == status }}>{{ s|label }}</option>{% endfor %}</select><button class="btn">Filter</button></div>
+</form>
+<div class="small faint mb">{{ total }} questions{% if total > rows|length %} · showing first {{ rows|length }}{% endif %}</div>
+{% if not rows %}{{ empty("No questions match", "Clear the filters to see everything.") }}{% endif %}
+{% set here = request.url.path ~ ('?' ~ request.url.query if request.url.query else '') %}
+<div class="stack">
+{% for r in rows %}
+  <details class="card" id="iq-{{ r.id }}">
+    <summary class="body" style="cursor:pointer;list-style:none">
+      <div class="between"><strong>{{ r.question }}</strong><span class="row">{{ badge(r.status) }}{{ badge(r.difficulty) }}</span></div>
+      <div class="tiny faint mt" style="margin-top:4px">{{ r.category|label }}{% if r.skill %} · {{ r.skill }}{% endif %}{% if r.topic %} · {{ r.topic }}{% endif %}{% if r.practice_count %} · practised {{ r.practice_count }}× · confidence {{ r.confidence }}/5 · {{ r.last_practised_at|rel }}{% endif %}{% if r.in_revision %} · in revision{% endif %}</div>
+    </summary>
+    <div class="body topic-section">
+      <form method="post" action="/interview/{{ r.id }}/practice" class="form-grid">
+        <input type="hidden" name="next" value="{{ here }}#iq-{{ r.id }}">
+        <label class="field">My answer <span class="hint">write it before revealing the model answer</span><textarea name="my_answer_md" rows="4">{{ r.my_answer_md or "" }}</textarea></label>
+        {% if r.answer_md %}<details class="fold"><summary>Model answer</summary><div class="md">{{ r.answer_md|md }}</div></details>{% endif %}
+        <div class="row"><span class="small muted">Confidence</span>{% for n in range(1, 6) %}<button class="btn sm {{ 'primary' if r.confidence == n }}" name="confidence" value="{{ n }}">{{ n }}</button>{% endfor %}</div>
+      </form>
+      {% if not r.in_revision %}<form method="post" action="/interview/{{ r.id }}/revise" class="mt"><input type="hidden" name="next" value="{{ here }}#iq-{{ r.id }}"><button class="btn sm ghost">+ Add to revision</button></form>{% endif %}
+    </div>
+  </details>
+{% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,152 @@
+{
+  "slug": "ai-latency-cost-optimization",
+  "title": "Cutting LLM latency and cost",
+  "skill": "ai-production",
+  "extra_skills": [
+    "caching-redis",
+    "python-asyncio"
+  ],
+  "category": "AI",
+  "difficulty": "advanced",
+  "tags": [
+    "caching",
+    "semantic-cache",
+    "model-routing",
+    "prompt-trimming",
+    "batching",
+    "streaming",
+    "cost-budget"
+  ],
+  "summary": "LLM cost is roughly requests x tokens x price, and latency is dominated by output tokens and sequential calls. The levers are: avoid calls (caching), make calls cheaper (smaller models, shorter prompts), make them faster or feel faster (streaming, parallelism, batching), and cap spend with per-request and per-org budgets.",
+  "why_md": "- At scale, an LLM feature's unit economics decide whether it ships; you'll be asked 'how would you reduce cost by 50%?'.\n- Latency directly drives user satisfaction in chat UIs.\n- Most levers are classic backend techniques — caching, batching, concurrency, budgets — applied to tokens.",
+  "details_md": "### Cost model\n`cost = sum over calls of (input_tokens x input_rate + output_tokens x output_rate)`. Output tokens are usually priced higher than input and take longer to generate. Measure before optimising: tokens and cost per request, broken down by step (history, system prompt, retrieved context, tool results, output).\n\n### Avoid the call: caching\n- **Exact cache**: key = hash(normalised question + org + prompt version + model + relevant data version). Cheap, safe, low hit rate for free text but high for repeated dashboards/FAQ-style questions. Include tenant and version in the key, and expire when underlying data changes.\n- **Semantic cache**: embed the question, reuse a cached answer if similarity is above a threshold. Higher hit rate, but risk of wrong answers ('sales in March' vs 'sales in May' can be very similar). Use only for low-risk, data-independent answers, tune the threshold on an eval set, and never share across tenants.\n- Cache intermediate steps too: embeddings of unchanged documents, generated SQL for identical questions.\n- **Provider prompt caching** (where offered): a stable prompt prefix (system prompt, schema) gets discounted/faster on reuse — put static content first.\n\n### Make calls cheaper\n- **Smaller models / routing**: use a small model for classification, routing, extraction and summarising; reserve the large model for hard reasoning. A cascade (small first, escalate on low confidence or validation failure) works well.\n- **Prompt trimming**: shorter system prompts, only relevant schema tables, fewer/better retrieved chunks (rerank then keep top 3-5), trimmed history, truncated tool outputs.\n- **Limit output**: max tokens, concise formats; ask for JSON, not prose, when code consumes it.\n\n### Make it faster\n- **Streaming** for perceived latency (time to first token).\n- **Parallelism**: independent calls (retrieval + history load, several tool calls, per-chunk summaries) with `asyncio.gather`, bounded by a semaphore.\n- **Batching**: embeddings and offline jobs in batches; provider batch APIs for non-urgent work are often cheaper.\n- Fewer sequential round trips: merge steps where one call can do the work.\n\n### Budgets\nSet a per-request token/cost budget (max steps, max context, max output) and per-org daily/monthly budgets checked before calling the model. Degrade gracefully when exceeded (smaller model, shorter answer, or a clear limit message).",
+  "code_md": "```python\n# Parallel independent work + budget check before the expensive call.\nimport asyncio\n\nasync def answer(question: str, user, budget):\n    history, chunks, schema = await asyncio.gather(\n        load_history(user.session_id),            # DB\n        retrieve(question, org_id=user.org_id),   # vector search\n        load_schema_summary(user.org_id),         # cached\n    )\n    prompt = build_prompt(question, history[-6:], chunks[:4], schema)   # trimmed context\n    est = estimate_tokens(prompt)\n    if not budget.allow(user.org_id, est):        # per-org daily budget (e.g. Postgres/Redis counter)\n        return await small_model_answer(prompt)   # degrade gracefully\n    return await large_model_answer(prompt, max_tokens=500)\n```\n\n```python\n# Model cascade: cheap model first, escalate only when needed.\nasync def classify_review(text: str) -> dict:\n    result = await small_model(text, schema=ReviewLabel)       # structured output\n    if result is None or result.confidence < 0.7:\n        result = await large_model(text, schema=ReviewLabel)   # rare, expensive path\n    return result.model_dump()\n\n# Bounded parallel fan-out for many independent calls\nsem = asyncio.Semaphore(10)\n\nasync def summarise_all(docs):\n    async def one(d):\n        async with sem:\n            return await summarise(d)\n    return await asyncio.gather(*(one(d) for d in docs))\n```",
+  "use_cases_md": "- **Dashboard-style questions** ('sales yesterday') served from an exact cache keyed by org + data refresh timestamp.\n- **Review classification** for thousands of reviews with a small model and batch processing.\n- **Text-to-SQL** prompt sending only the 5 most relevant tables' schemas instead of the whole database.\n- **Per-org monthly budget** for a SaaS plan tier, enforced before each call.",
+  "mistakes_md": "- **Optimising without measurement** – trimming the system prompt when retrieved context is 80% of tokens.\n- **Cache keys without tenant or version** – serves org A's answer to org B, or stale answers after a prompt change.\n- **Aggressive semantic cache thresholds** – 'March' answer returned for 'May'; data-dependent answers need exact keys.\n- **Unbounded parallelism** – fan-out hits provider rate limits and gets slower overall.\n- **Using the largest model for everything** – routing/classification rarely needs it.\n- **No max output tokens** – verbose answers cost more and take longer.",
+  "best_practices_md": "- Instrument tokens/cost per step first; optimise the biggest contributor.\n- Exact cache with tenant + prompt version + data version in the key; TTL/invalidations.\n- Semantic cache only for low-risk content, with a tuned threshold.\n- Route by difficulty; cascade small -> large.\n- Trim history, schema and chunks; cap output tokens; static prefix first for provider prompt caching.\n- Stream, parallelise independent steps with a semaphore, batch offline work.\n- Enforce per-request and per-org budgets with graceful degradation; re-run evals after each optimisation.",
+  "my_context_md": "`GetLlmData` already tracks per-org USD cost, which is exactly the number to drive these optimisations and to enforce per-org budgets. Your async httpx + `asyncio.Lock` pacing in `ECSInventoryPriceTracking/app/fetchers/spapi.py` is the same machinery for bounded parallel model calls, and your `execute_batch`/`execute_values` habit maps to batching embeddings. For stored text-to-SQL, an exact cache of generated SQL keyed by (org, normalised question, schema version, prompt version) can skip the model entirely for repeated questions.",
+  "revision_notes_md": "- Cost = requests x tokens x rate; output tokens pricier and slower.\n- Measure per step before optimising.\n- Exact cache: key includes tenant, prompt/model version, data version.\n- Semantic cache: similarity threshold, low-risk only, never cross-tenant.\n- Provider prompt caching: static prefix first.\n- Small model for routing/classification; cascade on low confidence.\n- Trim history, schema, chunks (rerank -> top few), tool outputs; cap max tokens.\n- Stream (TTFT), asyncio.gather + semaphore, batch offline work.\n- Budgets per request and per org; degrade gracefully; re-run evals.",
+  "exercises_md": "1. Instrument a fake RAG pipeline to log tokens per component (system, history, chunks, output) and find the largest contributor.\n2. Implement an exact cache in Postgres (or Redis) for generated SQL keyed by org, normalised question, schema version and prompt version, with invalidation on schema change.\n3. Build a small->large cascade for review classification with a fake confidence score; measure the escalation rate on 200 samples.\n4. Implement a per-org daily budget counter with `INSERT ... ON CONFLICT DO UPDATE` and a check before each model call.",
+  "related": [
+    "ai-context-tokens-cost",
+    "caching-strategies",
+    "be-redis",
+    "ai-monitoring",
+    "ai-serving-fastapi",
+    "ai-semantic-search"
+  ],
+  "flashcards": [
+    {
+      "front": "What must an LLM exact-cache key include?",
+      "back": "Normalised input + tenant/org + prompt version + model + data/schema version (anything that changes the answer)."
+    },
+    {
+      "front": "Main risk of a semantic cache?",
+      "back": "Returning an answer for a similar-but-different question (e.g. March vs May); unsafe for data-dependent answers."
+    },
+    {
+      "front": "What is a model cascade?",
+      "back": "Try a small cheap model first; escalate to a larger model only on low confidence or validation failure."
+    },
+    {
+      "front": "Why put static content first in prompts?",
+      "back": "Provider prompt caching works on stable prefixes, cutting cost and latency for repeated system prompts/schemas."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Token logging shows retrieved chunks are 70% of input tokens. What's the most effective first step?",
+      "options": [
+        "Shorten the system prompt",
+        "Rerank and send only the top few most relevant chunks",
+        "Switch to a larger model",
+        "Disable streaming"
+      ],
+      "answer_index": 1,
+      "explanation": "Optimise the largest contributor; fewer, better chunks often also improve quality."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which request is safest to serve from a semantic cache?",
+      "options": [
+        "'What were my sales yesterday?'",
+        "'Show refunds for order 1234'",
+        "'How do I connect my Amazon account?' (static help content)",
+        "'Top 5 SKUs this week for my org'"
+      ],
+      "answer_index": 2,
+      "explanation": "Data-independent, tenant-independent help answers tolerate approximate matching; data questions need exact keys."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To run independent async calls concurrently you can use asyncio.____(...), bounded by a semaphore.",
+      "answers": [
+        "gather"
+      ],
+      "explanation": "gather awaits several coroutines concurrently."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Trying a cheap model first and escalating to a larger one on low confidence is called a model ____.",
+      "answers": [
+        "cascade",
+        "cascading"
+      ],
+      "explanation": "Cascades cut average cost while preserving quality on hard cases."
+    },
+    {
+      "type": "output",
+      "prompt": "Using hypothetical per-1M-token rates, what does this cost calculation print?",
+      "code": "from decimal import Decimal\n\n# Hypothetical rates in USD per 1M tokens (not real prices)\nRATES = {\"large\": (Decimal(\"3.00\"), Decimal(\"15.00\")), \"small\": (Decimal(\"0.20\"), Decimal(\"0.80\"))}\n\ndef cost(model, tokens_in, tokens_out):\n    rin, rout = RATES[model]\n    return (tokens_in * rin + tokens_out * rout) / Decimal(1_000_000)\n\nbig = cost(\"large\", 6000, 400)\ntrimmed = cost(\"large\", 2500, 400)\nrouted = cost(\"small\", 2500, 400)\nprint(big, trimmed, routed)\nprint(\"monthly at 50k req:\", (big * 50_000).quantize(Decimal(\"0.01\")))\nprint(\"saving %:\", ((1 - routed / big) * 100).quantize(Decimal(\"0.1\")))\n",
+      "answers": [
+        "0.024 0.0135 0.00082\nmonthly at 50k req: 1200.00\nsaving %: 96.6"
+      ],
+      "explanation": "Large: (6000x3 + 400x15)/1e6 = 0.024; trimmed: (2500x3 + 6000)/1e6 = 0.0135; small: (500 + 320)/1e6 = 0.00082. Monthly 0.024 x 50k = 1200; saving = 1 - 0.00082/0.024 ≈ 96.6%."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this exact cache print?",
+      "code": "import hashlib\n\ncache, hits, misses = {}, 0, 0\n\ndef key(org_id, question, prompt_version):\n    norm = \" \".join(question.lower().split()).rstrip(\"?\")\n    return hashlib.sha256(f\"{org_id}|{prompt_version}|{norm}\".encode()).hexdigest()\n\ndef ask(org_id, question, prompt_version=\"v3\"):\n    global hits, misses\n    k = key(org_id, question, prompt_version)\n    if k in cache:\n        hits += 1\n        return cache[k]\n    misses += 1\n    cache[k] = f\"answer#{misses}\"\n    return cache[k]\n\nprint(ask(1, \"Total sales in March?\"))\nprint(ask(1, \"  total   SALES in march \"))\nprint(ask(2, \"Total sales in March?\"))\nprint(ask(1, \"Total sales in March?\", prompt_version=\"v4\"))\nprint(\"hits\", hits, \"misses\", misses)\n",
+      "answers": [
+        "answer#1\nanswer#1\nanswer#2\nanswer#3\nhits 1 misses 3"
+      ],
+      "explanation": "Normalisation (lower-case, collapse spaces, strip '?') makes the 2nd call a hit; different org and different prompt version are misses."
+    },
+    {
+      "type": "debug",
+      "prompt": "Users report seeing other companies' numbers. What's wrong and how do you fix it?",
+      "code": "def cached_answer(question: str, org_id: int):\n    key = \"ans:\" + question.lower().strip()\n    if (hit := redis.get(key)):\n        return hit\n    answer = run_text_to_sql(question, org_id)\n    redis.set(key, answer)          # no TTL\n    return answer\n",
+      "answer": "The cache key omits `org_id`, so the first org's answer is served to everyone asking the same question (cross-tenant leak). It also lacks prompt/schema version and has no TTL, so answers are stale after data refreshes or prompt changes.\n\n```python\ndef cached_answer(question: str, org_id: int):\n    norm = \" \".join(question.lower().split())\n    raw = f\"{org_id}|{PROMPT_VERSION}|{schema_version(org_id)}|{norm}\"\n    key = \"ans:\" + hashlib.sha256(raw.encode()).hexdigest()\n    if (hit := redis.get(key)):\n        return hit\n    answer = run_text_to_sql(question, org_id)\n    redis.set(key, answer, ex=900)   # TTL aligned with data refresh\n    return answer\n```",
+      "rubric": [
+        "Key missing org_id -> cross-tenant leak",
+        "Missing prompt/data version in key",
+        "No TTL / invalidation",
+        "Normalise and hash key including all inputs"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd cut the cost of an LLM chat feature by half without hurting quality.",
+      "answer": "Measure first: tokens/cost per step and per route. Then: trim context (history window + summary, top few reranked chunks, only relevant schema, truncated tool outputs); route easy tasks (classification, routing, summaries) to a small model and cascade; exact cache for repeated questions with tenant/version keys; static prefix for provider prompt caching; cap output tokens; batch offline work. Enforce per-org budgets. Validate every change against the eval set and watch quality proxies online.",
+      "rubric": [
+        "Measure per-step tokens first",
+        "Context trimming + model routing/cascade",
+        "Caching with correct keys",
+        "Verify quality with evals"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Exact vs semantic caching for LLM responses — when would you use each?",
+      "difficulty": "medium",
+      "answer_md": "**Exact caching** keys on a hash of everything that determines the answer: normalised input, org, prompt version, model, and data/schema version. It never returns a wrong answer for a different question, so it suits data-dependent queries like repeated dashboard questions or generated SQL — with TTLs or invalidation on data refresh. **Semantic caching** embeds the query and reuses an answer if similarity exceeds a threshold. It raises hit rates for paraphrases but can conflate 'sales in March' with 'sales in May'. I'd use it only for low-risk, data-independent content (help/FAQ), per tenant, with the threshold tuned on labelled paraphrase pairs and monitored via downvotes on cache hits."
+    },
+    {
+      "question": "How do you reduce latency in a RAG chat endpoint?",
+      "difficulty": "medium",
+      "answer_md": "Start with a per-step latency breakdown from traces. Then: (1) stream the answer to cut time to first token; (2) run independent steps concurrently — history load, retrieval, schema lookup — with `asyncio.gather`; (3) reduce input tokens (fewer, reranked chunks, trimmed history) and cap output tokens, since generation time scales with output length; (4) use a smaller/faster model for routing and query rewriting; (5) cache embeddings of repeated queries and frequent answers; (6) keep warm connection pools and colocate services in the same region; (7) put static prompt content first to benefit from provider prompt caching. Track p95 and TTFT before and after each change."
+    }
+  ]
+}

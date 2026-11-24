@@ -1,0 +1,118 @@
+{
+  "slug": "debug-split-payout-rounding",
+  "title": "Debug: split payout loses a cent",
+  "category": "debugging",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "etl-data-processing",
+  "concepts": [
+    "floating-point representation",
+    "integer cents",
+    "rounding",
+    "remainder distribution"
+  ],
+  "related_topics": [
+    "python-exceptions"
+  ],
+  "problem_md": "A payout must be split across `parts` sellers/line items:\n\n```python\ndef split_amount(total: float, parts: int) -> list[float]:\n```\n\nRequirements:\n- Work in whole cents. The returned amounts must **sum exactly** to `total` (to the cent).\n- Distribute leftover cents one each to the **first** parts: `100.00` across 3 → `[33.34, 33.33, 33.33]`.\n- `total` has at most 2 decimal places.\n- `parts < 1` or `total < 0` → raise `ValueError`.\n\n**Observed bugs** in reconciliation:\n- `split_amount(100, 3)` returns `[33.33, 33.33, 33.33]` — a cent disappears.\n- `split_amount(10.05, 1)` returns `[10.04]` — even with a single part, money is lost!\n- `split_amount(50, 0)` crashes with `ZeroDivisionError` instead of a clear `ValueError`.\n\nFix the function.",
+  "examples": [
+    {
+      "input": "split_amount(100, 3)",
+      "output": "[33.34, 33.33, 33.33]"
+    },
+    {
+      "input": "split_amount(10.05, 1)",
+      "output": "[10.05]"
+    },
+    {
+      "input": "split_amount(19.99, 4)",
+      "output": "[5.0, 5.0, 5.0, 4.99]"
+    }
+  ],
+  "hints": [
+    "Try `10.05 * 100` in a Python shell. What does `int()` do to the result?",
+    "Floats can't represent most decimals exactly, and `int()` truncates toward zero. Use `round(total * 100)` to get integer cents. Then use `divmod(cents, parts)` to get both the base share and the leftover cents.",
+    "The first `remainder` parts get `share + 1` cents, the rest get `share`; divide each by 100 at the very end. Validate `parts` and `total` before doing any maths."
+  ],
+  "starter_code": "def split_amount(total: float, parts: int) -> list[float]:\n    cents = int(total * 100)\n    share = cents // parts\n    return [share / 100] * parts\n",
+  "solution_code": "def split_amount(total: float, parts: int) -> list[float]:\n    if parts < 1:\n        raise ValueError(\"parts must be >= 1\")\n    if total < 0:\n        raise ValueError(\"total must be >= 0\")\n    cents = round(total * 100)\n    share, remainder = divmod(cents, parts)\n    return [(share + 1) / 100 if i < remainder else share / 100 for i in range(parts)]\n",
+  "solution_md": "Three separate bugs:\n\n1. **Float truncation:** `10.05 * 100` is `1004.9999999999999` in binary floating point, and `int()` truncates toward zero → `1004`. `round(total * 100)` gives the nearest integer, `1005`.\n2. **Dropped remainder:** `cents // parts` throws away `cents % parts`. Use `divmod` and hand the leftover cents, one each, to the first parts — the standard \"largest remainder\" approach for splitting money.\n3. **No validation:** `parts = 0` should be a domain error (`ValueError`) with a clear message, not a `ZeroDivisionError` from deep inside the maths.\n\n- **Time / Space:** O(parts)\n\n**Better still:** keep money as `int` cents or `decimal.Decimal` end-to-end (e.g. `Decimal(\"10.05\")` from the raw string, `NUMERIC(12,2)` in PostgreSQL) and only format for display. Floats are fine for statistics but not for amounts that must reconcile to the cent.\n\n**Testing lesson:** assert the invariant, not just examples — `sum(round(x * 100) for x in result) == round(total * 100)` makes a great property-based test (e.g. with Hypothesis).",
+  "tests": {
+    "function": "split_amount",
+    "cases": [
+      {
+        "args": [
+          100,
+          3
+        ],
+        "kwargs": {},
+        "expected": [
+          33.34,
+          33.33,
+          33.33
+        ]
+      },
+      {
+        "args": [
+          10.05,
+          1
+        ],
+        "kwargs": {},
+        "expected": [
+          10.05
+        ]
+      },
+      {
+        "args": [
+          19.99,
+          4
+        ],
+        "kwargs": {},
+        "expected": [
+          5.0,
+          5.0,
+          5.0,
+          4.99
+        ]
+      },
+      {
+        "args": [
+          0,
+          2
+        ],
+        "kwargs": {},
+        "expected": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "args": [
+          0.07,
+          2
+        ],
+        "kwargs": {},
+        "expected": [
+          0.04,
+          0.03
+        ]
+      },
+      {
+        "args": [
+          50,
+          0
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      },
+      {
+        "args": [
+          -5,
+          2
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "slug": "two-sum-settlement-lines",
+  "title": "Two Sum: find two settlement lines matching a payout",
+  "category": "problem-solving",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "dsa",
+  "concepts": [
+    "hash map",
+    "complement lookup",
+    "single pass"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "A payout of `target` arrived, and you suspect it covers exactly two settlement lines. Given the line amounts (integers, in the smallest currency unit), find which two.\n\nImplement:\n\n```python\ndef two_sum(nums: list[int], target: int) -> list[int]:\n```\n\nReturn `[i, j]` with `i < j` such that `nums[i] + nums[j] == target`.\n\n- If several pairs work, return the one with the **smallest `j`**; if several `i` work for that `j`, use the **smallest `i`**.\n- If no pair exists, return `[]`.\n- An element can't be paired with itself (`i != j`), but two different positions with equal values are fine.\n- Amounts may be negative (refunds) or zero.",
+  "examples": [
+    {
+      "input": "nums = [2, 7, 11, 15], target = 9",
+      "output": "[0, 1]"
+    },
+    {
+      "input": "nums = [3, 3], target = 6",
+      "output": "[0, 1]"
+    },
+    {
+      "input": "nums = [1, 2, 3], target = 100",
+      "output": "[]"
+    }
+  ],
+  "hints": [
+    "The brute-force double loop is O(n²). Can you find the partner of `nums[j]` in O(1)?",
+    "As you scan left to right, remember every value you've seen and its index in a dict. For `nums[j]`, look up `target - nums[j]`.",
+    "Only store a value's index the first time you see it (so you keep the smallest `i`), and check for the complement *before* storing the current value."
+  ],
+  "starter_code": "def two_sum(nums: list[int], target: int) -> list[int]:\n    # your code here\n    ...\n",
+  "solution_code": "def two_sum(nums: list[int], target: int) -> list[int]:\n    first_index = {}\n    for j, value in enumerate(nums):\n        complement = target - value\n        if complement in first_index:\n            return [first_index[complement], j]\n        if value not in first_index:\n            first_index[value] = j\n    return []\n",
+  "solution_md": "Single pass with a hash map from value → first index seen.\n\nFor each position `j`, the partner must be `target - nums[j]`. If it's already in the map, we've found the pair with the smallest possible `j` (we're scanning in order), and because we only ever stored the *first* index of each value, `i` is the smallest too.\n\nChecking before inserting is what prevents pairing an element with itself (e.g. `nums=[3]`, `target=6`).\n\n- **Time:** O(n)\n- **Space:** O(n)\n\n**Alternative:** sort (keeping original indices) and use two pointers — O(n log n) time but O(1) extra space beyond the sort; the tie-break rules make it fiddlier though.\n\n**Real-world note:** reconciliation usually needs *subset* sums (a payout covering many lines), which is NP-hard in general — in practice you match on references/order IDs first and only fall back to amount matching for leftovers.",
+  "tests": {
+    "function": "two_sum",
+    "cases": [
+      {
+        "args": [
+          [
+            2,
+            7,
+            11,
+            15
+          ],
+          9
+        ],
+        "kwargs": {},
+        "expected": [
+          0,
+          1
+        ]
+      },
+      {
+        "args": [
+          [
+            3,
+            3
+          ],
+          6
+        ],
+        "kwargs": {},
+        "expected": [
+          0,
+          1
+        ]
+      },
+      {
+        "args": [
+          [
+            -3,
+            4,
+            3,
+            90
+          ],
+          0
+        ],
+        "kwargs": {},
+        "expected": [
+          0,
+          2
+        ]
+      },
+      {
+        "args": [
+          [
+            1,
+            2,
+            3
+          ],
+          100
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [],
+          5
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [
+            3
+          ],
+          6
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [
+            5,
+            1,
+            5,
+            1,
+            4
+          ],
+          6
+        ],
+        "kwargs": {},
+        "expected": [
+          0,
+          1
+        ]
+      }
+    ]
+  }
+}

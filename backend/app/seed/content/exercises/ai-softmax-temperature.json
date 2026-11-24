@@ -1,0 +1,119 @@
+{
+  "slug": "ai-softmax-temperature",
+  "title": "Numerically stable softmax with temperature",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "ml-math-stats",
+  "concepts": [
+    "softmax",
+    "temperature",
+    "numerical stability",
+    "log-sum-exp trick"
+  ],
+  "related_topics": [
+    "ai-llm-fundamentals",
+    "ai-math-linear-algebra",
+    "ai-model-inference"
+  ],
+  "problem_md": "LLM sampling turns logits into probabilities with a temperature-scaled softmax. Implement:\n\n```python\ndef softmax(logits: list[float], temperature: float = 1.0) -> list[float]\n```\n\n- `p_i = exp(z_i / T) / sum_j exp(z_j / T)`; return values rounded to 4 decimals.\n- Must not overflow for large logits (e.g. `[1000, 1001]`).\n- `temperature <= 0` or empty `logits` -> `ValueError` (T=0 means greedy argmax, handled elsewhere).",
+  "examples": [
+    {
+      "input": "softmax([1, 2, 3])",
+      "output": "[0.09, 0.2447, 0.6652]"
+    },
+    {
+      "input": "softmax([1, 2, 3], temperature=10)",
+      "output": "[0.3006, 0.3322, 0.3672]",
+      "explanation": "High T flattens the distribution."
+    }
+  ],
+  "hints": [
+    "Softmax is unchanged by subtracting a constant from every logit - subtract `max(scaled)` so the largest exponent is `exp(0) = 1`.",
+    "Scale first (`z / T`), then subtract the max, exponentiate, normalise, round."
+  ],
+  "starter_code": "import math\n\n\ndef softmax(logits, temperature=1.0):\n    exps = [math.exp(z / temperature) for z in logits]\n    total = sum(exps)\n    return [round(e / total, 4) for e in exps]\n",
+  "solution_code": "import math\n\n\ndef softmax(logits, temperature=1.0):\n    if temperature <= 0:\n        raise ValueError('temperature must be > 0')\n    if not logits:\n        raise ValueError('logits must not be empty')\n    scaled = [z / temperature for z in logits]\n    m = max(scaled)\n    exps = [math.exp(s - m) for s in scaled]\n    total = sum(exps)\n    return [round(e / total, 4) for e in exps]\n",
+  "solution_md": "`exp(1000)` overflows a float (`OverflowError` in `math.exp`, `inf` in numpy, then `nan`). Because `softmax(z) == softmax(z - c)`, subtracting the max keeps every exponent <= 0 - the log-sum-exp trick. O(n).\n\nTemperature divides logits before softmax: T < 1 sharpens (more deterministic, good for extraction / text-to-SQL), T > 1 flattens (more diverse, more hallucination risk). As T -> 0 it approaches argmax, which is why APIs treat 0 as greedy decoding. Note that even at T=0, hosted LLMs are not guaranteed bit-for-bit deterministic (batching, floating-point nondeterminism), so tests on LLM output should check structure, not exact text.",
+  "tests": {
+    "function": "softmax",
+    "cases": [
+      {
+        "args": [
+          [
+            1,
+            2,
+            3
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          0.09,
+          0.2447,
+          0.6652
+        ]
+      },
+      {
+        "args": [
+          [
+            1,
+            2,
+            3
+          ]
+        ],
+        "kwargs": {
+          "temperature": 10
+        },
+        "expected": [
+          0.3006,
+          0.3322,
+          0.3672
+        ]
+      },
+      {
+        "args": [
+          [
+            1000,
+            1001,
+            1002
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          0.09,
+          0.2447,
+          0.6652
+        ]
+      },
+      {
+        "args": [
+          [
+            2.0,
+            1.0,
+            0.1
+          ]
+        ],
+        "kwargs": {
+          "temperature": 0.5
+        },
+        "expected": [
+          0.8638,
+          0.1169,
+          0.0193
+        ]
+      },
+      {
+        "args": [
+          [
+            1,
+            2
+          ]
+        ],
+        "kwargs": {
+          "temperature": 0
+        },
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

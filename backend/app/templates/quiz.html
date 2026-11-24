@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty, question_form %}
+{% block title %}Quick quiz{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Quick quiz</h1><p>{% if weak %}Your most-missed questions first (topped up with random ones).{% else %}Random auto-graded questions across topics.{% endif %} Missed ones are scheduled for revision.</p></div>
+  <div class="actions"><a class="btn {{ 'primary' if weak }}" href="/revision/quiz?weak=1&limit={{ limit }}" title="Questions you've missed most in past quizzes and assessments">🎯 Weak-spot quiz</a> <a class="btn" href="/revision">Revision</a></div>
+</div>
+<form method="get" action="/revision/quiz" class="grid g4 mb">
+  <select name="track"><option value="">All tracks</option>{% for k, v in [("python", "Python"), ("backend", "Backend"), ("ai", "AI")] %}<option value="{{ k }}" {{ 'selected' if k == track }}>{{ v }}</option>{% endfor %}</select>
+  <select name="skill_id"><option value="">Any skill</option>{% for sid, name in skills %}<option value="{{ sid }}" {{ 'selected' if sid|string == skill_id }}>{{ name }}</option>{% endfor %}</select>
+  <select name="limit">{% for n in [5, 10, 20] %}<option value="{{ n }}" {{ 'selected' if n == limit }}>{{ n }} questions</option>{% endfor %}</select>
+  <button class="btn">New quiz</button>
+</form>
+{% if not questions %}{{ empty("No questions match", "Try another track or skill.") }}{% else %}
+<form method="post" action="/revision/quiz" style="max-width:860px">
+  <input type="hidden" name="started" value="{{ started }}">
+  {% for q in questions %}<input type="hidden" name="qid" value="{{ q.id }}">{{ question_form(q, loop.index) }}{% endfor %}
+  <div class="row mt"><button class="btn primary">Submit quiz</button></div>
+</form>
+{% endif %}
+{% endblock %}

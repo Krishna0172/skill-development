@@ -1,0 +1,60 @@
+{
+  "slug": "sql-customers-without-orders",
+  "title": "Customers who never ordered (anti-join)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "easy",
+  "skill": "sql-joins",
+  "concepts": [
+    "LEFT JOIN",
+    "anti-join",
+    "IS NULL",
+    "NOT EXISTS",
+    "NOT IN NULL trap"
+  ],
+  "related_topics": [
+    "sql-joins",
+    "sql-null-handling",
+    "sql-subqueries"
+  ],
+  "problem_md": "Marketing wants to send a first-order coupon to people who created an account but **never placed an order on\nany channel**. Some marketplace orders are guest checkouts, so `orders.customer_id` can be `NULL`.\n\n```sql\nCREATE TABLE customers (\n  customer_id INTEGER PRIMARY KEY,\n  name        TEXT NOT NULL,\n  city        TEXT\n);\n\nCREATE TABLE orders (\n  order_id    INTEGER PRIMARY KEY,\n  customer_id INTEGER,          -- NULL for guest checkouts\n  channel     TEXT NOT NULL,\n  order_date  TEXT NOT NULL\n);\n```\n\n**Task.** Return `customer_id` and `name` of every customer with **no rows** in `orders`.\nOrder by `customer_id`.",
+  "examples": [
+    {
+      "input": "customers 1..6; orders exist for customers 1, 3, 5 and one guest order with customer_id NULL",
+      "output": "customer_id | name\n2           | Diya Sharma\n4           | Ananya Iyer\n6           | Meera Nair"
+    }
+  ],
+  "hints": [
+    "Start from `customers` and keep customers even when there is no matching order.",
+    "A `LEFT JOIN` produces NULLs on the orders side when there is no match - filter for those.",
+    "`... LEFT JOIN orders o ON o.customer_id = c.customer_id WHERE o.order_id IS NULL`. Be careful: `NOT IN (SELECT customer_id FROM orders)` returns nothing here - why?"
+  ],
+  "starter_code": "-- Write your query here\nSELECT c.customer_id, c.name\nFROM customers c\n",
+  "solution_code": "SELECT c.customer_id, c.name\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.customer_id\nWHERE o.order_id IS NULL\nORDER BY c.customer_id;",
+  "solution_md": "**Anti-join pattern.** \"Rows in A with no match in B\" is an *anti-join*. Two idiomatic forms:\n\n```sql\n-- 1) LEFT JOIN ... IS NULL\nSELECT c.customer_id, c.name\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.customer_id\nWHERE o.order_id IS NULL;            -- test a NOT NULL column of the right table\n\n-- 2) NOT EXISTS (often the clearest, same plan in PostgreSQL)\nSELECT c.customer_id, c.name\nFROM customers c\nWHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id);\n```\n\nPostgreSQL plans both as a *Hash Anti Join*.\n\n**The `NOT IN` trap.** `WHERE c.customer_id NOT IN (SELECT customer_id FROM orders)` returns **zero rows** here,\nbecause the subquery contains a `NULL` (the guest order). `x NOT IN (1, 3, NULL)` means\n`x <> 1 AND x <> 3 AND x <> NULL`, and `x <> NULL` is `UNKNOWN`, so the whole predicate is never `TRUE`.\nPrefer `NOT EXISTS`, or add `WHERE customer_id IS NOT NULL` inside the subquery.\n\n**Index.** An index on `orders (customer_id)` lets the anti-join probe orders per customer instead of scanning;\nfor this one-off report a hash anti-join over a full scan is also fine.",
+  "tests": {
+    "schema_sql": "CREATE TABLE customers (\n  customer_id INTEGER PRIMARY KEY,\n  name        TEXT NOT NULL,\n  city        TEXT\n);\n\nCREATE TABLE orders (\n  order_id    INTEGER PRIMARY KEY,\n  customer_id INTEGER,          -- NULL for guest checkouts\n  channel     TEXT NOT NULL,\n  order_date  TEXT NOT NULL\n);\n\nINSERT INTO customers VALUES\n (1,'Aarav Mehta','Bengaluru'),\n (2,'Diya Sharma','Delhi'),\n (3,'Kabir Rao','Hyderabad'),\n (4,'Ananya Iyer','Chennai'),\n (5,'Rohan Gupta','Mumbai'),\n (6,'Meera Nair','Kochi');\n\nINSERT INTO orders VALUES\n (101,1,'Myntra','2024-03-01'),\n (102,1,'Nykaa','2024-03-04'),\n (103,3,'Blinkit','2024-03-02'),\n (104,NULL,'Zepto','2024-03-02'),\n (105,5,'Myntra','2024-03-05'),\n (106,3,'Blinkit','2024-03-06');",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "customer_id",
+        "name"
+      ],
+      "rows": [
+        [
+          2,
+          "Diya Sharma"
+        ],
+        [
+          4,
+          "Ananya Iyer"
+        ],
+        [
+          6,
+          "Meera Nair"
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

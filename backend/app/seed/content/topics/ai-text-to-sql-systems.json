@@ -1,0 +1,194 @@
+{
+  "slug": "ai-text-to-sql-systems",
+  "title": "Text-to-SQL systems: schema linking, guards and evaluation",
+  "skill": "llm-applications",
+  "extra_skills": [
+    "postgresql",
+    "ai-evaluation",
+    "web-security"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "text-to-sql",
+    "schema-linking",
+    "guardrails",
+    "evaluation",
+    "postgresql"
+  ],
+  "summary": "A text-to-SQL system lets users ask data questions in plain English and has an LLM write the SQL. The hard parts are not the model call: they are giving the model the right slice of the schema, making generated SQL safe to run, and measuring whether answers are actually correct.",
+  "why_md": "- Natural-language access to business data is one of the most common production LLM features, and it is a database-security problem as much as an AI problem.\n- The failure modes (wrong table, wrong join, destructive statement, leaking another tenant's rows) are exactly what an experienced SQL/PostgreSQL developer is well placed to catch.\n- It combines prompt design, validation, evaluation and cost tracking, which makes it a strong portfolio and interview topic.\n- Generated SQL is untrusted input; treating it that way is the core skill.",
+  "details_md": "### The pipeline\n1. **Understand the question** (optionally rewrite using chat history: \"and last month?\").\n2. **Schema linking**: choose which tables, columns and relationships are relevant.\n3. **Generate SQL** with an LLM given the question, the linked schema, rules and a few examples.\n4. **Validate** the SQL (parse, allow-list, read-only, limits) *before* running.\n5. **Execute** under a restricted database role with a timeout.\n6. **Respond**: show rows, optionally let the LLM summarise them, and log everything.\n7. **Evaluate and learn** from user feedback (votes) and a golden set.\n\n### Schema linking\nReal schemas have hundreds of tables and cryptic names; pasting everything wastes tokens and confuses the model. Approaches:\n- Keep a **curated semantic layer**: table and column descriptions in plain English, synonyms (\"revenue\" = `net_sales`), and canonical join paths.\n- **Retrieve** relevant tables by embedding the question against table/column descriptions (the same idea as RAG), or by a first LLM call that names the tables.\n- Include **sample values** for categorical columns (`status IN ('shipped','returned')`) so the model uses real literals.\n- Include **business rules** (\"revenue excludes cancelled orders\", \"dates are in UTC\").\n\n### Prompting for SQL\nGive the dialect (PostgreSQL), the linked schema as DDL plus comments, 3-5 question->SQL examples, and rules: only SELECT, always add `LIMIT`, qualify columns, use only listed tables, say `CANNOT_ANSWER` if the schema cannot answer. Ambiguity is common (\"top customers\" by revenue or orders?); either ask a clarifying question or state the assumption in the answer.\n\n### Safety: treat the SQL as hostile\nPrompts are not security. Enforce in code and in the database:\n- **Parse** the SQL with a real SQL parser (for example `sqlglot` or `pglast`) instead of regex; allow a single statement of type SELECT only; reject `;` chains, DDL/DML, `COPY`, `pg_sleep`, and functions outside an allow-list.\n- **Allow-list** tables/columns per user and tenant. Multi-tenant data: inject the tenant filter structurally (row-level security or per-tenant views) rather than hoping the model adds `WHERE org_id = ...`.\n- **Least-privilege role**: a database user with SELECT on only permitted views, `default_transaction_read_only = on`, `statement_timeout`, and a row cap.\n- Run in a **read-only transaction** and `EXPLAIN` first if you want to reject expensive plans.\n\n### Evaluation\n- **Execution accuracy**: run the generated and the reference (\"gold\") SQL and compare result sets (order-insensitive unless the question asks for ordering). Better than string matching because many different SQLs are correct.\n- Also track: valid-SQL rate, guard-rejection rate, latency, tokens/cost per question, and user votes.\n- Build a **golden set** of real questions with verified SQL; stratify by difficulty (single table, joins, aggregation, date logic). Re-run it on every prompt/model/schema change (see the LLM evals topic).\n- Beware **\"runs but wrong\"**: a plausible query with an incorrect join or filter returns believable numbers. That is the dangerous failure; execution accuracy against gold SQL catches it, syntax checks do not.\n\n### Operations\nStore the question, the final SQL, the original model SQL vs any post-processed (\"dynamic\") SQL, tokens, cost and feedback per message. This audit trail powers debugging, cost reports and building the golden set.",
+  "code_md": "A conservative read-only guard (a real system should parse with a SQL parser; this shows the policy):\n```python\nimport re\n\nFORBIDDEN = re.compile(r\"\\b(insert|update|delete|drop|alter|truncate|create|grant|copy|call|do)\\b\", re.I)\n\ndef check_sql(sql: str, allowed_tables: set[str], max_rows: int = 1000) -> str:\n    s = sql.strip().rstrip(\";\")\n    if \";\" in s:\n        raise ValueError(\"multiple statements\")\n    if not re.match(r\"^(select|with)\\b\", s, re.I):\n        raise ValueError(\"only SELECT/WITH allowed\")\n    if FORBIDDEN.search(s):\n        raise ValueError(\"forbidden keyword\")\n    used = set(re.findall(r\"\\b(?:from|join)\\s+([a-z_][a-z0-9_.]*)\", s, re.I))\n    if not used <= allowed_tables:\n        raise ValueError(f\"table not allowed: {used - allowed_tables}\")\n    if not re.search(r\"\\blimit\\s+\\d+\", s, re.I):\n        s += f\" LIMIT {max_rows}\"\n    return s\n```\nDatabase-side enforcement (PostgreSQL):\n```sql\nCREATE ROLE llm_reader LOGIN PASSWORD '...';\nGRANT SELECT ON v_orders, v_products TO llm_reader;     -- views, not base tables\nALTER ROLE llm_reader SET default_transaction_read_only = on;\nALTER ROLE llm_reader SET statement_timeout = '5s';\n```\nExecution-accuracy comparison:\n```python\ndef same_result(conn, gold_sql, gen_sql):\n    gold = sorted(map(tuple, conn.execute(gold_sql).fetchall()))\n    gen = sorted(map(tuple, conn.execute(gen_sql).fetchall()))\n    return gold == gen\n```\nPrompt skeleton (provider-neutral):\n```text\nYou write PostgreSQL. Use ONLY these tables:\n{linked_schema_ddl_with_comments}\nRules: SELECT only; qualify columns; add LIMIT; if unanswerable reply CANNOT_ANSWER.\nExamples:\nQ: orders shipped last week?  SQL: SELECT count(*) FROM orders WHERE status='shipped' AND ...\nQuestion: {question}\n```",
+  "use_cases_md": "- **Self-serve analytics** for sellers: 'which SKUs had the most returns last month?' answered from a reporting schema.\n- **Support tooling**: staff ask 'how many orders are stuck in pending?' without writing SQL.\n- **Per-organisation cost reports**: question about usage answered from the cost tables.\n- **Golden-set regression**: nightly run of 100 verified questions to catch prompt or model regressions.",
+  "mistakes_md": "- **Trusting the prompt to prevent writes**: a model can be steered into `DROP`. Fix: parser-based guard plus a read-only DB role.\n- **Relying on the model to add the tenant filter**: leaks data across organisations. Fix: row-level security or tenant-scoped views.\n- **Dumping the whole schema** into the prompt: cost and confusion. Fix: schema linking.\n- **Judging by string match** against gold SQL: many correct variants fail. Fix: compare execution results.\n- **Regex-only validation**: comments, quoting and CTEs bypass it. Fix: parse properly.\n- **No LIMIT or timeout**: a bad query can scan billions of rows. Fix: statement_timeout and row cap.",
+  "best_practices_md": "- Defence in depth: parse, allow-list, read-only role, timeout, row limit.\n- Query views with business-friendly names instead of raw tables.\n- Keep a semantic layer (descriptions, synonyms, join paths, metric definitions).\n- Log question, final SQL, any rewritten SQL, tokens, cost, latency and feedback.\n- Maintain and grow a golden set from real, verified questions; gate releases on it.\n- Let the model refuse (`CANNOT_ANSWER`) or ask for clarification instead of guessing.",
+  "my_context_md": "This is the domain of your GetLlmData / ECSLlmQueryProcess Flask services: they keep chat sessions, message history, user votes, per-org USD cost, and the original and dynamic SQL the model generated. Those stored votes and original-vs-dynamic SQL pairs are natural raw material for a golden set and for measuring where generated SQL needed rewriting. Your repo has no direct LLM API calls, so look at how the generated SQL is executed (role, timeouts, tenant filtering) and compare it with the guards above. Your PostgreSQL strengths (CTEs, JSONB, EXPLAIN) are exactly what reviewing generated SQL needs.",
+  "revision_notes_md": "- Pipeline: understand -> schema link -> generate -> validate -> execute -> respond -> evaluate.\n- Schema linking = give the model only relevant tables/columns plus descriptions, sample values and rules.\n- Never trust prompts for safety: parse SQL, SELECT-only, single statement, allow-listed tables.\n- DB-side: least-privilege role, read-only, statement_timeout, views, row-level security for tenants.\n- Add LIMIT and timeouts to every generated query.\n- Metric = execution accuracy (compare result sets), not string match.\n- Dangerous failure = plausible but wrong query; test with a golden set.\n- Allow CANNOT_ANSWER / clarifying questions.\n- Log question, SQL, tokens, cost, votes for audit and learning.",
+  "exercises_md": "1. Implement `check_sql` above with tests: accept a plain SELECT, reject `SELECT 1; DROP TABLE x`, reject a table outside the allow-list, and find one input that bypasses the regex version (then note why a parser is better).\n2. In a local PostgreSQL database create a read-only role limited to two views with a 2s statement_timeout and try to run an UPDATE and a slow query as that role.\n3. Write 10 question/gold-SQL pairs for a small schema (orders, products, customers) and a script that scores execution accuracy by comparing sorted result rows.\n4. Draft a semantic-layer file (YAML or dict) with descriptions, synonyms and join paths for those three tables and use it to build the prompt schema block.",
+  "related": [
+    "ai-prompt-engineering",
+    "ai-guardrails",
+    "be-postgres-locking-deadlocks",
+    "ai-llm-evals-hands-on"
+  ],
+  "flashcards": [
+    {
+      "front": "What is schema linking?",
+      "back": "Selecting the relevant tables, columns and joins (plus descriptions and sample values) to show the model, instead of the whole schema."
+    },
+    {
+      "front": "Why is the prompt not enough to keep text-to-SQL safe?",
+      "back": "Models can be steered or make mistakes; enforce SELECT-only via a parser, an allow-list and a read-only least-privilege DB role."
+    },
+    {
+      "front": "How do you enforce tenant isolation for generated SQL?",
+      "back": "Structurally: row-level security or tenant-scoped views, not by hoping the model adds a WHERE org_id filter."
+    },
+    {
+      "front": "What is execution accuracy?",
+      "back": "Running generated and gold SQL and comparing result sets; robust to different but equivalent SQL."
+    },
+    {
+      "front": "What is the most dangerous text-to-SQL failure?",
+      "back": "A plausible query that runs but is wrong (bad join/filter), returning believable incorrect numbers."
+    },
+    {
+      "front": "Which DB settings limit damage from bad queries?",
+      "back": "Read-only transaction/role, statement_timeout, row limit, and access only to selected views."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is the purpose of schema linking?",
+      "options": [
+        "Encrypting the schema",
+        "Linking the database to the internet",
+        "Choosing the relevant tables/columns to give the model",
+        "Caching query results"
+      ],
+      "answer_index": 2,
+      "explanation": "It reduces prompt size and confusion by selecting only relevant schema parts."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which defence best prevents a generated query from modifying data?",
+      "options": [
+        "A parser-based SELECT-only check plus a read-only database role",
+        "Telling the model 'never write data' in the prompt",
+        "Checking the SQL starts with SELECT using a regex only",
+        "Lowering the temperature"
+      ],
+      "answer_index": 0,
+      "explanation": "Enforce in code and in the database; prompts and loose regexes can be bypassed."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is execution accuracy preferred to exact string match?",
+      "options": [
+        "It is cheaper to compute",
+        "String match is illegal",
+        "It ignores the data",
+        "Different SQL strings can return the same correct result"
+      ],
+      "answer_index": 3,
+      "explanation": "Many equivalent queries exist; compare results."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A PostgreSQL setting that kills long-running generated queries is ____.",
+      "answers": [
+        "statement_timeout",
+        "statement timeout"
+      ],
+      "explanation": "statement_timeout aborts statements exceeding the limit."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To avoid cross-tenant leaks, rely on PostgreSQL ____ level security rather than the model adding a WHERE clause.",
+      "answers": [
+        "row"
+      ],
+      "explanation": "Row-level security enforces per-tenant filtering inside the database."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import re\ndef has_limit(sql):\n    return bool(re.search(r\"\\blimit\\s+\\d+\", sql, re.I))\ndef only_select(sql):\n    s = sql.strip().rstrip(\";\")\n    return \";\" not in s and bool(re.match(r\"^(select|with)\\b\", s, re.I))\nfor q in [\"SELECT * FROM orders\", \"select 1; drop table x\", \"WITH a AS (SELECT 1) SELECT * FROM a LIMIT 5\"]:\n    print(only_select(q), has_limit(q))",
+      "answers": [
+        "True False\nFalse False\nTrue True"
+      ],
+      "explanation": "Each query is checked for single SELECT/WITH statement and a LIMIT clause."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.execute(\"CREATE TABLE orders(id INTEGER, status TEXT, total REAL)\")\nc.executemany(\"INSERT INTO orders VALUES (?,?,?)\", [(1,\"shipped\",10),(2,\"shipped\",20),(3,\"returned\",5)])\ngold = \"SELECT status, SUM(total) FROM orders GROUP BY status\"\ngen = \"SELECT status, SUM(total) FROM orders WHERE status IN ('shipped','returned') GROUP BY status\"\nbad = \"SELECT status, COUNT(*) FROM orders GROUP BY status\"\ndef rows(q): return sorted(c.execute(q).fetchall())\nprint(rows(gold) == rows(gen), rows(gold) == rows(bad))",
+      "answers": [
+        "True False"
+      ],
+      "explanation": "gen is a different string but returns the same rows (True); the COUNT query returns different values (False)."
+    },
+    {
+      "type": "debug",
+      "prompt": "This guard is meant to allow only read queries. Show a query that bypasses it and fix it.",
+      "code": "def is_safe(sql):\n    return sql.strip().lower().startswith(\"select\")\n\n# usage\nif is_safe(generated_sql):\n    cursor.execute(generated_sql)",
+      "answer": "`SELECT 1; DROP TABLE orders` starts with select and passes; a multi-statement string (or a function with side effects such as `SELECT pg_sleep(1000)`) is accepted. Fix: parse the SQL, allow exactly one statement of type SELECT, allow-list tables/functions, and execute with a read-only least-privilege role with statement_timeout (defence in depth).",
+      "rubric": [
+        "Gives a bypass such as multiple statements or side-effect function",
+        "Recommends proper parsing, not startswith",
+        "Adds DB-level read-only role / timeout"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would make a multi-tenant text-to-SQL feature safe and why prompts are not enough.",
+      "answer": "Prompts are suggestions that a model can ignore or be steered away from, so security must be enforced outside the model. Parse the SQL and allow only a single SELECT over allow-listed views; run it as a least-privilege read-only role with statement_timeout and a row cap; isolate tenants with row-level security or tenant-scoped views so the filter is applied by the database regardless of the SQL; and log every query for audit.",
+      "rubric": [
+        "Prompts are not a security boundary",
+        "Parser + allow-list + read-only role/timeouts",
+        "Tenant isolation enforced structurally (RLS/views)"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you evaluate a text-to-SQL system before and after a prompt change?",
+      "answer": "Build a golden set of real questions with verified gold SQL across difficulty levels. For each question run the generated SQL under the guard, execute it, and compare its result set to the gold result (order-insensitive unless ordering matters). Report execution accuracy, valid-SQL rate, guard rejections, latency and cost; compare the new prompt with the baseline per category, gate the release on no regression, and add every production failure to the golden set.",
+      "rubric": [
+        "Golden set with gold SQL",
+        "Execution-result comparison",
+        "Compares versions / regression gate and tracks cost, latency"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "A user asks 'top customers' and the schema allows revenue or order-count ranking. Best behaviour?",
+      "options": [
+        "Pick one silently",
+        "Ask a clarifying question or state the assumption",
+        "Return an error 500",
+        "Use random ranking"
+      ],
+      "answer_index": 1,
+      "explanation": "Ambiguity should be resolved or made explicit."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Walk me through a production text-to-SQL architecture.",
+      "difficulty": "hard",
+      "answer_md": "Question -> optional rewrite with chat history -> schema linking (semantic layer, retrieval of relevant tables, sample values, business rules) -> LLM generates SQL with dialect rules and examples -> validator (SQL parse, single SELECT, allow-listed tables/functions, add LIMIT) -> execution on a read-only least-privilege role with statement_timeout and tenant isolation via RLS/views -> response with rows and optional summary -> logging of question, SQL, tokens, cost, votes. Offline: golden set and execution-accuracy regression runs on every prompt/model/schema change."
+    },
+    {
+      "question": "How do you handle a query that is valid but gives the wrong answer?",
+      "difficulty": "hard",
+      "answer_md": "This is the main risk. Mitigate with a semantic layer defining metrics once (what counts as revenue), restricting the model to curated views with unambiguous columns, few-shot examples for tricky logic, showing the SQL or assumptions to the user, collecting thumbs-up/down, and testing with a golden set comparing execution results. Add failing questions to the golden set and fix the underlying schema description or example."
+    },
+    {
+      "question": "Why compare result sets instead of SQL text?",
+      "difficulty": "easy",
+      "answer_md": "Equivalent queries can be written many ways (different joins, aliases, CTEs), so string comparison produces false negatives. Running both and comparing rows (order-insensitive unless an ORDER BY is required) measures whether the answer is right. Caveat: two different queries can coincidentally match on a small dataset, so use realistic data and several test databases where possible."
+    }
+  ]
+}

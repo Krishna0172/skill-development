@@ -1,0 +1,192 @@
+[
+  {
+    "slug": "scn-query-slower-after-data-load",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "query-optimization",
+    "question": "A reconciliation query that took 300 ms now takes 3+ seconds right after a large data load (a big seller's history was imported). Nothing in the code changed. How do you investigate?",
+    "answer_md": "**Hypothesis first:** same query, more data, sudden change -> the **plan** probably changed. Usual suspects: stale\nstatistics, bloat, a plan that was fine for small data but not for large, or a now-skewed distribution.\n\n**1. Reproduce and get the real plan.**\n\n```sql\nEXPLAIN (ANALYZE, BUFFERS) SELECT ...;   -- with the same parameters as production\n```\n\nCompare `rows=` (estimate) with `actual rows=`. An estimate of 50 vs actual 2,000,000 points to bad statistics,\nwhich drive bad choices: nested loop instead of hash join, index scan over most of a table, sort spilling to disk\n(`Sort Method: external merge`).\n\n**2. Statistics.** After a bulk load autovacuum/autoanalyze may not have run yet. Run `ANALYZE orders;` (check\n`pg_stat_user_tables.last_analyze/last_autoanalyze`) and re-run EXPLAIN. Making `ANALYZE` the last step of big\nimports prevents this whole class of incident.\n\n**3. Data skew.** One seller now owns 40% of rows: a plan that's good for small sellers (index scan on `org_id`) is\nterrible for the big one. Check `pg_stats` for the column's most-common values. Fixes: a composite index matching\nthe full filter (`(org_id, channel, order_date)`), raising the statistics target for that column, or rewriting the\nquery (pre-aggregate in a CTE before joining).\n\n**4. Bloat and vacuum.** If the load was upsert-heavy (many `DO UPDATE`s), dead tuples accumulate; check\n`n_dead_tup` and run `VACUUM (ANALYZE)`. Avoid no-op updates with `WHERE ... IS DISTINCT FROM`.\n\n**5. Resources.** Is the working set no longer in memory (`shared hit` vs `read` in BUFFERS)? Is `work_mem` too\nsmall for the bigger sort/hash? Is the load still running and holding locks or saturating IO?\n\n**6. Validate the fix** with EXPLAIN ANALYZE again, then watch the query in `pg_stat_statements` (mean time) over the\nnext day. Write down the cause and add the preventive step (ANALYZE after bulk loads, index) to the pipeline.",
+    "tags": [
+      "postgresql",
+      "explain-analyze",
+      "statistics",
+      "indexes",
+      "performance"
+    ]
+  },
+  {
+    "slug": "scn-marketplace-changed-report-columns",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "etl-data-processing",
+    "question": "Overnight, a marketplace renamed and reordered columns in its order report ('Order Date' became 'Order Created On', and a new column was inserted). Uploads either fail or, worse, load wrong data. How do you handle it now, and how do you design for it?",
+    "answer_md": "**Immediate response:**\n1. **Stop the bleeding.** Find affected uploads (channel + report type + time window) and pause/mark them; if wrong\n   data was loaded, identify rows by `upload_id`.\n2. **Assess damage.** Positional parsing (column index 3 = date) is the dangerous case - it loads *wrong values\n   silently*. Header-based parsing fails loudly, which is better.\n3. **Fix and re-process.** Add the new mapping, re-run the affected uploads from the raw S3 files. Because loading is\n   idempotent (`ON CONFLICT ... DO UPDATE` on natural keys), re-processing overwrites the bad values. Tell affected\n   sellers.\n\n**Design so it hurts less next time:**\n- **Map by header name, never by position.** Normalize headers (`strip().lower()`, collapse spaces) and support\n  **aliases**: `{\"order_date\": [\"order date\", \"order created on\", \"created at\"]}`.\n- **Validate the schema before loading:** required columns present? Unknown columns appeared? Fail the file with a\n  clear error (\"Missing required column 'Order Date' - format may have changed\") instead of loading partially.\n- **Validate values:** a date column that parses as numbers, or 30% of rows failing validation, means the mapping is\n  wrong - fail the file rather than loading the 70%.\n- **Versioned format definitions:** detect version by header signature; keep v1 for old files that sellers re-upload.\n- **Keep raw files** forever (or long enough) so any fix can be replayed.\n- **Monitoring:** alert when the failure rate for one `(channel, report_type)` spikes across sellers - that's a\n  format change, not a bad file. Log unknown headers so you notice additions early.\n\n```python\nALIASES = {\"order_date\": {\"order date\", \"order created on\", \"created at\"}}\n\ndef resolve(headers):\n    norm = {h.strip().lower(): h for h in headers}\n    mapping, missing = {}, []\n    for field, names in ALIASES.items():\n        hit = next((norm[n] for n in names if n in norm), None)\n        if hit is None:\n            missing.append(field)\n        else:\n            mapping[field] = hit\n    if missing:\n        raise SchemaError(f\"missing columns: {missing}\")\n    return mapping\n```",
+    "tags": [
+      "etl",
+      "schema-drift",
+      "validation",
+      "data-quality"
+    ]
+  },
+  {
+    "slug": "scn-duplicate-orders-after-retry",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "transactions-concurrency",
+    "question": "After a network blip, the order sync job retried and now some orders appear twice in the database. How did this happen and how do you fix both the data and the design?",
+    "answer_md": "**How it happens.** The first attempt actually succeeded (rows inserted and committed) but the response or\nacknowledgement was lost - a timeout, a crash just after commit, an SQS message not deleted in time. The retry\ninserted the same rows again because:\n- the table has a surrogate `id` primary key but **no unique constraint on the business key**, and\n- the insert is a plain `INSERT` (or a racy \"SELECT then INSERT\" check).\n\nAny system with retries is at-least-once, so **writes must be idempotent**.\n\n**Fix the design:**\n1. Define the natural key - e.g. `(org_id, channel, order_ref)` for orders, `(..., order_ref, line_no)` for lines.\n2. Enforce it: `ALTER TABLE orders ADD CONSTRAINT uq_orders UNIQUE (org_id, channel, order_ref);`\n3. Write with upsert:\n\n```sql\nINSERT INTO orders (org_id, channel, order_ref, status, total_amount)\nVALUES %s\nON CONFLICT (org_id, channel, order_ref)\nDO UPDATE SET status = EXCLUDED.status,\n              total_amount = COALESCE(EXCLUDED.total_amount, orders.total_amount);\n```\n\n   (`DO NOTHING` if rows are immutable.) Now a retry converges to the same state.\n4. For non-database effects (calling an API, sending email), use an **idempotency key** stored with a unique\n   constraint and check it before performing the effect.\n\n**Fix the data** (in a transaction, after a backup/snapshot):\n\n```sql\nDELETE FROM orders o\nUSING orders d\nWHERE o.org_id = d.org_id AND o.channel = d.channel AND o.order_ref = d.order_ref\n  AND o.id > d.id;                      -- keep the lowest id\n```\n\nBefore deleting, re-point child rows (order_items, settlements) that reference the duplicates' ids, or delete\nduplicate children too. Then add the constraint (it fails until duplicates are gone - a useful check).\n\n**Prevent recurrence:** a test that runs the loader twice on the same input and asserts row counts don't change, and\na monitoring query that counts duplicate business keys.",
+    "tags": [
+      "idempotency",
+      "retries",
+      "upsert",
+      "data-cleanup"
+    ]
+  },
+  {
+    "slug": "scn-lambda-timeout-200mb-xlsx",
+    "category": "scenario",
+    "difficulty": "hard",
+    "skill": "aws-lambda",
+    "question": "A Lambda that ingests seller reports times out (15 minutes) on a 200 MB XLSX, and sometimes runs out of memory. What do you do?",
+    "answer_md": "**1. Find where time and memory go.** Log timings per phase (S3 download, parse, transform, DB write) and check the\n`Max Memory Used` in the REPORT line. For XLSX, parsing is usually the dominant cost: XLSX is zipped XML, and\n`pandas.read_excel` builds the whole workbook in memory - a 200 MB file can need many GB.\n\n**2. Quick wins:**\n- **Stream the parse:** `openpyxl.load_workbook(path, read_only=True)` and iterate\n  `ws.iter_rows(values_only=True)`; download to `/tmp` (ephemeral storage configurable up to 10 GB) instead of\n  holding bytes in memory.\n- **Batch DB writes:** `execute_values` with a page size of ~1,000, commit every few thousand rows. Row-by-row\n  inserts are often the second big cost.\n- **More memory = more CPU** in Lambda; benchmark at 2-4 GB.\n- Prefer CSV when the source offers it - far cheaper to parse.\n\n**3. If it still doesn't fit in 15 minutes, change the architecture:**\n- **Route big files to a container** (ECS Fargate task) with no time limit; the S3-triggered Lambda just records the\n  upload and starts the task/enqueues a message. Small files keep the fast Lambda path.\n- **Or split and fan out:** one step converts the XLSX into CSV chunks in S3, then N Lambdas load chunks in parallel\n  (Step Functions Map state or SQS); a final step marks the upload complete. More moving parts, and parallel\n  upserts need consistent key ordering to avoid deadlocks.\n\n**4. Make failures safe:**\n- Idempotent loading (`ON CONFLICT` on natural keys) so a retry after a timeout doesn't duplicate.\n- Claim the upload atomically so duplicate S3 events/async retries don't run it twice concurrently.\n- A heartbeat + sweeper marks uploads stuck in `PROCESSING` as failed or re-queues them - a timed-out Lambda\n  cannot update its own status.\n- If consumed from SQS, the visibility timeout must exceed the function timeout.\n\n**What to say in an interview:** measure first, fix the obvious inefficiencies, then pick the right compute for\nunbounded work - Lambda is great for short, bursty tasks, not for arbitrarily large files.",
+    "tags": [
+      "aws-lambda",
+      "xlsx",
+      "streaming",
+      "ecs",
+      "performance"
+    ]
+  },
+  {
+    "slug": "scn-deadlocks-concurrent-upserts",
+    "category": "scenario",
+    "difficulty": "hard",
+    "skill": "transactions-concurrency",
+    "question": "Since you parallelized ingestion (several workers loading different files), PostgreSQL logs show `deadlock detected` errors on `INSERT ... ON CONFLICT DO UPDATE` into the inventory table. Why, and how do you fix it?",
+    "answer_md": "**Why.** A deadlock is a cycle of lock waits. Each upsert that updates a row takes a row lock held until the\ntransaction commits. Two workers load overlapping SKUs in **different orders** within multi-row transactions:\n\n```\nWorker A: locks (Myntra, SKU-1) ... then wants (Myntra, SKU-2)\nWorker B: locks (Myntra, SKU-2) ... then wants (Myntra, SKU-1)\n```\n\nEach waits for the other; PostgreSQL detects the cycle after `deadlock_timeout` (1 s) and aborts one transaction.\nUnique-index insertion of the same new key in parallel can also block (the second waits to see if the first\ncommits).\n\n**Fixes (combine):**\n1. **Consistent lock order.** Sort each batch by the conflict key before writing (`rows.sort(key=lambda r: (r.channel, r.sku))`,\n   or `ORDER BY channel, sku` in `INSERT ... SELECT`). If everyone acquires locks in the same order, a cycle is\n   impossible. This is the main fix.\n2. **Smaller transactions.** Commit every 500-1,000 rows: locks are held for less time, conflicts are rarer, and a\n   retry redoes less work.\n3. **Retry on deadlock/serialization errors.** They're expected under concurrency; catch SQLSTATE `40P01`\n   (deadlock) and `40001` (serialization failure), roll back, and retry the batch with backoff. Safe because\n   upserts are idempotent.\n\n```python\nfrom psycopg2 import errors\n\nfor attempt in range(5):\n    try:\n        with conn:                         # commits or rolls back\n            with conn.cursor() as cur:\n                execute_values(cur, UPSERT_SQL, sorted(batch, key=lambda r: (r[0], r[1])))\n        break\n    except (errors.DeadlockDetected, errors.SerializationFailure):\n        time.sleep(0.1 * 2 ** attempt + random.random() / 10)\nelse:\n    raise RuntimeError(\"batch failed after retries\")\n```\n\n4. **Partition the work** so workers don't overlap: route files by `(org_id, channel)` to a specific worker/queue\n   group, or take an advisory lock per org (`pg_advisory_xact_lock(org_id)`).\n5. **Skip no-op updates** (`WHERE ... IS DISTINCT FROM ...`) to take fewer row locks.\n\n**Investigate with** the server log (it prints both statements in the cycle) and `pg_locks` joined with\n`pg_stat_activity` during load.",
+    "tags": [
+      "deadlocks",
+      "locking",
+      "upsert",
+      "postgresql",
+      "concurrency"
+    ]
+  },
+  {
+    "slug": "scn-backfill-column-large-table",
+    "category": "scenario",
+    "difficulty": "hard",
+    "skill": "transactions-concurrency",
+    "question": "You need to add a `net_amount` column to an `order_items` table with 300 million rows and fill it for existing rows, without downtime. How do you do it safely?",
+    "answer_md": "**Don't** run `ALTER TABLE ... ADD COLUMN net_amount NUMERIC NOT NULL DEFAULT <expression>` or one giant\n`UPDATE order_items SET net_amount = ...`. A single 300M-row UPDATE holds row locks for hours, rewrites every row\n(doubling table size until vacuum), generates massive WAL (replica lag), and if it fails at 90% it all rolls back.\n\n**Step 1 - add the column cheaply.**\n\n```sql\nALTER TABLE order_items ADD COLUMN net_amount NUMERIC(12,2);   -- nullable, no default\n```\n\nIn PostgreSQL 11+ adding a nullable column (or one with a constant default) is a metadata-only change - instant.\nIt still needs a brief `ACCESS EXCLUSIVE` lock, so set `lock_timeout = '5s'` to avoid queueing behind a long query\nand blocking everyone; retry if it times out.\n\n**Step 2 - make new writes populate it.** Deploy code that writes `net_amount` on insert/update (or a trigger), so\nthe backlog stops growing.\n\n**Step 3 - backfill in batches** by primary-key range:\n\n```sql\nUPDATE order_items\nSET net_amount = gross_amount - COALESCE(discount, 0)\nWHERE id >= %(start)s AND id < %(start)s + 10000\n  AND net_amount IS NULL;\n```\n\nA script loops over ranges, commits each batch, sleeps briefly, logs progress, and is **resumable** (the\n`IS NULL` filter makes re-running safe). Monitor replica lag, IO and autovacuum; throttle if needed. Run off-peak.\n\n**Step 4 - verify:** `SELECT count(*) FROM order_items WHERE net_amount IS NULL` (in batches or via an index) and\nspot-check values.\n\n**Step 5 - add constraints without long locks:**\n\n```sql\nALTER TABLE order_items ADD CONSTRAINT net_amount_nn CHECK (net_amount IS NOT NULL) NOT VALID;\nALTER TABLE order_items VALIDATE CONSTRAINT net_amount_nn;   -- scans without blocking writes\n```\n\n(PostgreSQL 12+ can then `SET NOT NULL` using the validated check.) Indexes go in with `CREATE INDEX CONCURRENTLY`.\n\n**Step 6 - switch reads** to the new column. This expand -> migrate -> contract pattern keeps every step reversible.",
+    "tags": [
+      "migrations",
+      "backfill",
+      "postgresql",
+      "zero-downtime",
+      "locking"
+    ]
+  },
+  {
+    "slug": "scn-api-p99-latency-spike",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "logging-observability",
+    "question": "The orders API's p99 latency jumped from 300 ms to 4 s this afternoon, while the average looks almost normal. How do you find the cause?",
+    "answer_md": "**Read the signal.** Average normal + p99 bad = a **subset** of requests is slow: certain endpoints, certain\ntenants (a big seller), certain parameters, or intermittent waits (locks, pool exhaustion, a slow dependency).\n\n**1. Scope it.** Break latency down by endpoint, status code, org_id and instance. Did it start at a specific time?\nCorrelate with deploys, config changes, data loads, cron jobs, traffic spikes.\n\n**2. Follow slow requests end to end.** With structured logs carrying a `request_id` (and ideally tracing spans),\npick a few slow requests and see where time goes: DB query, external API call, waiting for a connection,\nserialization. Without spans, log timings around DB calls:\n\n```python\nstart = time.perf_counter()\nrows = cur.execute(sql, params)\nlog.info(\"db_query\", extra={\"request_id\": rid, \"query\": \"orders_list\",\n                            \"ms\": round((time.perf_counter() - start) * 1000), \"rows\": len(rows)})\n```\n\n**3. Check the database.**\n- `pg_stat_statements`: which query's `max`/`mean` time rose?\n- `pg_stat_activity` + `pg_locks`: queries waiting on locks (a migration or long batch UPDATE holding locks\n  causes exactly this tail-latency pattern).\n- Plan regression for one tenant (EXPLAIN with the big seller's parameters).\n\n**4. Check the app tier.** Connection-pool wait time (all connections busy -> requests queue), CPU/memory/GC,\nthread/worker saturation, retries to a slow downstream (each retry multiplies latency).\n\n**5. Mitigate, then fix.** Roll back a suspect deploy, kill/reschedule the offending batch job, add a statement\ntimeout, cap page sizes. Then the real fix (index, query rewrite, moving the heavy job to a replica).\n\n**Afterwards:** alert on p95/p99 per endpoint, not averages; keep dashboards for DB waits and pool usage; write a\nshort incident note with the timeline and the preventive action.",
+    "tags": [
+      "observability",
+      "latency",
+      "logging",
+      "tracing",
+      "postgresql"
+    ]
+  },
+  {
+    "slug": "scn-third-party-api-intermittent-failures",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "rest-api-integration",
+    "question": "A marketplace API you depend on intermittently returns 500/502 and sometimes hangs for minutes, causing your sync jobs to stall or fail. How do you make the integration resilient?",
+    "answer_md": "**1. Timeouts on every call.** A hung request blocks a worker forever. Always set connect and read timeouts:\n`session.get(url, timeout=(5, 30))`. Use a `requests.Session` for connection reuse.\n\n**2. Retry only what's retryable,** with exponential backoff and jitter and a cap:\n- Retry: connection errors, timeouts, 429, 500, 502, 503, 504.\n- Don't retry: 400, 401, 403, 404, 422 - the request itself is wrong; retrying just wastes quota. A 401 should\n  flag the seller's connection as needing re-authorization.\n- Honour `Retry-After`. Only retry **idempotent** requests (GET, PUT with full state, or POST with an idempotency\n  key) - otherwise a retried \"create\" can duplicate.\n\n```python\nfrom urllib3.util.retry import Retry\nfrom requests.adapters import HTTPAdapter\n\nretry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504],\n              allowed_methods=[\"GET\"], respect_retry_after_header=True)\nsession.mount(\"https://\", HTTPAdapter(max_retries=retry))\n```\n\n**3. Circuit breaker.** If most recent calls failed, stop calling for a cool-down period and fail fast; probe\noccasionally to see if it recovered. This protects your workers and the struggling API.\n\n**4. Isolate failures.** One seller's or one endpoint's failure shouldn't stop the whole job: process sellers as\nindependent units (a message per seller), catch and record errors per unit, move on.\n\n**5. Checkpoint progress.** Store the last successful cursor/page per seller, committed together with the data, so a\nresumed job continues where it stopped instead of restarting.\n\n**6. Validate responses.** A 200 with an HTML error page or a missing field happens; validate the shape before use\nand treat unexpected payloads as errors, not empty data (otherwise you might \"sync\" zero orders and move the\ncheckpoint forward).\n\n**7. Observe.** Metrics per endpoint: error rate by status, latency, retries, circuit state; alert on sync lag per\nseller. Keep a record of incidents to show the provider.",
+    "tags": [
+      "http",
+      "retries",
+      "timeouts",
+      "circuit-breaker",
+      "resilience"
+    ]
+  },
+  {
+    "slug": "scn-job-reports-success-but-rows-missing",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "error-handling",
+    "question": "A seller says 300 orders from yesterday's upload are missing, but the upload shows SUCCESS and there are no errors in the logs. What do you look for, and how should error handling work?",
+    "answer_md": "**Likely cause: errors are swallowed.** Classic patterns:\n\n```python\nfor row in rows:\n    try:\n        insert(row)\n    except Exception:\n        pass                      # or log at DEBUG, or `continue`\n```\n\nor a parser that returns `None` for unparseable dates and a filter that silently drops those rows, or\n`ON CONFLICT DO NOTHING` hiding rows that collided with a *wrong* natural key (two different orders mapped to the\nsame key).\n\n**Investigation:**\n1. Count: rows in the raw file vs rows parsed vs rows inserted/updated (if the job doesn't record these, that's\n   finding #1). Re-run the parse locally against the raw S3 file.\n2. Diff the missing order refs against the file - what do they have in common? (A date format like `03/04/2024`,\n   a blank SKU, a new status value, a particular sheet in the workbook.)\n3. Check `ON CONFLICT` targets: do the missing orders share a key with existing rows?\n4. Check transaction handling: a failed statement aborts the transaction in PostgreSQL (\"current transaction is\n   aborted\"); if code catches the exception and continues without rollback, all later statements fail too.\n\n**How error handling should work:**\n- **Never swallow exceptions silently.** Catch *specific* exceptions where you can handle them; let unexpected\n  ones propagate and fail the job loudly.\n- **Row-level validation is a feature:** collect rejected rows with reasons (row number, column, message) into an\n  error table and report counts. The upload status should be `COMPLETED_WITH_ERRORS (300 rejected)`, not `SUCCESS`.\n- **Reconcile counts** at the end: `parsed == inserted + updated + skipped_duplicates + rejected`; if not, fail.\n- **Log with context** (upload_id, row number, exception with stack trace via `log.exception`) at ERROR level.\n- **Thresholds:** if more than e.g. 5% of rows fail, fail the whole file - it's probably a format problem.\n- Use savepoints (or validate before writing) if you want to skip a bad row without aborting the batch.",
+    "tags": [
+      "error-handling",
+      "logging",
+      "data-quality",
+      "etl"
+    ]
+  },
+  {
+    "slug": "scn-api-error-responses-design",
+    "category": "scenario",
+    "difficulty": "easy",
+    "skill": "api-development",
+    "question": "Your team's FastAPI endpoints return errors inconsistently: some return 200 with `{\"error\": ...}`, some raise 500 for bad input, some return plain strings. How would you standardize error handling?",
+    "answer_md": "**Principles:**\n1. **Use HTTP status codes correctly** - clients, proxies, monitoring and retry logic all depend on them:\n   - `400` malformed request, `422` validation failed (FastAPI's default for body/query validation)\n   - `401` not authenticated, `403` authenticated but not allowed, `404` not found (also for \"exists but belongs to\n     another tenant\", to avoid leaking existence)\n   - `409` conflict (duplicate, state conflict), `429` rate limited\n   - `500` unexpected server bug, `502/503/504` dependency problems\n   Never `200` with an error body.\n2. **One error shape everywhere**, machine-readable plus human-readable:\n\n```json\n{\"error\": {\"code\": \"UPLOAD_FORMAT_UNKNOWN\",\n           \"message\": \"Could not detect report format for channel Myntra.\",\n           \"details\": [{\"field\": \"file\", \"issue\": \"missing column 'Order ID'\"}],\n           \"request_id\": \"b1f2...\"}}\n```\n\n   Clients switch on `code`, show `message`, and support can search logs by `request_id`.\n3. **Central handlers** instead of ad-hoc try/except in every route:\n\n```python\nclass AppError(Exception):\n    def __init__(self, code: str, message: str, status: int = 400, details=None):\n        self.code, self.message, self.status, self.details = code, message, status, details or []\n\n@app.exception_handler(AppError)\nasync def app_error_handler(request, exc: AppError):\n    return JSONResponse(status_code=exc.status, content={\"error\": {\n        \"code\": exc.code, \"message\": exc.message, \"details\": exc.details,\n        \"request_id\": request.state.request_id}})\n\n@app.exception_handler(Exception)\nasync def unhandled(request, exc):\n    log.exception(\"unhandled error\", extra={\"request_id\": request.state.request_id})\n    return JSONResponse(status_code=500, content={\"error\": {\n        \"code\": \"INTERNAL\", \"message\": \"Something went wrong.\",\n        \"request_id\": request.state.request_id}})\n```\n\n4. **Don't leak internals:** no stack traces or SQL in responses; log them server-side.\n5. **Document** error codes in the OpenAPI spec (`responses=`) and test the error paths, not just the happy path.",
+    "tags": [
+      "api-design",
+      "fastapi",
+      "http-status-codes",
+      "error-handling"
+    ]
+  },
+  {
+    "slug": "scn-lambda-too-many-db-connections",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "aws-lambda",
+    "question": "During an end-of-month upload spike, Lambda functions start failing with `FATAL: sorry, too many clients already` / `remaining connection slots are reserved` from PostgreSQL. What's going on and how do you fix it?",
+    "answer_md": "**Cause.** Each concurrent Lambda execution environment holds its own database connection. A spike scales Lambda to\nhundreds of concurrent environments -> hundreds of connections, exceeding PostgreSQL's `max_connections` (which\nis sized for memory reasons; each connection is a backend process using several MB). Idle environments also keep\nconnections open until they're recycled, and code that opens a new connection per invocation without closing it\nmakes it worse.\n\n**Fixes:**\n\n1. **Reuse one connection per execution environment** - create it outside the handler (lazy, with reconnect on\n   failure), not per invocation:\n\n```python\n_conn = None\n\ndef get_conn():\n    global _conn\n    if _conn is None or _conn.closed:\n        _conn = psycopg2.connect(DSN, connect_timeout=5)\n    return _conn\n\ndef handler(event, context):\n    conn = get_conn()\n    with conn, conn.cursor() as cur:      # transaction scope\n        ...\n```\n\n2. **Put a pooler in front of the database:** **RDS Proxy** (managed, IAM auth, handles failover) or PgBouncer in\n   transaction mode. Thousands of client connections are multiplexed onto a small pool of real connections. (With\n   transaction pooling, avoid session state such as session-level `SET` or advisory locks held across\n   transactions.)\n\n3. **Limit concurrency:** set **reserved concurrency** on the function, and for SQS-triggered functions the event\n   source's **maximum concurrency**, so the function can never exceed what the database can handle. Excess work\n   waits in the queue instead of crashing - that's the point of the queue.\n\n4. **Do less per connection-second:** batch writes, keep transactions short, never hold a connection while\n   waiting on S3 or HTTP.\n\n5. **Observe:** CloudWatch `DatabaseConnections`, Lambda `ConcurrentExecutions`, `pg_stat_activity` grouped by\n   application/state (lots of `idle` = leaked/held connections). Set `idle_in_transaction_session_timeout` to kill\n   forgotten transactions.\n\n**Interview framing:** Lambda scales faster than relational databases; put a buffer (queue + concurrency limit) and\na pooler between them.",
+    "tags": [
+      "aws-lambda",
+      "postgresql",
+      "connection-pooling",
+      "rds-proxy",
+      "concurrency"
+    ]
+  },
+  {
+    "slug": "scn-timezone-daily-totals-mismatch",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "etl-data-processing",
+    "question": "Finance says your daily revenue for 1 March doesn't match the marketplace's dashboard - ours is lower, and the next day's is higher by about the same amount. What do you suspect and how do you fix it?",
+    "answer_md": "**Suspect: timezones.** Orders placed between 00:00 and 05:30 IST on 1 March are 18:30-24:00 UTC on **28 Feb**. If\ntimestamps are stored or bucketed in UTC (server default on AWS) while the marketplace reports days in IST, revenue\nshifts from one day to the previous one at both ends of each day - lower one day, higher the next, by similar\namounts. That pattern is the giveaway.\n\n**Confirm:** take orders near midnight; compare the raw report value, what's stored, and how the daily query buckets\nthem. Check the column type (`timestamp` vs `timestamptz`), the DB session `TimeZone`, and how the parser\ninterpreted the report's strings (naive datetimes are ambiguous).\n\n**Fix:**\n- **Store instants as `timestamptz`** (UTC internally). When parsing a report, attach the source's timezone\n  explicitly: the marketplace's timestamps are IST, so\n  `datetime.strptime(s, fmt).replace(tzinfo=ZoneInfo(\"Asia/Kolkata\"))`.\n- **Bucket by the business timezone** in reporting queries:\n\n```sql\nSELECT (created_at AT TIME ZONE 'Asia/Kolkata')::date AS business_day,\n       SUM(total_amount)\nFROM orders\nWHERE created_at >= '2024-03-01 00:00+05:30' AND created_at < '2024-04-01 00:00+05:30'\nGROUP BY 1 ORDER BY 1;\n```\n\n  The `WHERE` uses instants with explicit offsets so an index on `created_at` still works.\n- If reports only give a **date** (no time), store it as `DATE` - it's already a business date; don't convert it.\n- Make the business timezone a per-org setting if you expand beyond India.\n- Backfill: re-derive stored values from raw files or fix them with a one-off migration, then re-run summaries for\n  the affected range.\n\n**Prevent:** a test with orders at 23:59 and 00:01 IST, and a daily reconciliation check comparing your totals to\nthe marketplace's per-day totals with a small tolerance.",
+    "tags": [
+      "timezones",
+      "etl",
+      "postgresql",
+      "data-quality",
+      "reporting"
+    ]
+  },
+  {
+    "slug": "scn-endpoint-n-plus-one-queries",
+    "category": "scenario",
+    "difficulty": "medium",
+    "skill": "query-optimization",
+    "question": "The `GET /orders` page endpoint takes 2 seconds. Logs show it runs 1 query for the orders and then one query per order for its items and one per order for its settlement status - 101 queries per page. How do you fix it?",
+    "answer_md": "**This is the N+1 query problem:** 1 query for the list, then N queries for related data. Each query is fast\n(~5-10 ms), but round-trip latency multiplies: 100+ round trips = seconds. It's common with ORMs (lazy loading) and\nwith hand-written loops alike:\n\n```python\norders = fetch(\"SELECT * FROM orders WHERE org_id = %s ORDER BY order_date DESC LIMIT 50\", [org])\nfor o in orders:\n    o[\"items\"] = fetch(\"SELECT * FROM order_items WHERE order_id = %s\", [o[\"id\"]])   # N queries\n```\n\n**Fix 1 - batch the related lookups (1 + 1 queries per relation):**\n\n```python\nids = [o[\"id\"] for o in orders]\nitems = fetch(\"SELECT * FROM order_items WHERE order_id = ANY(%s)\", [ids])\nby_order = defaultdict(list)\nfor it in items:\n    by_order[it[\"order_id\"]].append(it)\nfor o in orders:\n    o[\"items\"] = by_order[o[\"id\"]]\n```\n\nThree queries total regardless of page size. (ORMs call this eager loading: `selectinload` / `prefetch_related`.)\n\n**Fix 2 - one query with joins/aggregation** when you only need summary data:\n\n```sql\nSELECT o.id, o.order_ref, o.total_amount,\n       COUNT(oi.id)            AS item_count,\n       COALESCE(s.settled, 0)  AS settled_amount\nFROM orders o\nLEFT JOIN order_items oi ON oi.order_id = o.id\nLEFT JOIN (SELECT order_ref, channel, SUM(amount) AS settled\n           FROM settlements GROUP BY order_ref, channel) s\n       ON s.order_ref = o.order_ref AND s.channel = o.channel\nWHERE o.org_id = %s\nGROUP BY o.id, s.settled\nORDER BY o.order_date DESC LIMIT 50;\n```\n\nBeware fan-out: joining two one-to-many tables multiplies rows - pre-aggregate one side (as above). For a list page,\nprecomputed columns (`item_count`, `recon_status`) are often best.\n\n**Supporting indexes:** `order_items (order_id)`, `settlements (channel, order_ref)`.\n\n**Detect it early:** log the query count per request (middleware), and fail tests that exceed a budget.",
+    "tags": [
+      "n-plus-one",
+      "performance",
+      "sql",
+      "api"
+    ]
+  }
+]

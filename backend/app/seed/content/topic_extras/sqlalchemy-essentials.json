@@ -1,0 +1,70 @@
+{
+  "slug": "sqlalchemy-essentials",
+  "why_md": "- SQLAlchemy 2.0 is the standard data layer in FastAPI codebases; most backend job descriptions expect it.\n- Even if you prefer raw SQL, SQLAlchemy Core gives safe query composition, connection pooling and Alembic migrations.\n- ORM pitfalls (N+1 queries, expired attributes, session scope) are frequent interview topics.\n- Moving from raw psycopg2 to SQLAlchemy is a likely step when you build FastAPI/AI services.",
+  "revision_notes_md": "- Engine = connection pool + dialect; create once per process.\n- Session = unit of work + identity map; one per request/job, short-lived.\n- 2.0 style: `session.execute(select(Order).where(Order.orgid == 7)).scalars().all()`.\n- `session.commit()` expires loaded objects (`expire_on_commit=True`) → next attribute access reloads.\n- N+1: lazy-loading relationships in a loop; fix with `selectinload()` / `joinedload()`.\n- `text(\"... :id\")` with bound params for raw SQL; never f-strings.\n- PostgreSQL upsert: `from sqlalchemy.dialects.postgresql import insert` → `.on_conflict_do_update(...)`.\n- Alembic autogenerate misses some changes (renames, some constraints) — always review migrations.",
+  "exercises_md": "1. Model two of your real tables (orders, order_items) in SQLAlchemy 2.0 declarative style with `Mapped[]` annotations, then write one query with `select()` and a relationship load using `selectinload`.\n2. Port one psycopg2 upsert to `postgresql.insert(...).on_conflict_do_update(...)` and compare the emitted SQL (`echo=True`).",
+  "my_context_md": "SQLAlchemy and Alembic aren't used anywhere in `python-postgres` (raw psycopg2 everywhere), so this is new ground. Your `ThreadedConnectionPool` + `db_transaction()` pattern in `AmazonVendorBankRecon/db.py` maps directly onto SQLAlchemy's Engine (pool) and `with Session.begin():` (transaction scope), which is a good mental bridge.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "In SQLAlchemy, the object that owns the connection pool and is created once per process is the ____.",
+      "answers": [
+        "engine",
+        "engine object"
+      ],
+      "explanation": "create_engine() returns an Engine holding the pool and dialect."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To avoid N+1 queries when loading customers and their orders, add `.options(____(Customer.orders))` to the select.",
+      "answers": [
+        "selectinload",
+        "joinedload"
+      ],
+      "explanation": "selectinload emits one extra IN query for all children; joinedload uses a JOIN."
+    },
+    {
+      "type": "output",
+      "prompt": "This simulates an ORM's lazy loading with sqlite3 and counts the SQL statements sent. What does it print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''CREATE TABLE c(id INT); CREATE TABLE o(cid INT);\nINSERT INTO c VALUES (1),(2),(3); INSERT INTO o VALUES (1),(1),(3);''')\nn = 0\ndef count(sql):\n    global n; n += 1\ndb.set_trace_callback(count)\nfor (cid,) in db.execute(\"SELECT id FROM c\").fetchall():\n    db.execute(\"SELECT * FROM o WHERE cid = ?\", (cid,)).fetchall()\nlazy = n; n = 0\ndb.execute(\"SELECT * FROM o WHERE cid IN (SELECT id FROM c)\").fetchall()\nprint(lazy, n)",
+      "answers": [
+        "4 1"
+      ],
+      "explanation": "Loading children per parent costs 1 + N statements (here 1 + 3). Batch-loading (like selectinload) needs just one more query."
+    },
+    {
+      "type": "mcq",
+      "prompt": "After `session.commit()`, you access `order.status` on an object loaded earlier in the same session. With default settings, what happens?",
+      "options": [
+        "It returns the cached value without touching the database",
+        "It raises DetachedInstanceError",
+        "It emits a SELECT to reload the object, because commit expired it",
+        "It returns None"
+      ],
+      "answer_index": 2,
+      "explanation": "expire_on_commit=True expires all instances on commit so the next access refreshes from the database (if the session is closed, you'd get DetachedInstanceError instead)."
+    },
+    {
+      "type": "debug",
+      "prompt": "This FastAPI-style helper leaks connections and sometimes leaves transactions open. What's wrong?",
+      "code": "from sqlalchemy import create_engine, text\nfrom sqlalchemy.orm import Session\n\ndef get_order(order_id: int):\n    engine = create_engine(DB_URL)\n    session = Session(engine)\n    row = session.execute(\n        text(f\"SELECT * FROM orders WHERE id = {order_id}\")).first()\n    return row",
+      "answer": "- `create_engine` is called per request, creating a new pool every time (connections are never reused or cleaned up). Create the engine once at module/app startup.\n- The Session is never closed, so its connection/transaction stays checked out.\n- The f-string builds SQL from input; use bound parameters.\n\n```python\nengine = create_engine(DB_URL, pool_pre_ping=True)   # once\nSessionLocal = sessionmaker(engine)\n\ndef get_order(order_id: int):\n    with SessionLocal() as session:\n        return session.execute(\n            text(\"SELECT * FROM orders WHERE id = :id\"), {\"id\": order_id}\n        ).first()\n```",
+      "rubric": [
+        "Engine created per call → new pool each time",
+        "Session never closed → leaked connection/transaction",
+        "f-string SQL → use bound parameters (:id)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the SQLAlchemy Session and the unit-of-work pattern to someone used to raw psycopg2.",
+      "answer": "With psycopg2 you send each statement yourself and call `commit()`. A SQLAlchemy **Session** sits between your objects and the connection:\n\n- **Identity map**: each row is loaded once per session as one Python object; querying it again returns the same object.\n- **Unit of work**: you modify objects (`order.status = 'shipped'`, `session.add(item)`); the session tracks changes and on `flush()` (automatic before queries, and on `commit()`) emits the INSERT/UPDATE/DELETE statements in dependency order.\n- **Transaction**: a session begins a transaction on first use; `commit()` commits and expires objects; `rollback()` discards pending changes.\n\nScope: one session per request or job, used in a `with Session(engine) as s, s.begin():` block — conceptually the same as a `db_transaction()` context manager that commits or rolls back and returns the connection to the pool.",
+      "rubric": [
+        "Session tracks objects (identity map)",
+        "Unit of work: changes flushed as SQL at flush/commit",
+        "Session = transaction scope; commit/rollback; expire on commit",
+        "One short-lived session per request/job"
+      ]
+    }
+  ]
+}

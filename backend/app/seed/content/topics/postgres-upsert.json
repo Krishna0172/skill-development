@@ -1,0 +1,123 @@
+{
+  "slug": "postgres-upsert",
+  "title": "Upserts with INSERT … ON CONFLICT",
+  "skill": "postgresql",
+  "extra_skills": [
+    "transactions-concurrency",
+    "psycopg2"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "postgresql",
+    "upsert",
+    "on-conflict",
+    "excluded",
+    "merge",
+    "bulk-load"
+  ],
+  "summary": "An upsert inserts a row, or does something else if a row with the same unique key already exists. In PostgreSQL that's `INSERT ... ON CONFLICT (key) DO NOTHING` (skip) or `DO UPDATE SET ...` (overwrite), where `EXCLUDED` refers to the row you tried to insert. It's atomic and concurrency-safe, unlike \"SELECT then INSERT\".",
+  "details_md": "### Syntax\n```sql\nINSERT INTO t (cols) VALUES (...)\nON CONFLICT (conflict_target) DO NOTHING\n-- or\nON CONFLICT (conflict_target) DO UPDATE SET col = EXCLUDED.col [WHERE condition]\nRETURNING ...;\n```\n- The **conflict target** must match a **unique index or constraint** exactly (same columns; for a partial unique index you also give its `WHERE` predicate). `ON CONFLICT ON CONSTRAINT name` is an alternative.\n- `EXCLUDED` is the row proposed for insertion (after BEFORE triggers ran). The existing row is referenced by the table name or alias.\n- `DO NOTHING` may omit the target (then any unique violation is skipped); `DO UPDATE` requires one.\n- The optional `WHERE` on `DO UPDATE` skips the update when false, e.g. \"only update if newer\".\n\n### How it works\nPostgreSQL first checks the unique index for a conflicting row. If none exists, it inserts *speculatively*; if a concurrent transaction inserted the same key in the meantime, the speculative insert is undone and the conflict path runs. The result: each row is **guaranteed to be either inserted or updated/skipped**, without unique-violation errors, even under concurrency (in READ COMMITTED). A conflicting row that is being inserted by an **uncommitted** transaction makes you **wait** for it to finish.\n\n### Important rules\n- **One row per key per statement**: if a single `INSERT ... VALUES (...), (...)` contains the same key twice, `DO UPDATE` fails with `ON CONFLICT DO UPDATE command cannot affect row a second time`. Deduplicate the batch first. (`DO NOTHING` simply skips the second one.)\n- `RETURNING` returns inserted and updated rows, but **not** rows skipped by `DO NOTHING`. To tell inserts from updates, `RETURNING (xmax = 0) AS inserted` is a well-known trick (relies on internals).\n- Updates create new row versions (MVCC) even if values are unchanged; add `WHERE t.col IS DISTINCT FROM EXCLUDED.col` to avoid pointless writes and WAL.\n- Serial/identity sequences are consumed even when the row ends up conflicting, so gaps appear.\n\n### Merging semantics with COALESCE\n`SET col = COALESCE(EXCLUDED.col, t.col)` means \"take the new value if provided, otherwise keep the old one\". Useful when different reports fill different columns of the same order.\n\n### Deadlocks in bulk upserts\nTwo concurrent batches that upsert overlapping keys in **different orders** each lock rows the other needs, so a deadlock occurs and PostgreSQL aborts one transaction (`40P01`). Fixes: sort each batch by the conflict key, keep batches smaller, and retry on `DeadlockDetected` with backoff.\n\n### MERGE (PostgreSQL 15+)\n`MERGE INTO target USING source ON ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...` is the SQL-standard alternative and supports deletes and multiple conditions; PG 17 added `RETURNING` and `WHEN NOT MATCHED BY SOURCE`. But MERGE is **not** concurrency-safe in the same way: concurrent inserts of the same key can still raise a unique violation. For a plain \"insert or update by key\", `ON CONFLICT` remains the better choice.",
+  "code_md": "```sql\n-- inventory(id, orgid, sku, qty, updated_at), PRIMARY KEY (id, orgid)\n\n-- 1) Insert-or-skip\nINSERT INTO inventory (id, orgid, sku, qty)\nVALUES (101, 7, 'SKU-RED-M', 25)\nON CONFLICT (id, orgid) DO NOTHING;      -- existing row is left untouched\n```\n\n```sql\n-- 2) Insert-or-merge: keep old values when the new report has NULLs\n-- orders(id, orgid, status, total, settled_amount, updated_at), UNIQUE (id, orgid)\nINSERT INTO orders AS o (id, orgid, status, total, settled_amount, updated_at)\nVALUES (5001, 7, 'DELIVERED', 1499.00, NULL, now())\nON CONFLICT (id, orgid) DO UPDATE SET\n    status         = COALESCE(EXCLUDED.status, o.status),\n    total          = COALESCE(EXCLUDED.total, o.total),\n    settled_amount = COALESCE(EXCLUDED.settled_amount, o.settled_amount),\n    updated_at     = EXCLUDED.updated_at\nWHERE (o.status, o.total, o.settled_amount)                     -- skip no-op updates\n      IS DISTINCT FROM\n      (COALESCE(EXCLUDED.status, o.status), COALESCE(EXCLUDED.total, o.total),\n       COALESCE(EXCLUDED.settled_amount, o.settled_amount))\nRETURNING id, (xmax = 0) AS inserted;    -- true = inserted, false = updated\n```\n\n```python\n# 3) Bulk upsert from Python: dedupe, sort, batch, retry on deadlock\nimport time\nfrom psycopg2 import errors\nfrom psycopg2.extras import execute_values\n\nSQL = \"\"\"\nINSERT INTO orders AS o (id, orgid, status, total)\nVALUES %s\nON CONFLICT (id, orgid) DO UPDATE SET\n    status = COALESCE(EXCLUDED.status, o.status),\n    total  = COALESCE(EXCLUDED.total,  o.total)\n\"\"\"\n\ndef upsert_orders(conn, rows, max_retries=3):\n    # one row per key, else \"cannot affect row a second time\"\n    rows = list({(r[0], r[1]): r for r in rows}.values())\n    rows.sort(key=lambda r: (r[0], r[1]))          # consistent lock order reduces deadlocks\n    for attempt in range(1, max_retries + 1):\n        try:\n            with conn:                              # commit on success, rollback on error\n                with conn.cursor() as cur:\n                    execute_values(cur, SQL, rows, page_size=1000)\n            return\n        except errors.DeadlockDetected:\n            if attempt == max_retries:\n                raise\n            time.sleep(0.5 * 2 ** attempt)          # exponential backoff\n```\n\n```sql\n-- 4) MERGE (PG 15+) when you also need delete/complex branches\nMERGE INTO inventory AS t\nUSING inventory_staging AS s\n   ON t.id = s.id AND t.orgid = s.orgid\nWHEN MATCHED AND s.qty = 0 THEN DELETE\nWHEN MATCHED THEN UPDATE SET qty = s.qty, updated_at = now()\nWHEN NOT MATCHED THEN INSERT (id, orgid, sku, qty) VALUES (s.id, s.orgid, s.sku, s.qty);\n```",
+  "use_cases_md": "- Idempotent ETL loads: re-processing the same report file does not create duplicates.\n- Syncing marketplace orders whose status changes over time (pending to shipped to delivered).\n- Partial updates from multiple sources, each filling some columns (`COALESCE(EXCLUDED.x, t.x)`).\n- Counters and aggregates: `ON CONFLICT (day, sku) DO UPDATE SET qty = t.qty + EXCLUDED.qty`.\n- \"Get or create\" lookups (with care: `DO NOTHING` returns nothing for existing rows).",
+  "mistakes_md": "- **No matching unique index for the conflict target**: error \"there is no unique or exclusion constraint matching the ON CONFLICT specification\". Create the unique index on exactly those columns.\n- **Duplicate keys within one batch with DO UPDATE**: \"cannot affect row a second time\". Deduplicate before sending.\n- **Expecting RETURNING to give existing rows with DO NOTHING**: it doesn't. Use `DO UPDATE SET col = EXCLUDED.col` (a no-op write) or a follow-up SELECT.\n- **SELECT-then-INSERT in application code**: race condition between check and insert. Use ON CONFLICT.\n- **Unsorted concurrent bulk upserts**: deadlocks. Sort by key, smaller batches, retry on `40P01`.\n- **Overwriting good data with NULLs**: `SET col = EXCLUDED.col` blindly copies NULLs. Use COALESCE when the source may be partial.\n- **Assuming MERGE is a drop-in concurrency-safe upsert**: it can still hit unique violations under concurrency.",
+  "best_practices_md": "- Make every load idempotent with a natural or business key as the conflict target.\n- Use `IS DISTINCT FROM` in the `DO UPDATE ... WHERE` clause to skip unchanged rows and reduce WAL/bloat.\n- Batch with `execute_values` (multi-row VALUES) or COPY into a staging table followed by one `INSERT ... SELECT ... ON CONFLICT`.\n- Keep the conflict key small and indexed; on Citus it must include the distribution column.\n- Always wrap batches in a transaction and add a bounded retry for deadlocks and serialization failures.",
+  "my_context_md": "This is core to your ECSMarketplaceDataUpload work. Inventory uses `ON CONFLICT (id, orgid) DO NOTHING`: the first version of a row wins and re-processing a file is harmless. Orders use `ON CONFLICT DO UPDATE SET col = COALESCE(EXCLUDED.col, table.col)` because different marketplace reports fill in different columns of the same order, and COALESCE stops a report that lacks a column from wiping out a value an earlier report set. Your deadlock-retry loop on Citus is there because concurrent batches lock overlapping keys in different orders; sorting each batch by `(id, orgid)` and de-duplicating keys before `execute_batch` lowers how often that retry is needed. Note that `execute_values` sends a single multi-row INSERT per page and is usually faster than `execute_batch` for upserts.",
+  "related": [
+    "transactions-isolation",
+    "psycopg2-essentials",
+    "postgres-indexes",
+    "sql-null-handling",
+    "retries-backoff-idempotency",
+    "sql-window-functions"
+  ],
+  "flashcards": [
+    {
+      "front": "What does EXCLUDED refer to in ON CONFLICT DO UPDATE?",
+      "back": "The row that was proposed for insertion (the new values)."
+    },
+    {
+      "front": "Requirement for the ON CONFLICT (cols) target?",
+      "back": "A unique index/constraint on exactly those columns (plus the predicate for a partial index)."
+    },
+    {
+      "front": "Error when the same key appears twice in one upsert batch?",
+      "back": "\"ON CONFLICT DO UPDATE command cannot affect row a second time\". Deduplicate first."
+    },
+    {
+      "front": "How to keep the old value when the new one is NULL?",
+      "back": "`SET col = COALESCE(EXCLUDED.col, t.col)`"
+    },
+    {
+      "front": "Does RETURNING return rows skipped by DO NOTHING?",
+      "back": "No. Only inserted or updated rows."
+    },
+    {
+      "front": "Why do concurrent bulk upserts deadlock and how do you reduce it?",
+      "back": "They lock overlapping rows in different orders. Sort batches by key, keep them small, and retry on 40P01."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "`INSERT ... ON CONFLICT (sku) DO NOTHING` fails with 'no unique or exclusion constraint matching'. Fix?",
+      "options": [
+        "Add RETURNING",
+        "Create a unique index on (sku)",
+        "Use DO UPDATE instead",
+        "Run in SERIALIZABLE"
+      ],
+      "answer_index": 1,
+      "explanation": "The conflict target must correspond to a unique index or constraint."
+    },
+    {
+      "question": "Which SET clause avoids overwriting existing data with NULLs from a partial report?",
+      "options": [
+        "SET col = EXCLUDED.col",
+        "SET col = NULLIF(EXCLUDED.col, t.col)",
+        "SET col = COALESCE(t.col, EXCLUDED.col)",
+        "SET col = COALESCE(EXCLUDED.col, t.col)"
+      ],
+      "answer_index": 3,
+      "explanation": "COALESCE(new, old) takes the new value when present, otherwise keeps the old. COALESCE(t.col, EXCLUDED.col) would never update a value that is already set."
+    },
+    {
+      "question": "Compared with ON CONFLICT, PostgreSQL's MERGE...",
+      "options": [
+        "Can still raise unique violations under concurrent inserts",
+        "Is always faster",
+        "Cannot insert rows",
+        "Only exists in PG 17"
+      ],
+      "answer_index": 0,
+      "explanation": "MERGE (PG 15+) doesn't use the speculative insertion mechanism, so concurrent inserts of the same key can conflict."
+    },
+    {
+      "question": "Trick to tell inserted from updated rows in RETURNING?",
+      "options": [
+        "RETURNING ctid",
+        "RETURNING EXCLUDED.*",
+        "RETURNING (xmax = 0) AS inserted",
+        "RETURNING xmin = 0"
+      ],
+      "answer_index": 2,
+      "explanation": "Freshly inserted tuples have xmax = 0; updated ones in ON CONFLICT have xmax set. It relies on internals but is widely used."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Why is INSERT ... ON CONFLICT better than checking for existence and then inserting?",
+      "difficulty": "easy",
+      "answer_md": "The check-then-act pattern has a **race condition**:\n\n```python\ncur.execute(\"SELECT 1 FROM orders WHERE id=%s AND orgid=%s\", (oid, org))\nif cur.fetchone() is None:\n    cur.execute(\"INSERT INTO orders ...\")   # another worker may have inserted in between\n```\n\nTwo workers can both see \"not found\" and both insert. You either get duplicates (no unique constraint) or a unique-violation error that aborts the transaction. It also takes two round trips per row.\n\n`ON CONFLICT` does the check and the write **atomically** in one statement: PostgreSQL uses the unique index to detect conflicts, and if a concurrent transaction inserts the same key, it waits for that transaction and then takes the conflict path. Every row ends up either inserted, updated or skipped, with no errors, in one round trip, and it works in multi-row batches. This also makes ETL jobs **idempotent**: re-running the same file does not create duplicates."
+    },
+    {
+      "question": "Design a bulk upsert of 500k order rows from a CSV into PostgreSQL. What do you watch out for?",
+      "difficulty": "hard",
+      "answer_md": "1. **Validate and deduplicate** in pandas: normalise types, drop rows without keys, `drop_duplicates(subset=[\"id\", \"orgid\"], keep=\"last\")`. Otherwise `DO UPDATE` fails with \"cannot affect row a second time\".\n2. **Load efficiently**: either `execute_values` with `page_size` around 1000 (multi-row VALUES), or `COPY` into a temp/staging table followed by one set-based upsert:\n```sql\nINSERT INTO orders AS o SELECT * FROM stg_orders\nON CONFLICT (id, orgid) DO UPDATE SET status = COALESCE(EXCLUDED.status, o.status)\nWHERE o.status IS DISTINCT FROM COALESCE(EXCLUDED.status, o.status);\n```\nCOPY is the fastest path.\n3. **Transactions**: commit per chunk (e.g. 5–10k rows) so that a failure doesn't roll back everything and locks aren't held for minutes; track progress so chunks can be retried.\n4. **Concurrency**: sort rows by key so concurrent loaders lock in the same order; catch `DeadlockDetected` / `SerializationFailure` and retry the chunk with backoff.\n5. **Avoid needless writes** with `IS DISTINCT FROM` to cut WAL, bloat and trigger work.\n6. **Indexes**: every extra index slows writes; the conflict key index is required.\n7. **Observability**: log inserted vs updated counts (`RETURNING (xmax = 0)`), and record status in an upload-tracking table."
+    },
+    {
+      "question": "When would you use MERGE instead of ON CONFLICT in PostgreSQL 15+?",
+      "difficulty": "medium",
+      "answer_md": "`MERGE` is the SQL-standard statement for synchronising a target from a source with multiple branches:\n\n```sql\nMERGE INTO inventory t USING inventory_staging s\n  ON t.id = s.id AND t.orgid = s.orgid\nWHEN MATCHED AND s.qty = 0 THEN DELETE\nWHEN MATCHED THEN UPDATE SET qty = s.qty\nWHEN NOT MATCHED THEN INSERT (id, orgid, sku, qty) VALUES (s.id, s.orgid, s.sku, s.qty);\n```\n\nUse MERGE when you need **deletes**, several conditional branches, or matching on a condition that is **not a unique index**, typically when one process applies a staging table to a target. PG 17 adds `RETURNING` (with `merge_action()`) and `WHEN NOT MATCHED BY SOURCE` (rows in the target missing from the source, e.g. to delete them).\n\nPrefer `ON CONFLICT` for plain insert-or-update by key with **concurrent writers**: its speculative insertion guarantees no unique-violation errors, whereas MERGE can still throw one if another session inserts the same key between the match check and the insert. On Citus, check that your version supports MERGE for your table types before relying on it."
+    }
+  ]
+}

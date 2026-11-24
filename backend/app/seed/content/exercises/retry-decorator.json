@@ -1,0 +1,134 @@
+{
+  "slug": "retry-decorator",
+  "title": "Write a retry decorator for flaky API calls",
+  "category": "python",
+  "language": "python",
+  "difficulty": "hard",
+  "skill": "error-handling",
+  "concepts": [
+    "decorator factories",
+    "closures",
+    "functools.wraps",
+    "exception handling"
+  ],
+  "related_topics": [
+    "python-decorators",
+    "retries-backoff-idempotency",
+    "python-exceptions"
+  ],
+  "problem_md": "Marketplace APIs fail intermittently with connection resets and timeouts. Instead of sprinkling `try/except` loops everywhere, you want a reusable decorator.\n\nImplement a **decorator factory**:\n\n```python\ndef retry(max_attempts: int = 3, exceptions: tuple = (Exception,)):\n```\n\nUsage:\n\n```python\n@retry(max_attempts=3, exceptions=(ConnectionError, TimeoutError))\ndef fetch_page(): ...\n```\n\nBehaviour:\n- Call the wrapped function. If it returns, return its value immediately.\n- If it raises one of `exceptions`, call it again — **at most `max_attempts` calls in total**.\n- If every attempt fails, **re-raise the last exception** (don't swallow it, don't wrap it).\n- If it raises an exception that is **not** in `exceptions`, re-raise immediately without retrying.\n- The wrapper must preserve the wrapped function's `__name__` and docstring.\n- If `max_attempts < 1`, raise `ValueError` **when `retry(...)` is called** (i.e. at decoration time).\n- No sleeping/backoff is needed for this exercise.\n\nThe starter code includes a `simulate(...)` harness which the tests call — it decorates a function that fails `fail_times` times and reports `{\"result\"/\"error\", \"calls\", \"name\"}`. Don't change it.",
+  "examples": [
+    {
+      "input": "simulate(fail_times=2, max_attempts=3)",
+      "output": "{'result': 'ok', 'calls': 3, 'name': 'fetch_page'}",
+      "explanation": "Fails twice, succeeds on the 3rd call."
+    },
+    {
+      "input": "simulate(fail_times=3, max_attempts=3)",
+      "output": "{'error': 'ConnectionError', 'calls': 3, 'name': 'fetch_page'}",
+      "explanation": "All attempts used; last error re-raised."
+    },
+    {
+      "input": "simulate(fail_times=2, max_attempts=5, error='ValueError')",
+      "output": "{'error': 'ValueError', 'calls': 1, 'name': 'fetch_page'}",
+      "explanation": "ValueError isn't retryable."
+    }
+  ],
+  "hints": [
+    "There are three layers: `retry(...)` returns `decorator(func)`, which returns `wrapper(*args, **kwargs)`.",
+    "Inside `wrapper`, loop `for attempt in range(1, max_attempts + 1)`, `try: return func(*args, **kwargs)` and `except exceptions:` — on the last attempt, `raise` instead of continuing.",
+    "Put the `max_attempts < 1` check directly in `retry` (outside `decorator`) so it fires at decoration time, and decorate `wrapper` with `@functools.wraps(func)`."
+  ],
+  "starter_code": "import functools\n\n\ndef retry(max_attempts: int = 3, exceptions: tuple = (Exception,)):\n    \"\"\"Decorator factory: retry the wrapped function on the given exceptions.\"\"\"\n    def decorator(func):\n        # TODO: return a wrapper that calls func up to max_attempts times\n        return func\n    return decorator\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). The tests call simulate(...).\n# It decorates a flaky \"API call\" with your retry decorator and reports\n# what happened.\n# ---------------------------------------------------------------------------\ndef simulate(fail_times: int, max_attempts: int, error: str = \"ConnectionError\") -> dict:\n    exc_cls = {\"ConnectionError\": ConnectionError, \"TimeoutError\": TimeoutError, \"ValueError\": ValueError}[error]\n    calls = {\"n\": 0}\n\n    @retry(max_attempts=max_attempts, exceptions=(ConnectionError, TimeoutError))\n    def fetch_page():\n        \"\"\"Fetch one page from the marketplace API.\"\"\"\n        calls[\"n\"] += 1\n        if calls[\"n\"] <= fail_times:\n            raise exc_cls(f\"attempt {calls['n']} failed\")\n        return \"ok\"\n\n    try:\n        result = fetch_page()\n        return {\"result\": result, \"calls\": calls[\"n\"], \"name\": fetch_page.__name__}\n    except (ConnectionError, TimeoutError, ValueError) as e:\n        return {\"error\": type(e).__name__, \"calls\": calls[\"n\"], \"name\": fetch_page.__name__}\n",
+  "solution_code": "import functools\n\n\ndef retry(max_attempts: int = 3, exceptions: tuple = (Exception,)):\n    \"\"\"Decorator factory: retry the wrapped function on the given exceptions.\"\"\"\n    if max_attempts < 1:\n        raise ValueError(\"max_attempts must be >= 1\")\n\n    def decorator(func):\n        @functools.wraps(func)\n        def wrapper(*args, **kwargs):\n            for attempt in range(1, max_attempts + 1):\n                try:\n                    return func(*args, **kwargs)\n                except exceptions:\n                    if attempt == max_attempts:\n                        raise\n        return wrapper\n    return decorator\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). The tests call simulate(...).\n# It decorates a flaky \"API call\" with your retry decorator and reports\n# what happened.\n# ---------------------------------------------------------------------------\ndef simulate(fail_times: int, max_attempts: int, error: str = \"ConnectionError\") -> dict:\n    exc_cls = {\"ConnectionError\": ConnectionError, \"TimeoutError\": TimeoutError, \"ValueError\": ValueError}[error]\n    calls = {\"n\": 0}\n\n    @retry(max_attempts=max_attempts, exceptions=(ConnectionError, TimeoutError))\n    def fetch_page():\n        \"\"\"Fetch one page from the marketplace API.\"\"\"\n        calls[\"n\"] += 1\n        if calls[\"n\"] <= fail_times:\n            raise exc_cls(f\"attempt {calls['n']} failed\")\n        return \"ok\"\n\n    try:\n        result = fetch_page()\n        return {\"result\": result, \"calls\": calls[\"n\"], \"name\": fetch_page.__name__}\n    except (ConnectionError, TimeoutError, ValueError) as e:\n        return {\"error\": type(e).__name__, \"calls\": calls[\"n\"], \"name\": fetch_page.__name__}\n",
+  "solution_md": "Three nested functions:\n\n1. `retry(max_attempts, exceptions)` — runs once, at decoration time. Validating here means a misconfigured decorator fails at import, not on the first API call.\n2. `decorator(func)` — receives the function being decorated, returns the wrapper.\n3. `wrapper(*args, **kwargs)` — runs on every call; closes over `func`, `max_attempts` and `exceptions`.\n\n`except exceptions:` works because `except` accepts a tuple of classes. Anything else propagates on the first attempt automatically — no extra code needed. A bare `raise` inside the `except` block re-raises the *current* exception with its original traceback.\n\n`functools.wraps(func)` copies `__name__`, `__doc__`, `__qualname__`, `__module__` and sets `__wrapped__`. Without it every decorated function is called `wrapper` in logs and tracebacks.\n\n**Production version** would also:\n- sleep with exponential backoff + jitter between attempts (`base * 2 ** (attempt - 1) + random.uniform(0, base)`),\n- log each failed attempt,\n- only retry **idempotent** operations (GETs, or POSTs with an idempotency key),\n- maybe respect a `Retry-After` header on HTTP 429/503.\n\nLibraries such as `tenacity` or `backoff` implement all of this; writing it once yourself makes their APIs obvious.",
+  "tests": {
+    "function": "simulate",
+    "cases": [
+      {
+        "args": [
+          0,
+          3
+        ],
+        "kwargs": {},
+        "expected": {
+          "result": "ok",
+          "calls": 1,
+          "name": "fetch_page"
+        }
+      },
+      {
+        "args": [
+          2,
+          3
+        ],
+        "kwargs": {},
+        "expected": {
+          "result": "ok",
+          "calls": 3,
+          "name": "fetch_page"
+        }
+      },
+      {
+        "args": [
+          3,
+          3
+        ],
+        "kwargs": {},
+        "expected": {
+          "error": "ConnectionError",
+          "calls": 3,
+          "name": "fetch_page"
+        }
+      },
+      {
+        "args": [
+          1,
+          3
+        ],
+        "kwargs": {
+          "error": "TimeoutError"
+        },
+        "expected": {
+          "result": "ok",
+          "calls": 2,
+          "name": "fetch_page"
+        }
+      },
+      {
+        "args": [
+          2,
+          5
+        ],
+        "kwargs": {
+          "error": "ValueError"
+        },
+        "expected": {
+          "error": "ValueError",
+          "calls": 1,
+          "name": "fetch_page"
+        }
+      },
+      {
+        "args": [
+          5,
+          1
+        ],
+        "kwargs": {},
+        "expected": {
+          "error": "ConnectionError",
+          "calls": 1,
+          "name": "fetch_page"
+        }
+      },
+      {
+        "args": [
+          0,
+          0
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

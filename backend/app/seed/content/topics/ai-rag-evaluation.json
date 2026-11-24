@@ -1,0 +1,155 @@
+{
+  "slug": "ai-rag-evaluation",
+  "title": "Evaluating RAG and LLM features",
+  "skill": "ai-evaluation",
+  "extra_skills": [
+    "rag",
+    "python-testing"
+  ],
+  "difficulty": "advanced",
+  "tags": [
+    "evaluation",
+    "recall-at-k",
+    "mrr",
+    "faithfulness",
+    "llm-as-judge",
+    "golden-dataset",
+    "regression-testing"
+  ],
+  "summary": "Evaluate a RAG system in two layers: retrieval (did the right chunks come back? recall@k, MRR) and generation (is the answer faithful to the context and relevant to the question?). A versioned golden dataset, automatic metrics, carefully used LLM-as-judge scoring and regression tests in CI turn prompt and model changes from guesswork into measured decisions.",
+  "why_md": "- Without evals, every prompt, chunking or model change is a gamble judged on a few anecdotes.\n- Retrieval metrics are cheap, deterministic and pinpoint most failures.\n- LLM-as-judge is useful but biased; knowing its caveats is a senior-level signal.\n- Interviews: 'how do you know your RAG system is good?' and 'how do you prevent regressions?'",
+  "details_md": "### Golden dataset\nA set of realistic questions, each with the relevant chunk/document ids and a reference answer (or key facts). Sources: real user questions from logs (anonymised), down-voted answers, edge cases (unanswerable questions, IDs, multi-hop). Start with 50-100, version it in git or a table, and grow it from every production failure. Include 'should say not found' cases.\n\n### Retrieval metrics\n- **Recall@k**: fraction of relevant items that appear in the top k. With one relevant chunk per question, it's the hit rate.\n- **Precision@k**: fraction of the top k that are relevant.\n- **MRR** (mean reciprocal rank): average of 1/rank of the first relevant result (0 if missing). Rewards ranking the right chunk first.\n- **nDCG**: graded relevance with position discount.\nThese need only ids, so they're fast and deterministic - run them on every change to chunking, embeddings, k, hybrid weights or reranker.\n\n### Generation metrics\n- **Faithfulness / groundedness**: every claim in the answer is supported by the retrieved context.\n- **Answer relevance**: it addresses the question.\n- **Correctness**: matches the reference answer/key facts.\n- **Citation accuracy** and **abstention**: cites the right chunks; says 'not found' when it should.\nFor text-to-SQL, compare **execution results** (row sets) to the reference query's results rather than SQL strings.\n\n### LLM-as-judge\nA model grades outputs with a rubric (e.g. 'is each claim supported by the context? answer yes/no with reasons'). Scalable, but: biased toward longer and more confident answers, toward its own model family, and toward the first option in pairwise comparisons; scores drift when the judge model changes; numeric 1-10 scales are noisy. Mitigate: binary or small categorical rubrics, explicit criteria, give the judge the reference answer, swap order in pairwise tests, pin the judge model, and spot-check against human labels (measure agreement) before trusting it.\n\n### Regression testing\nTreat prompts, chunking params and models as versioned config. A CI job runs the golden set and fails if recall@5 or faithfulness drops beyond a threshold versus the baseline. Because outputs vary, use low temperature, aggregate over the set, and allow small tolerances. In production, track user votes, 'not found' rate and retrieval scores per version.\n",
+  "code_md": "```python\n# Retrieval metrics over a golden set (stdlib)\ndef recall_at_k(retrieved: list[int], relevant: set[int], k: int) -> float:\n    return len(set(retrieved[:k]) & relevant) / len(relevant)\n\ndef reciprocal_rank(retrieved: list[int], relevant: set[int]) -> float:\n    for rank, doc_id in enumerate(retrieved, start=1):\n        if doc_id in relevant:\n            return 1 / rank\n    return 0.0\n\ndef evaluate(golden: list[dict], search) -> dict:\n    r5 = rr = 0.0\n    for case in golden:                      # {\"question\": ..., \"relevant\": {12, 40}}\n        ids = search(case[\"question\"])       # your retrieval function -> ranked ids\n        r5 += recall_at_k(ids, case[\"relevant\"], 5)\n        rr += reciprocal_rank(ids, case[\"relevant\"])\n    n = len(golden)\n    return {\"recall@5\": round(r5 / n, 3), \"mrr\": round(rr / n, 3)}\n```\n\n```python\n# LLM-as-judge for faithfulness, with a binary rubric and a pytest regression gate\n# literal braces are doubled because the template is filled with str.format\nJUDGE_PROMPT = '''You check whether an ANSWER is fully supported by CONTEXT.\nReturn JSON: {{\"supported\": true|false, \"unsupported_claims\": [..]}}.\n<context>{context}</context>\n<answer>{answer}</answer>'''\n\nclass Verdict(BaseModel):\n    supported: bool\n    unsupported_claims: list[str]\n\ndef judge_faithfulness(context: str, answer: str) -> Verdict:\n    raw = complete([{\"role\": \"user\", \"content\": JUDGE_PROMPT.format(context=context, answer=answer)}],\n                   model=JUDGE_MODEL, temperature=0)          # pinned judge model\n    return Verdict.model_validate_json(raw)\n\ndef test_rag_regression(golden, rag_pipeline):\n    metrics = evaluate(golden, rag_pipeline.search)\n    assert metrics[\"recall@5\"] >= BASELINE[\"recall@5\"] - 0.02\n    assert metrics[\"mrr\"] >= BASELINE[\"mrr\"] - 0.02\n```",
+  "use_cases_md": "- Comparing chunk sizes, embedding models or hybrid vs vector-only on the same golden set.\n- Gating a prompt change for a policy bot in CI.\n- Text-to-SQL: execution accuracy over 100 question -> reference SQL pairs on a fixture database.\n- Monitoring production: down-vote rate and 'not found' rate per prompt version.",
+  "mistakes_md": "- **Eyeballing five queries** and declaring victory.\n- **Only evaluating final answers** - can't tell retrieval from generation failures.\n- **Comparing SQL strings** instead of result sets for text-to-SQL.\n- **Trusting LLM-judge scores without checking human agreement**.\n- **1-10 judge scales** - noisy; prefer binary criteria.\n- **Golden set never updated** - doesn't reflect real traffic; or contaminated by tuning on it repeatedly.",
+  "best_practices_md": "- Version a golden set with relevant ids, reference answers and unanswerable cases.\n- Measure retrieval (recall@k, MRR) separately from generation (faithfulness, relevance, correctness).\n- Judge with binary rubrics, pinned judge model, human spot-checks.\n- Run evals in CI with tolerances vs a baseline.\n- Add every production failure to the set.\n- Log per-version production signals (votes, abstentions).",
+  "my_context_md": "`GetLlmData` already captures user votes on messages and stores the model-generated SQL. That is the raw material for a golden dataset: down-voted questions become test cases, and for text-to-SQL you can evaluate by executing the stored SQL and a corrected reference on a fixture DB and comparing result sets. You have pytest experience (`ForcesightJobSchedulerAndRunner`, the SP-API fetcher), so the regression gate is an extension of tests you already write.",
+  "revision_notes_md": "- Evaluate retrieval and generation separately.\n- Recall@k = relevant found in top k / total relevant.\n- MRR = mean of 1/rank of first relevant (0 if none).\n- Faithfulness = claims supported by context; relevance = answers the question.\n- Text-to-SQL: compare execution results, not SQL text.\n- Golden set: real questions, relevant ids, references, unanswerable cases; versioned.\n- LLM-as-judge biases: length, self-preference, position; use binary rubrics + human checks.\n- CI regression gate with tolerance vs baseline.",
+  "exercises_md": "1. Build a 30-question golden set for a returns policy with relevant chunk ids; compute recall@5 and MRR for your current retriever.\n2. Write an LLM-as-judge for faithfulness using a local model; label 20 answers yourself and compute agreement.\n3. Create a text-to-SQL execution-accuracy harness against a small fixture Postgres DB.\n4. Add a pytest regression test that fails when recall@5 drops by more than 0.02 from a stored baseline.",
+  "related": [
+    "ai-retrieval-pipelines",
+    "ai-evaluation-observability",
+    "ai-model-evaluation",
+    "pytest-essentials",
+    "ai-hybrid-search"
+  ],
+  "flashcards": [
+    {
+      "front": "Recall@k?",
+      "back": "Fraction of the relevant items that appear in the top k results."
+    },
+    {
+      "front": "MRR?",
+      "back": "Mean over queries of 1/rank of the first relevant result (0 if none retrieved)."
+    },
+    {
+      "front": "Faithfulness?",
+      "back": "Whether every claim in the answer is supported by the retrieved context."
+    },
+    {
+      "front": "Three LLM-as-judge biases?",
+      "back": "Prefers longer/confident answers, its own model family, and the first-presented option (position bias)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Answers are wrong, and the logs show the correct chunk was never in the retrieved top 20. Which metric captures this?",
+      "options": [
+        "Faithfulness",
+        "Recall@20",
+        "Answer relevance",
+        "BLEU"
+      ],
+      "answer_index": 1,
+      "explanation": "It's a retrieval miss; recall@k measures it."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Best way to evaluate text-to-SQL correctness?",
+      "options": [
+        "Exact string match with reference SQL",
+        "Ask the model if it is confident",
+        "Execute both queries on a fixture DB and compare result sets",
+        "Count JOINs"
+      ],
+      "answer_index": 2,
+      "explanation": "Many SQL strings are equivalent; execution accuracy compares what matters."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "An answer whose claims are all supported by the retrieved context is called ____.",
+      "answers": [
+        "faithful",
+        "grounded"
+      ],
+      "explanation": "Faithfulness / groundedness."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "If the first relevant result is at rank 4, the reciprocal rank for that query is ____.",
+      "answers": [
+        "0.25",
+        "1/4",
+        ".25"
+      ],
+      "explanation": "1/4."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (recall@k and MRR over a tiny golden set)",
+      "code": "golden = [\n    {\"retrieved\": [7, 3, 9, 1], \"relevant\": {3}},\n    {\"retrieved\": [2, 5, 8, 6], \"relevant\": {6, 5}},\n    {\"retrieved\": [4, 1, 0, 2], \"relevant\": {11}},\n]\n\ndef recall_at_k(ret, rel, k):\n    return len(set(ret[:k]) & rel) / len(rel)\n\ndef rr(ret, rel):\n    for i, d in enumerate(ret, start=1):\n        if d in rel:\n            return 1 / i\n    return 0.0\n\nfor k in (1, 2, 4):\n    avg = sum(recall_at_k(g[\"retrieved\"], g[\"relevant\"], k) for g in golden) / len(golden)\n    print(f\"recall@{k} = {avg:.3f}\")\nprint(f\"MRR = {sum(rr(g['retrieved'], g['relevant']) for g in golden) / len(golden):.3f}\")",
+      "answers": [
+        "recall@1 = 0.000\nrecall@2 = 0.500\nrecall@4 = 0.667\nMRR = 0.333"
+      ],
+      "explanation": "k=1: 0, 0, 0 -> 0. k=2: q1 finds 3 (1.0), q2 finds 5 (0.5), q3 0 -> 1.5/3 = 0.5. k=4: 1.0 + 1.0 + 0 -> 0.667. RR: 1/2, 1/2 (5 at rank 2), 0 -> MRR 1/3 = 0.333."
+    },
+    {
+      "type": "debug",
+      "prompt": "This evaluation setup gave great scores, but users still complain. What's wrong and how do you fix it?",
+      "code": "# 10 questions written by the developer while building the prompt\nGOLDEN = [...]\n\ndef score(answer, question):\n    raw = complete([{\"role\": \"user\", \"content\":\n        f\"Rate this answer 1-10: Q: {question} A: {answer}\"}], temperature=0.9)\n    return int(raw.strip())\n\nprint(sum(score(rag(q), q) for q in GOLDEN) / len(GOLDEN))",
+      "answer": "- Tiny golden set written by the developer while tuning -> overfit, not representative of real traffic; no unanswerable cases.\n- Judge has no context or reference answer, so it can't check faithfulness or correctness; 1-10 scale is noisy and biased; temperature 0.9 makes scores random; `int(raw)` breaks on any extra text.\n- Only end-to-end score: retrieval and generation failures are indistinguishable.\n\nFix: build a larger set from real (anonymised) user questions incl. down-voted and unanswerable ones with relevant chunk ids; compute recall@k/MRR for retrieval; judge faithfulness with a binary rubric given the retrieved context (and reference), temperature 0, structured JSON output, pinned judge model; validate judge agreement against human labels.",
+      "rubric": [
+        "Golden set too small / not representative / overfit",
+        "Judge lacks context/reference; noisy 1-10 scale at high temperature",
+        "Separate retrieval metrics from generation metrics",
+        "Check judge agreement with humans"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the caveats of LLM-as-judge and how you make it trustworthy enough to use.",
+      "answer": "Judges are models with biases: they favour longer, more confident and well-formatted answers, answers from their own model family, and the first option in pairwise comparisons; numeric scales are inconsistent; and results change when the judge model is updated. To make it usable: use narrow binary criteria (supported yes/no, answers the question yes/no) with explicit definitions; give it the context and a reference answer; temperature 0, structured output, pinned model version; randomise/swap order for pairwise; and calibrate against a human-labelled sample, tracking agreement. Use it to compare versions on the same set rather than as an absolute truth.",
+      "rubric": [
+        "Biases: length/verbosity, self-preference, position",
+        "Binary rubrics with context/reference, temp 0, pinned model",
+        "Calibrate against human labels",
+        "Use for relative comparisons"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you set up regression testing for prompt changes in a RAG product?",
+      "answer": "Version prompts and pipeline config. Keep a golden set in the repo (questions, relevant ids, reference facts, unanswerable cases). A CI job runs the pipeline at low temperature, computes recall@k, MRR, faithfulness and correctness (judge + rules), compares with the stored baseline and fails if any drops beyond a tolerance; it publishes a diff of changed answers for review. After merge, roll out gradually and watch production votes per version. Add new failures to the golden set.",
+      "rubric": [
+        "Versioned golden set and config",
+        "CI comparison against baseline with tolerance",
+        "Retrieval and generation metrics",
+        "Production monitoring and growing the set"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you know whether your RAG system is good?",
+      "difficulty": "medium",
+      "answer_md": "Define 'good' per layer and measure it on a representative golden set:\n- **Retrieval**: recall@k (is the needed chunk in what we pass to the LLM?) and MRR (is it near the top?). Deterministic, cheap - run on every change.\n- **Generation**: faithfulness (claims supported by context), answer relevance, correctness against reference facts, citation accuracy, and correct abstention on unanswerable questions. Use rule checks where possible and an LLM judge with binary rubrics calibrated against human labels.\n- **Operational**: latency, cost per answer, 'not found' rate.\n- **Production feedback**: votes and escalations per prompt/model version.\n\nThe golden set comes from real anonymised questions (especially down-voted ones), and every production failure becomes a new test."
+    },
+    {
+      "question": "Explain recall@k and MRR with an example, and when you'd prefer one.",
+      "difficulty": "easy",
+      "answer_md": "Query: 'return window for opened electronics', relevant chunk id 42. Retriever returns [17, 42, 8, 99, 3].\n- **Recall@5** = relevant found in top 5 / relevant total = 1/1 = 1.0. Recall@1 = 0.\n- **Reciprocal rank** = 1/2 (first relevant at rank 2). MRR averages this across queries.\n\nRecall@k matters when the LLM sees all k chunks - you just need the answer somewhere in the context; choose k to match what you actually send. MRR matters when position matters: you send only the top 1-2 chunks, show results to users, or want to measure a reranker's effect on ordering. I usually report both, plus recall at the candidate depth fed to the reranker."
+    }
+  ],
+  "category": "AI"
+}

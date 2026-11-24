@@ -1,0 +1,158 @@
+{
+  "slug": "ai-retrieval-pipelines",
+  "title": "End-to-end RAG pipelines",
+  "skill": "rag",
+  "extra_skills": [
+    "etl-data-processing",
+    "llm-applications"
+  ],
+  "difficulty": "advanced",
+  "tags": [
+    "rag",
+    "ingestion",
+    "reranking",
+    "citations",
+    "query-rewriting",
+    "index-freshness"
+  ],
+  "summary": "A RAG system has an offline ingestion pipeline (load -> clean -> chunk -> embed -> upsert) and an online query pipeline (rewrite -> retrieve -> rerank -> build prompt -> generate with citations). Most quality problems come from ingestion and retrieval, not the LLM, and keeping the index fresh is an ETL problem.",
+  "why_md": "- RAG is the default way to make LLMs answer from private data (policies, catalogues, tickets).\n- It's an ETL pipeline plus a search service - squarely in a backend engineer's skill set.\n- Citations and 'not found' behaviour are what make answers trustworthy.\n- System-design interviews for AI roles almost always include 'design a RAG system'.",
+  "details_md": "### Offline: ingestion\n1. **Load** from sources (S3 PDFs, CMS pages, help-centre exports, DB rows) with source id, org_id, updated_at.\n2. **Clean and normalise** (strip boilerplate, fix encoding, extract tables).\n3. **Chunk** (structure-aware, with metadata).\n4. **Embed** in batches with a pinned model; handle rate limits and retries.\n5. **Upsert** into the vector store keyed by `(document_id, chunk_index)`; delete chunks that no longer exist.\n\n### Keeping the index fresh\nStore a **content hash** per document (and per chunk). On each run, skip unchanged documents, re-chunk and re-embed changed ones, delete chunks for removed documents - in one transaction per document so readers never see half an update. Trigger by schedule, change-data-capture, or upload events. Track ingestion status per document (pending/processing/done/failed) so failures are visible and retryable. Stale indexes produce confidently outdated answers (last year's return window).\n\n### Online: query\n1. **Query rewriting**: in a chat, 'what about electronics?' must become a standalone query using history ('return window for electronics'). An LLM rewrite step or multi-query expansion (several paraphrases, union of results) improves recall.\n2. **Retrieve** top-k (e.g. 20-50) with tenant and metadata filters; vector, keyword or hybrid.\n3. **Rerank** with a cross-encoder that scores (query, chunk) pairs jointly - more accurate than embedding similarity, too slow for the whole corpus, ideal for the top 50. Keep the top 3-8.\n4. **Assemble context**: dedupe overlapping chunks, order sensibly, respect a token budget, label each chunk with an id.\n5. **Generate**: system prompt says answer only from context, cite chunk ids, say when the answer isn't present.\n6. **Post-process**: verify cited ids exist in the provided context, map them to document titles/URLs/pages, log everything (query, retrieved ids, scores, answer) for evaluation.\n\n### Where it goes wrong\nAnswer not in the index (ingestion gap), retrieved but ranked low (retrieval/rerank), retrieved but ignored or contradicted (generation), or stale content (freshness). Logging retrieved ids per answer lets you tell these apart.\n",
+  "code_md": "```python\n# Incremental ingestion with content hashes (one transaction per document)\nimport hashlib\n\ndef ingest_document(conn, org_id: int, doc_id: int, title: str, text: str):\n    digest = hashlib.sha256(text.encode()).hexdigest()\n    with conn, conn.cursor() as cur:                        # commit/rollback per document\n        cur.execute(\"SELECT content_hash FROM documents WHERE id = %s FOR UPDATE\", (doc_id,))\n        row = cur.fetchone()\n        if row and row[0] == digest:\n            return \"unchanged\"\n        chunks = chunk_markdown(doc_id, text)\n        vectors = embed_documents([c[\"content\"] for c in chunks])\n        cur.execute(\"DELETE FROM doc_chunks WHERE document_id = %s\", (doc_id,))\n        execute_values(cur,\n            \"INSERT INTO doc_chunks (org_id, document_id, chunk_index, content, metadata, embedding) VALUES %s\",\n            [(org_id, doc_id, c[\"chunk_index\"], c[\"content\"], Json({\"section\": c[\"section\"], \"title\": title}),\n              to_pgvector(v)) for c, v in zip(chunks, vectors)])\n        cur.execute('''INSERT INTO documents (id, org_id, title, content_hash, indexed_at)\n                       VALUES (%s, %s, %s, %s, now())\n                       ON CONFLICT (id) DO UPDATE SET content_hash = EXCLUDED.content_hash,\n                                                     indexed_at = now()''',\n                    (doc_id, org_id, title, digest))\n        return \"reindexed\"\n```\n\n```python\n# Query path: rewrite -> retrieve -> rerank -> grounded answer with citations\nfrom sentence_transformers import CrossEncoder\nreranker = CrossEncoder(RERANK_MODEL)\n\ndef answer(cur, org_id: int, history: list[dict], question: str) -> dict:\n    standalone = rewrite_query(history, question)           # LLM: make it self-contained\n    candidates = semantic_search(cur, org_id, standalone, k=40)   # (id, content, sim)\n    scores = reranker.predict([(standalone, c[1]) for c in candidates])\n    top = [c for c, s in sorted(zip(candidates, scores), key=lambda x: -x[1])][:5]\n    if not top:\n        return {\"answer\": \"I couldn't find that in our documents.\", \"sources\": []}\n    context = \"\\n\\n\".join(f\"<chunk id=\\\"{c[0]}\\\">{c[1]}</chunk>\" for c in top)\n    system = (\"Answer ONLY from the chunks. Cite chunk ids like [12]. \"\n              \"If the chunks don't contain the answer, say so.\")\n    text = complete([{\"role\": \"system\", \"content\": system},\n                     {\"role\": \"user\", \"content\": f\"{context}\\n\\nQuestion: {standalone}\"}])\n    cited = {int(x) for x in re.findall(r\"\\[(\\d+)\\]\", text)}\n    valid = cited & {c[0] for c in top}                     # drop invented citations\n    return {\"answer\": text, \"sources\": sorted(valid)}\n```",
+  "use_cases_md": "- Seller support bot over return, shipping and fee policies per marketplace, with cited sections.\n- Internal assistant over runbooks and job-failure docs for an ops team.\n- Product Q&A grounded in manuals and catalogue descriptions.\n- Retrieving relevant table/column docs to feed a text-to-SQL prompt.",
+  "mistakes_md": "- **Full re-index on every run** - slow and costly; use content hashes.\n- **Never deleting removed documents' chunks** - bot quotes retired policies.\n- **Embedding chat follow-ups as-is** ('what about that one?').\n- **Sending top-50 raw chunks to the LLM** - cost and distraction; rerank and trim.\n- **Trusting citations** - models can cite ids that weren't provided.\n- **No logging of retrieved ids** - can't tell retrieval failures from generation failures.",
+  "best_practices_md": "- Idempotent, incremental ingestion keyed by stable ids + hashes; per-document transactions.\n- Track ingestion status and errors per document.\n- Rewrite conversational queries to standalone form.\n- Retrieve wide (20-50), rerank, keep few (3-8), within a token budget.\n- Instruct grounded answers with citations and a 'not found' path; validate citations.\n- Log query, retrieved ids/scores, answer, latency for evaluation.",
+  "my_context_md": "The ingestion half is the ETL you already do: `ECSMarketplaceDataUpload` processes many source formats with upload status tracking and deadlock retry, and `ForcesightJobSchedulerAndRunner` claims work with `FOR UPDATE SKIP LOCKED`. Those patterns (status table, idempotent upserts with `ON CONFLICT`, batched `execute_values`) carry straight over to document ingestion and re-embedding.",
+  "revision_notes_md": "- Offline: load -> clean -> chunk -> embed -> upsert (+ delete removed).\n- Freshness: content hash per doc, re-embed only changed, delete stale chunks, per-doc transaction.\n- Online: rewrite -> retrieve (k 20-50) -> rerank (cross-encoder) -> top 3-8 -> prompt -> generate.\n- Cross-encoder: scores (query, doc) jointly; accurate, slow -> only on candidates.\n- Prompt: answer only from context, cite ids, admit 'not found'.\n- Validate citations against provided ids.\n- Log retrieved ids/scores to debug retrieval vs generation.",
+  "exercises_md": "1. Build `documents` and `doc_chunks` tables and an incremental ingester with content hashes; run it twice and confirm the second run skips everything.\n2. Add a query-rewriting step using a local Ollama model and test it on 10 multi-turn conversations.\n3. Add a cross-encoder reranker and compare recall@5 before/after on your labelled set.\n4. Implement citation validation and a response format `{answer, sources: [{title, section, url}]}`.",
+  "related": [
+    "ai-chunking",
+    "ai-semantic-search",
+    "ai-hybrid-search",
+    "ai-rag-evaluation",
+    "ai-vector-databases",
+    "message-queues"
+  ],
+  "flashcards": [
+    {
+      "front": "Two halves of a RAG system?",
+      "back": "Offline ingestion (load, clean, chunk, embed, upsert) and online query (rewrite, retrieve, rerank, generate)."
+    },
+    {
+      "front": "Why rewrite queries in chat RAG?",
+      "back": "Follow-ups depend on history; a standalone query embeds and retrieves correctly."
+    },
+    {
+      "front": "What does a cross-encoder reranker do?",
+      "back": "Scores each (query, chunk) pair jointly for relevance - more accurate than bi-encoder similarity, used only on top candidates."
+    },
+    {
+      "front": "How to keep a RAG index fresh cheaply?",
+      "back": "Content hash per document; re-chunk/re-embed only changed docs; delete chunks of removed docs; per-doc transactions."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Why is a cross-encoder reranker applied only to the top ~50 candidates?",
+      "options": [
+        "It only accepts 50 inputs",
+        "It needs the documents' embeddings",
+        "It can't use GPUs",
+        "It must score each (query, document) pair with a full model pass, too slow for the whole corpus"
+      ],
+      "answer_index": 3,
+      "explanation": "Pairwise scoring scales with candidates; retrieval narrows first."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Users report the bot quoting a return window that changed last month. Most likely cause?",
+      "options": [
+        "Index freshness: the updated policy wasn't re-ingested or old chunks weren't deleted",
+        "Chunks too small",
+        "Temperature too high",
+        "Reranker too accurate"
+      ],
+      "answer_index": 0,
+      "explanation": "Stale index content produces confidently outdated answers."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Storing a ____ of each document's text lets the ingester skip unchanged documents.",
+      "answers": [
+        "hash",
+        "content hash",
+        "checksum",
+        "digest"
+      ],
+      "explanation": "Compare stored hash to the new hash."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Turning 'what about electronics?' into a self-contained search query using chat history is called query ____.",
+      "answers": [
+        "rewriting",
+        "rewrite",
+        "reformulation",
+        "condensation"
+      ],
+      "explanation": "Query rewriting / condensing."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (incremental re-index decisions)",
+      "code": "import hashlib\n\ndef h(text):\n    return hashlib.sha256(text.encode()).hexdigest()[:8]\n\nindexed = {\"returns\": h(\"30 days\"), \"shipping\": h(\"2-5 days\"), \"gift-cards\": h(\"no refunds\")}\nsource = {\"returns\": \"15 days\", \"shipping\": \"2-5 days\", \"warranty\": \"1 year\"}\n\nplan = {}\nfor doc, text in source.items():\n    if doc not in indexed:\n        plan[doc] = \"insert\"\n    elif indexed[doc] != h(text):\n        plan[doc] = \"reindex\"\n    else:\n        plan[doc] = \"skip\"\nfor doc in indexed.keys() - source.keys():\n    plan[doc] = \"delete\"\nfor doc in sorted(plan):\n    print(doc, plan[doc])",
+      "answers": [
+        "gift-cards delete\nreturns reindex\nshipping skip\nwarranty insert"
+      ],
+      "explanation": "returns changed text -> reindex; shipping identical -> skip; warranty is new -> insert; gift-cards no longer in the source -> delete. Sorted alphabetically."
+    },
+    {
+      "type": "debug",
+      "prompt": "This answer step sometimes cites sources that weren't retrieved and sends huge prompts. What's wrong and how do you fix it?",
+      "code": "def answer(question, org_id):\n    chunks = search(org_id, question, k=50)\n    context = \"\\n\".join(c.content for c in chunks)\n    text = complete([{\"role\": \"user\", \"content\": f\"{context}\\n{question}\\nCite your sources.\"}])\n    return {\"answer\": text}",
+      "answer": "- All 50 chunks go straight into the prompt: no reranking, dedupe or token budget.\n- Chunks have no ids in the prompt, so the model can't cite precisely and invents sources; citations aren't validated.\n- No instruction to answer only from context or admit 'not found'; no system message.\n\n```python\ncands = search(org_id, question, k=50)\ntop = rerank(question, cands)[:5]\ncontext = \"\\n\\n\".join(f'<chunk id=\"{c.id}\">{c.content}</chunk>' for c in top)\nsystem = \"Answer only from the chunks; cite ids like [12]; say if not found.\"\ntext = complete([{\"role\": \"system\", \"content\": system},\n                 {\"role\": \"user\", \"content\": f\"{context}\\n\\nQuestion: {question}\"}])\ncited = {int(x) for x in re.findall(r\"\\[(\\d+)\\]\", text)} & {c.id for c in top}\nreturn {\"answer\": text, \"sources\": sorted(cited)}\n```",
+      "rubric": [
+        "Rerank and keep few chunks within a token budget",
+        "Label chunks with ids and instruct citations by id",
+        "Validate cited ids against provided chunks",
+        "Ground: answer only from context, allow not found"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the full RAG flow for a seller-support bot, from a policy update to an answered question.",
+      "answer": "Offline: the updated policy lands (CMS export/S3). The ingestion job loads it, computes a content hash, sees it changed, cleans it, chunks by section with heading paths and metadata (org, doc id, version), embeds chunks with the pinned model, and in one transaction deletes old chunks and inserts new ones, updating the document hash and status. Online: the user's message is rewritten into a standalone query using chat history; we retrieve ~40 candidates filtered by org (vector or hybrid), rerank with a cross-encoder, keep the top 5 within a token budget, and prompt the LLM to answer only from these id-labelled chunks with citations. We validate citations, map them to titles/sections for the UI, and log query, retrieved ids, scores and answer for evaluation.",
+      "rubric": [
+        "Ingestion: hash, chunk, embed, transactional replace",
+        "Query rewrite + filtered retrieval",
+        "Rerank + token budget",
+        "Grounded generation with validated citations and logging"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "A RAG answer is wrong. How do you determine which stage failed?",
+      "answer": "Use the logged trace. 1) Is the correct information in the index at all (search chunks by keyword/document)? If not -> ingestion/freshness. 2) Was the right chunk among the retrieved candidates? If not -> retrieval (query rewrite, embedding, chunking, hybrid). 3) Was it retrieved but dropped by reranking or the token budget? -> rerank/k settings. 4) Was it in the prompt but the answer ignored or contradicted it? -> generation (prompt, model). Fix the stage, then add the case to the regression set.",
+      "rubric": [
+        "Check index contents (ingestion)",
+        "Check retrieved/reranked candidates (retrieval)",
+        "Check prompt contents vs answer (generation)",
+        "Add to regression set"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Design a RAG system for answering seller questions about marketplace policies across many organisations.",
+      "difficulty": "hard",
+      "answer_md": "**Ingestion**: sources (policy pages, PDFs in S3, help-centre exports) -> job table with per-document status; workers claim with `FOR UPDATE SKIP LOCKED`; clean, structure-aware chunking with heading paths; batch embedding with a pinned model; transactional replace of a document's chunks keyed by `(document_id, chunk_index)`; content hashes for incremental runs; deletes for removed docs. Metadata: org_id (or 'global'), marketplace, language, version, page/section.\n\n**Storage**: Postgres + pgvector (HNSW) + full-text `tsvector` column; RLS or enforced `org_id` filters.\n\n**Query**: rewrite follow-ups into standalone queries; hybrid retrieval (BM25-ish + vector, RRF); cross-encoder rerank to top 5; token-budgeted prompt with id-labelled chunks; instruct grounded answers with citations and 'not found'; validate citations; stream the answer.\n\n**Ops**: log traces (query, ids, scores, answer, tokens, cost per org); eval set with recall@k and faithfulness run in CI; freshness alerts when ingestion fails."
+    },
+    {
+      "question": "How do you keep a vector index in sync with changing source documents?",
+      "difficulty": "medium",
+      "answer_md": "Treat it as incremental ETL:\n- Stable document ids and a **content hash** (and source `updated_at`) per document.\n- Change detection by schedule, CDC or upload events; changed docs go into a job queue.\n- For each changed document, in **one transaction**: delete its old chunks, insert new chunks/embeddings, update hash and `indexed_at`. Readers see old or new, never a mix.\n- Deleted sources -> delete their chunks (soft-delete flag if you need audit).\n- Status per document (pending/processing/done/failed with error) and retries for transient embedding API failures.\n- Monitoring: lag between source update and `indexed_at`, failed count.\n- When the embedding model changes, a separate backfill re-embeds everything into a new column."
+    }
+  ],
+  "category": "AI"
+}

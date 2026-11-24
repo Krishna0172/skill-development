@@ -1,0 +1,191 @@
+{
+  "slug": "pg-partitioning-replication",
+  "title": "Partitioning, replication and pg_stat_statements",
+  "skill": "query-optimization",
+  "extra_skills": [
+    "database-design",
+    "postgresql"
+  ],
+  "category": "Database",
+  "difficulty": "advanced",
+  "tags": [
+    "partitioning",
+    "replication",
+    "logical-replication",
+    "streaming",
+    "pg_stat_statements"
+  ],
+  "summary": "Declarative partitioning splits one large table into smaller physical pieces so queries and maintenance touch less data. Replication copies changes to other servers for read scaling and failover: streaming (physical) replication copies the whole cluster, logical replication copies selected tables. pg_stat_statements shows which queries cost the most.",
+  "why_md": "- Event, order and log tables eventually become too large for comfortable maintenance; partitioning makes retention and vacuum manageable.\n- Backend engineers must understand read replicas and replication lag when their code reads after a write.\n- `pg_stat_statements` is the first tool for finding the real slow or heavy queries in production.\n- Design-interview topics: scaling PostgreSQL before sharding.",
+  "details_md": "### Declarative partitioning\nA partitioned table is a logical parent with no data; rows live in **partitions**, each a table in its own right.\n- `PARTITION BY RANGE (created_at)`: time ranges (most common), `LIST (marketplace)`: discrete values, `HASH (customer_id)`: spread evenly with `MODULUS/REMAINDER`.\n- Create partitions: `CREATE TABLE orders_2026_03 PARTITION OF orders FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');` (upper bound exclusive). A `DEFAULT` partition catches the rest.\n- **Partition pruning**: when WHERE filters on the partition key, the planner (and executor, for parameters) skips irrelevant partitions. Queries without the key scan all partitions.\n- **Constraints**: a primary key or unique constraint must include the partition key columns, so a global unique `id` alone is not possible; use `(id, created_at)`. Foreign keys referencing a partitioned table are supported from PG12; indexes created on the parent are created on each partition.\n- **Maintenance win**: drop or detach old partitions instantly (`DROP TABLE orders_2024_01` or `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY`) instead of a giant DELETE; vacuum and index builds work per partition.\n- **Costs**: more planning time with hundreds or thousands of partitions, you must create future partitions ahead of time (cron, pg_partman), cross-partition updates of the key move rows.\n- When to partition: tables of hundreds of GB or with natural time-based retention, not just 'because it is large'. A good index often beats partitioning for ordinary query speed.\n\n### Replication\n- **Streaming (physical) replication** ships WAL (write-ahead log) records to a standby that replays them byte for byte: the whole cluster, same major version, read-only standby (hot standby). Asynchronous by default (small lag, can lose last commits on failover); `synchronous_commit` with `synchronous_standby_names` waits for standbys at a latency cost. Used for high availability and read replicas.\n- **Logical replication** publishes row changes for selected tables (`CREATE PUBLICATION`, `CREATE SUBSCRIPTION`), decoded from WAL. Works across major versions and different schemas/databases, the subscriber is writable, and it suits migrations, selective sync and change feeds. Limits: DDL and sequences are not replicated automatically, tables need a replica identity (primary key), large transactions are heavy.\n- **Replication slots** retain WAL until the consumer catches up; a stuck slot can fill the disk. Monitor `pg_replication_slots`.\n- **Replica lag**: reads from a replica may not see a just-committed write ('read-your-writes' problem). Route such reads to the primary or wait for the LSN.\n\n### pg_stat_statements\nAn extension (add to `shared_preload_libraries`, then `CREATE EXTENSION pg_stat_statements`) that normalises queries (constants become `$1`) and records `calls`, `total_exec_time`, `mean_exec_time`, `rows`, shared block hits/reads. Sort by `total_exec_time` to find the heaviest workload, not just the slowest single call. Reset with `pg_stat_statements_reset()`.",
+  "code_md": "```sql\n-- Range partitioning by month (PostgreSQL 16/17)\nCREATE TABLE orders (\n    id         bigint GENERATED ALWAYS AS IDENTITY,\n    created_at timestamptz NOT NULL,\n    customer_id bigint NOT NULL,\n    total      numeric(12,2) NOT NULL,\n    PRIMARY KEY (id, created_at)            -- must include the partition key\n) PARTITION BY RANGE (created_at);\n\nCREATE TABLE orders_2026_03 PARTITION OF orders\n    FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');\nCREATE TABLE orders_default PARTITION OF orders DEFAULT;\n\nCREATE INDEX ON orders (customer_id);       -- created on every partition\n```\n```sql\n-- Pruning check: only orders_2026_03 should appear in the plan\nEXPLAIN SELECT count(*) FROM orders\nWHERE created_at >= '2026-03-10' AND created_at < '2026-03-20';\n\n-- Retention: instant compared with a giant DELETE\nALTER TABLE orders DETACH PARTITION orders_2025_01 CONCURRENTLY;\nDROP TABLE orders_2025_01;\n```\n```sql\n-- Logical replication of selected tables\n-- on the publisher (wal_level = logical)\nCREATE PUBLICATION pub_orders FOR TABLE orders, customers;\n-- on the subscriber\nCREATE SUBSCRIPTION sub_orders\n  CONNECTION 'host=primary dbname=shop user=repl' PUBLICATION pub_orders;\n\n-- Monitor replication on the primary\nSELECT application_name, state, sent_lsn, replay_lsn,\n       pg_wal_lsn_diff(sent_lsn, replay_lsn) AS lag_bytes\nFROM pg_stat_replication;\nSELECT slot_name, active, restart_lsn FROM pg_replication_slots;\n```\n```sql\n-- pg_stat_statements: the heaviest queries overall\nSELECT queryid, calls,\n       round(total_exec_time::numeric, 0) AS total_ms,\n       round(mean_exec_time::numeric, 2)  AS mean_ms,\n       rows, left(query, 80) AS query\nFROM pg_stat_statements\nORDER BY total_exec_time DESC\nLIMIT 10;\n```",
+  "use_cases_md": "- Monthly partitions on an events or marketplace-report table with automatic drop of data older than N months.\n- Read replica for BI/reporting queries so analytics do not slow the primary.\n- Logical replication to migrate to a new major version with minimal downtime or feed another system.\n- `pg_stat_statements` review to find the top 10 queries by total time before adding indexes.\n- Hash partitioning by customer or org to spread a very hot table.",
+  "mistakes_md": "- **Partitioning too early or with the wrong key**: queries do not filter on it, so pruning never happens and planning gets slower.\n- **Forgetting to create future partitions**: inserts fall into the default partition or fail.\n- **Expecting a global unique constraint** on a column that excludes the partition key.\n- **Reading from a replica right after a write** and assuming it is visible (lag).\n- **Ignoring unused replication slots**: WAL piles up and fills the disk.\n- **Assuming logical replication copies DDL/sequences**: schema changes and sequence values need handling.\n- **Looking only at slowest single queries** instead of total time in pg_stat_statements.",
+  "best_practices_md": "- Partition large tables by the column used in most WHERE clauses (usually time); verify pruning with EXPLAIN.\n- Automate partition creation and retention (pg_partman or a scheduled job).\n- Keep the number of partitions reasonable (tens to a few hundred).\n- Monitor replication lag and slot retention; alert on both.\n- Send read-your-writes-sensitive reads to the primary.\n- Enable pg_stat_statements everywhere and review top queries by total time regularly.",
+  "my_context_md": "The learner's ForceSight services handle large marketplace report uploads and per-org data (ECSMarketplaceDataUpload, upload status tracking). Look for the largest append-heavy tables there (reports, upload status, chat/message history in GetLlmData) as partitioning candidates, and check whether reporting queries run on the same primary that serves the application.",
+  "revision_notes_md": "- Partition types: RANGE (time), LIST, HASH; parent holds no data.\n- Pruning needs the partition key in WHERE; check with EXPLAIN.\n- PK/UNIQUE must include the partition key.\n- Detach/drop old partitions for instant retention; create future ones ahead of time.\n- Streaming replication = physical WAL copy, whole cluster, read-only standby, async by default.\n- Logical replication = publish/subscribe selected tables, cross-version, writable subscriber; DDL and sequences not replicated.\n- Replication slots retain WAL; watch `pg_replication_slots`.\n- Lag causes stale reads from replicas.\n- pg_stat_statements: normalised queries, calls, total/mean time; sort by `total_exec_time`.",
+  "exercises_md": "1. Create a range-partitioned table by month, insert rows across three months and use EXPLAIN to prove pruning for a date-bounded query and no pruning for a query without the key.\n2. Detach and drop the oldest partition and compare with deleting the same rows via DELETE (time and bloat).\n3. Enable pg_stat_statements in a local database, run a mixed workload and list the top 5 queries by total time.\n4. Set up publication/subscription between two local databases and observe how an INSERT replicates but a new column does not.",
+  "related": [
+    "postgres-indexes",
+    "explain-analyze",
+    "pg-mvcc-vacuum",
+    "be-connection-pooling",
+    "be-system-design-fundamentals"
+  ],
+  "flashcards": [
+    {
+      "front": "What is partition pruning?",
+      "back": "The planner skips partitions that cannot match the WHERE filter on the partition key."
+    },
+    {
+      "front": "PK on a partitioned table?",
+      "back": "Must include the partition key columns, e.g. (id, created_at)."
+    },
+    {
+      "front": "Streaming vs logical replication?",
+      "back": "Streaming copies WAL for the whole cluster to a read-only standby; logical publishes selected tables' row changes and can cross versions."
+    },
+    {
+      "front": "What does a replication slot do?",
+      "back": "Makes the primary retain WAL until the consumer has received it; stale slots can fill the disk."
+    },
+    {
+      "front": "How do you drop old data fast from a partitioned table?",
+      "back": "Detach/drop the old partition instead of a big DELETE."
+    },
+    {
+      "front": "What does pg_stat_statements track?",
+      "back": "Per normalised query: calls, total/mean execution time, rows, buffer hits/reads."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Partition pruning only works when...",
+      "options": [
+        "pg_stat_statements is on",
+        "The table has an index",
+        "The WHERE clause filters on the partition key",
+        "The table is hash partitioned"
+      ],
+      "answer_index": 2,
+      "explanation": "The planner needs a condition on the key."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A primary key on a range-partitioned table must...",
+      "options": [
+        "Include the partition key column(s)",
+        "Be on a default partition",
+        "Not exist",
+        "Be a uuid"
+      ],
+      "answer_index": 0,
+      "explanation": "Unique constraints must contain the partition key."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which replication type can replicate only selected tables to a different major version?",
+      "options": [
+        "File-based archiving",
+        "pg_dump",
+        "Streaming/physical",
+        "Logical"
+      ],
+      "answer_index": 3,
+      "explanation": "Logical replication publishes row changes for chosen tables."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Primary risk of an abandoned replication slot?",
+      "options": [
+        "Slower SELECTs",
+        "WAL accumulates and can fill the disk",
+        "Lost indexes",
+        "Duplicate rows"
+      ],
+      "answer_index": 1,
+      "explanation": "The primary retains WAL for the slot."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A table split by month is partitioned by ____ on created_at.",
+      "answers": [
+        "range",
+        "partition by range",
+        "range (created_at)"
+      ],
+      "explanation": "PARTITION BY RANGE."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Extension that records per-query call counts and execution times: ____.",
+      "answers": [
+        "pg_stat_statements"
+      ],
+      "explanation": "pg_stat_statements."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Streaming replication ships the write-ahead ____ to standbys.",
+      "answers": [
+        "log",
+        "wal"
+      ],
+      "explanation": "WAL = write-ahead log."
+    },
+    {
+      "type": "debug",
+      "prompt": "After partitioning `orders` by month, this statement fails. What is wrong and how do you fix it?",
+      "code": "CREATE TABLE orders (\n    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    created_at timestamptz NOT NULL,\n    total numeric(12,2)\n) PARTITION BY RANGE (created_at);\n-- ERROR: unique constraint on partitioned table must include all partitioning columns",
+      "answer": "A primary key (unique index) on a partitioned table must include the partition key because uniqueness is enforced per partition. Make it composite.\n```sql\nCREATE TABLE orders (\n    id bigint GENERATED ALWAYS AS IDENTITY,\n    created_at timestamptz NOT NULL,\n    total numeric(12,2),\n    PRIMARY KEY (id, created_at)\n) PARTITION BY RANGE (created_at);\n```",
+      "rubric": [
+        "Unique constraint must include partition key",
+        "Composite primary key",
+        "Reason: per-partition enforcement"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain streaming versus logical replication and when you would pick each.",
+      "answer": "Streaming replication sends the WAL stream so a standby becomes an exact physical copy of the whole cluster; it is read-only and ideal for high availability and read replicas. Logical replication decodes WAL into row changes for selected tables via publications and subscriptions; it works across versions and supports a writable target, so it suits migrations and selective data distribution, but DDL and sequences need separate handling.",
+      "rubric": [
+        "Physical whole-cluster vs selected tables",
+        "Read-only standby vs writable subscriber",
+        "HA/read replicas vs migrations/cross-version"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you use pg_stat_statements to decide what to optimise?",
+      "answer": "Order by `total_exec_time` to find queries consuming the most overall time (a fast query called millions of times can matter more than one slow query). Check calls, mean time, rows and buffer reads, then EXPLAIN (ANALYZE, BUFFERS) the top ones to choose indexes or rewrites. Reset statistics around a change to measure its effect.",
+      "rubric": [
+        "Sort by total time",
+        "Look at calls and mean time",
+        "EXPLAIN the top queries"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "When would you partition a table, and when not?",
+      "difficulty": "medium",
+      "answer_md": "Partition when a table is very large (hundreds of GB), queries naturally filter on a key (usually time) so pruning helps, and you want cheap retention via dropping partitions and per-partition maintenance. Do not partition just for speed on a table that a good index serves; it adds planning overhead, constraint limits and operational work."
+    },
+    {
+      "question": "What is replication lag and how does it affect application code?",
+      "difficulty": "medium",
+      "answer_md": "Asynchronous replicas apply WAL slightly behind the primary. A read on a replica right after a write on the primary may not see it. Solutions: read-your-writes paths go to the primary, wait until the replica has replayed the commit LSN, use sticky routing for a short period, or use synchronous replication where acceptable."
+    },
+    {
+      "question": "How does logical replication enable a near-zero-downtime major upgrade?",
+      "difficulty": "hard",
+      "answer_md": "Create a new cluster on the newer version, copy the schema, create a publication on the old primary and a subscription on the new one so data is copied and kept in sync, synchronise sequences, then switch application connections during a brief cutover and drop the subscription. DDL must be applied manually in both."
+    },
+    {
+      "question": "How do you find the queries that hurt a production database?",
+      "difficulty": "easy",
+      "answer_md": "Use `pg_stat_statements` ordered by total execution time (and by mean time and calls), combined with `pg_stat_activity` for current long-running queries, `log_min_duration_statement` for slow-query logs, and EXPLAIN (ANALYZE, BUFFERS) on candidates."
+    }
+  ]
+}

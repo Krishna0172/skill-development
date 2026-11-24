@@ -1,0 +1,153 @@
+{
+  "slug": "be-redis",
+  "title": "Redis for backend engineers",
+  "skill": "caching-redis",
+  "extra_skills": [
+    "system-design",
+    "message-queues"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "redis",
+    "cache-aside",
+    "ttl",
+    "rate-limiting",
+    "distributed-locks",
+    "streams",
+    "pubsub"
+  ],
+  "summary": "Redis is an in-memory data structure server: strings, hashes, lists, sets, sorted sets and streams with atomic commands and per-key TTLs. Backend services use it for cache-aside caching, rate limiting, short-lived state, simple locks and lightweight messaging. It is fast because it is in memory and single-threaded per command — but it is not a replacement for Postgres as a source of truth.",
+  "why_md": "- Caching expensive Postgres aggregates or third-party API responses is the cheapest latency win.\n- Rate limiting and deduplication need atomic counters shared across processes — Redis is the standard tool.\n- Celery/RQ, session stores and LLM response caches commonly run on Redis.\n- Interviewers probe cache invalidation, stampedes and Redlock caveats.",
+  "details_md": "### Data structures\n- **String**: `SET key val EX 300`, `INCR` (atomic counters), `SET key val NX` (set-if-absent).\n- **Hash**: field map per key (`HSET seller:7 name ...`) — compact object storage.\n- **List**: `LPUSH`/`BRPOP` simple queues.\n- **Set / Sorted set**: membership, dedupe; `ZADD` with scores for leaderboards and sliding windows.\n- **Stream**: append-only log with consumer groups (`XADD`, `XREADGROUP`, `XACK`).\nCommands execute atomically one at a time; `MULTI/EXEC` and Lua scripts make multi-step operations atomic.\n\n### TTL and eviction\n`EXPIRE`/`EX` sets per-key expiry. When memory is full, `maxmemory-policy` decides: `allkeys-lru` suits pure caches; `noeviction` (errors on write) suits queues/locks. Add jitter to TTLs so keys don't expire together.\n\n### Cache-aside\nRead: `GET` → hit returns; miss → query Postgres → `SET ... EX ttl`. Write: update Postgres, then **delete** the cache key (don't update it — racing writers can leave stale values). Prevent **stampedes** on hot keys with a short lock (`SET lock NX EX 10`) or request coalescing, and cache negative results briefly. Include tenant and version in keys: `v2:org:7:sales_summary:2024-05`.\n\n### Distributed locks\n`SET lock:job:42 <token> NX PX 30000`, release only if the token matches (Lua compare-and-delete). Caveats: if the holder pauses longer than the TTL (GC, slow I/O), another process acquires the lock — two holders. Redlock across nodes doesn't fix pauses. For correctness use **fencing tokens** or let Postgres enforce it (row locks, advisory locks, unique constraints). Redis locks are fine for *efficiency* (avoid duplicate work), not *safety*.\n\n### Rate limiting\nFixed window: `INCR rl:org:7:{minute}` + `EXPIRE` on first hit. Sliding window: sorted set of timestamps. Token bucket: Lua script.\n\n### Pub/Sub vs Streams\nPub/Sub is fire-and-forget: offline subscribers miss messages. Streams persist entries, support consumer groups, acknowledgements and replay — use them when messages matter.\n\n### When Postgres is enough\nModerate traffic, data needing transactions, job queues via `SKIP LOCKED`, materialized views for aggregates, `UNLOGGED` tables for scratch data. Add Redis when you have measured latency/load problems or need cross-process counters at high rates.",
+  "code_md": "```python\nimport json, random\nimport redis\n\nr = redis.Redis(host=\"localhost\", port=6379, decode_responses=True)\n\ndef get_sales_summary(conn, org_id: int, month: str) -> dict:\n    key = f\"v1:org:{org_id}:sales_summary:{month}\"\n    cached = r.get(key)\n    if cached is not None:\n        return json.loads(cached)                       # hit\n    with conn.cursor() as cur:                          # miss -> source of truth\n        cur.execute(\"SELECT sum(amount), count(*) FROM orders \"\n                    \"WHERE org_id = %s AND to_char(ordered_at, 'YYYY-MM') = %s\", (org_id, month))\n        total, n = cur.fetchone()\n    data = {\"total\": str(total or 0), \"orders\": n}\n    r.set(key, json.dumps(data), ex=600 + random.randint(0, 60))   # TTL with jitter\n    return data\n\ndef on_order_written(org_id: int, month: str):\n    r.delete(f\"v1:org:{org_id}:sales_summary:{month}\")  # invalidate after DB commit\n```\n\n```python\nimport time, uuid\n\ndef allow_request(org_id: int, limit: int = 100) -> bool:\n    window = int(time.time() // 60)\n    key = f\"rl:{org_id}:{window}\"\n    pipe = r.pipeline()                     # MULTI/EXEC: both commands atomic\n    pipe.incr(key)\n    pipe.expire(key, 120)\n    count, _ = pipe.execute()\n    return count <= limit\n\nRELEASE = \"if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end\"\n\ndef with_lock(name: str, ttl_ms: int, fn):\n    token = uuid.uuid4().hex\n    if not r.set(f\"lock:{name}\", token, nx=True, px=ttl_ms):\n        return None                         # someone else is doing it\n    try:\n        return fn()\n    finally:\n        r.eval(RELEASE, 1, f\"lock:{name}\", token)   # only delete our own lock\n```",
+  "use_cases_md": "- Cache per-seller dashboard aggregates for 10 minutes instead of re-running heavy CTEs on every page load.\n- Cache LWA access tokens (TTL just under expiry) shared across ECS tasks.\n- Per-org API rate limits and per-marketplace request pacing across many workers.\n- Dedupe webhook/notification deliveries with `SET id 1 NX EX 86400`.\n- Cache LLM responses for identical prompts (key = hash of model + prompt).\n- Streams for lightweight event fan-out between services.",
+  "mistakes_md": "- **Treating Redis as the source of truth** without persistence planning — restarts/evictions lose data.\n- **Keys without TTL** in a cache → memory grows until eviction or OOM.\n- **Updating the cache on write** instead of deleting → stale values under races.\n- **Unscoped keys** (`sales_summary:2024-05`) in multi-tenant systems → data leaks across orgs.\n- **`KEYS *` in production**: blocks the server; use `SCAN`.\n- **Relying on Redis locks for correctness** (e.g. preventing double payment) without fencing.\n- **Pub/Sub for important messages**: offline consumers lose them; use Streams or a queue.\n- **Big values** (MBs of JSON) — slow network and blocking; cache smaller pieces.",
+  "best_practices_md": "- Cache-aside with TTL + jitter; delete on write after commit.\n- Namespaced, versioned keys including tenant.\n- Pipelines/Lua for multi-step atomicity and fewer round trips.\n- Set `maxmemory` and an eviction policy matching the use.\n- Connection pooling via the client's pool; timeouts on every call; degrade gracefully if Redis is down (fall back to DB).\n- Measure hit rate; remove caches that don't help.\n- Prefer Postgres until there's a measured need.",
+  "my_context_md": "Redis isn't used anywhere in your repo. Two of your existing patterns are natural Redis candidates: `AmazonVendorBankRecon/db.py` caches the Secrets Manager secret with a TTL in process memory (per process — every ECS task fetches its own), and `ECSInventoryPriceTracking/app/fetchers/spapi.py` paces requests with an `asyncio.Lock` (only within one process). Across many tasks, a shared rate limiter or token cache needs something like Redis. Equally, your `SKIP LOCKED` job runner shows Postgres is often enough — don't add Redis just for queuing.",
+  "revision_notes_md": "- Types: string, hash, list, set, sorted set, stream.\n- `SET k v EX ttl NX` = set-if-absent with expiry (locks, dedupe).\n- Cache-aside: get → miss → DB → set with TTL; on write delete key.\n- TTL jitter + lock/coalescing against stampedes.\n- Eviction: `allkeys-lru` for caches, `noeviction` for queues/locks.\n- Locks: token + compare-and-delete; TTL expiry can cause double holders → fencing / DB constraints for safety.\n- Rate limit: INCR + EXPIRE per window, or sorted-set sliding window.\n- Pub/Sub = no persistence; Streams = persistence + consumer groups + ack.\n- Never `KEYS *`; use `SCAN`.",
+  "exercises_md": "1. Run Redis in Docker and add cache-aside to one heavy dashboard query; measure p50 latency with and without cache.\n2. Implement a fixed-window per-org rate limiter, then a sliding-window one with a sorted set; write tests using a fake clock.\n3. Simulate a stampede: 50 threads requesting an expired hot key; add a `SET NX` rebuild lock and compare DB queries executed.\n4. Write a Streams consumer group with two consumers and show that un-ACKed messages can be reclaimed with `XAUTOCLAIM`.",
+  "related": [
+    "caching-strategies",
+    "message-queues",
+    "be-system-design-fundamentals",
+    "be-postgres-locking-deadlocks",
+    "retries-backoff-idempotency"
+  ],
+  "flashcards": [
+    {
+      "front": "Cache-aside write path?",
+      "back": "Write to the database, then delete (invalidate) the cache key; next read repopulates it."
+    },
+    {
+      "front": "Why add jitter to TTLs?",
+      "back": "So many keys don't expire at the same moment and stampede the database."
+    },
+    {
+      "front": "Pub/Sub vs Streams?",
+      "back": "Pub/Sub: fire-and-forget, offline subscribers miss messages. Streams: persisted log, consumer groups, ack, replay."
+    },
+    {
+      "front": "Core weakness of a Redis TTL lock?",
+      "back": "If the holder pauses beyond the TTL, the lock expires and a second process acquires it — use fencing tokens or DB constraints for correctness."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "After updating an order in Postgres, what should a cache-aside implementation do with the cached summary?",
+      "options": [
+        "Recompute and SET the new value before committing",
+        "Nothing; the TTL will handle it",
+        "Delete the cache key after the transaction commits",
+        "Flush the whole Redis database"
+      ],
+      "answer_index": 2,
+      "explanation": "Delete-after-commit avoids caching uncommitted data and races between concurrent writers; the next read repopulates."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which Redis feature fits 'workers must not lose events if they're offline for a minute'?",
+      "options": [
+        "Pub/Sub",
+        "Streams with consumer groups",
+        "A string key with TTL",
+        "`KEYS` scanning"
+      ],
+      "answer_index": 1,
+      "explanation": "Streams persist entries and track per-group delivery/acks; Pub/Sub drops messages for disconnected subscribers."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To acquire a simple lock only if the key doesn't exist, use `SET lock:job token ____ PX 30000`.",
+      "answers": [
+        "NX",
+        "nx"
+      ],
+      "explanation": "NX = only set if not exists, making acquisition atomic."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Many requests hitting the database at once when a hot cache key expires is called a cache ____.",
+      "answers": [
+        "stampede",
+        "cache stampede",
+        "thundering herd"
+      ],
+      "explanation": "Also called thundering herd / dogpile; mitigate with locks, coalescing, early refresh, jitter."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib simulation of cache-aside with TTL uses a fake clock. What does it print?",
+      "code": "now = 0\ncache = {}\ndb_calls = 0\n\ndef db_query(key):\n    global db_calls\n    db_calls += 1\n    return f\"value-{db_calls}\"\n\ndef get(key, ttl=10):\n    hit = cache.get(key)\n    if hit and hit[1] > now:\n        return hit[0]\n    val = db_query(key)\n    cache[key] = (val, now + ttl)\n    return val\n\nfor t in [0, 5, 10, 12, 25]:\n    now = t\n    print(t, get(\"summary\"))\nprint(\"db calls:\", db_calls)\n",
+      "answers": [
+        "0 value-1\n5 value-1\n10 value-2\n12 value-2\n25 value-3\ndb calls: 3"
+      ],
+      "explanation": "Entries expire at set-time + 10. At t=10 the entry from t=0 has expired (10 is not > 10), so the DB is queried again; the new entry lives until 20, so t=25 misses once more."
+    },
+    {
+      "type": "debug",
+      "prompt": "This lock occasionally lets two workers process the same report, and sometimes a worker deletes another worker's lock. Explain and fix.",
+      "code": "def process_with_lock(report_id):\n    if r.get(f\"lock:{report_id}\"):\n        return\n    r.set(f\"lock:{report_id}\", 1, ex=30)\n    try:\n        process(report_id)        # sometimes takes > 30s\n    finally:\n        r.delete(f\"lock:{report_id}\")\n",
+      "answer": "1. **Check-then-set race**: two workers can both see no key, then both SET. Use atomic `SET ... NX`.\n2. **Unconditional delete**: if processing exceeds 30s the lock expires, another worker takes it, and the first worker's `finally` deletes the *second* worker's lock. Store a unique token and delete only if it still matches (Lua compare-and-delete).\n3. TTL shorter than the work: extend the lock periodically or size the TTL, and make processing idempotent / guarded by a DB constraint, since Redis locks can't guarantee mutual exclusion under pauses.\n\n```python\ntoken = uuid.uuid4().hex\nif not r.set(f\"lock:{report_id}\", token, nx=True, ex=300):\n    return\ntry:\n    process(report_id)\nfinally:\n    r.eval(RELEASE_IF_TOKEN_MATCHES, 1, f\"lock:{report_id}\", token)\n```",
+      "rubric": [
+        "GET then SET is not atomic; use SET NX",
+        "Delete must check ownership token",
+        "TTL shorter than work causes double holders; extend or use idempotency/DB guarantees"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Your team wants to add Redis 'to make things faster'. Explain how you'd decide whether it's needed and what you'd cache.",
+      "answer": "Start from measurements: which endpoints are slow, and why (slow query, upstream API, CPU)? First fix the root cause in Postgres — indexes, query rewrites, materialized views. Cache when data is **read much more than written**, **tolerates staleness** (TTL), and is **expensive to compute** — e.g. per-seller monthly aggregates, third-party API responses, access tokens. Define keys (tenant + version), TTL, and invalidation on write. Plan for Redis being down (fallback to DB) and stampedes. Also consider Redis for cross-process needs Postgres handles poorly at high rate: rate limiting, dedupe, ephemeral counters. If none of this applies, Postgres alone is simpler: one fewer system to run, secure and keep consistent.",
+      "rubric": [
+        "Measure first and fix root cause in DB",
+        "Cache read-heavy, staleness-tolerant, expensive data with TTL and invalidation",
+        "Tenant-scoped keys, fallback if Redis is down, stampede protection",
+        "Postgres is enough in many cases"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you implement a per-organization limit of 100 API calls per minute shared across 10 ECS tasks?",
+      "answer": "Use Redis as the shared counter. Fixed window: key `rl:{org_id}:{epoch_minute}`; in a pipeline `INCR` and `EXPIRE key 120`; reject with 429 + `Retry-After` when the count exceeds 100. For smoother limits use a sliding window (sorted set of request timestamps: `ZREMRANGEBYSCORE` old entries, `ZADD` now, `ZCARD`, all in a Lua script/transaction) or a token bucket in Lua. In-process limits don't work because each task only sees its own traffic.",
+      "rubric": [
+        "Shared store needed across tasks",
+        "INCR + EXPIRE per window key (atomic)",
+        "429 with Retry-After; sliding window/token bucket alternatives"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you prevent a cache stampede on a hot key?",
+      "difficulty": "medium",
+      "answer_md": "When a hot key expires, hundreds of requests miss simultaneously and all hit the database. Options:\n- **Rebuild lock**: on miss, `SET rebuild:key token NX EX 10`; the winner recomputes and sets the cache, others briefly wait/retry or serve a stale copy.\n- **Stale-while-revalidate**: store the value with a soft expiry inside the payload and a longer hard TTL; when soft-expired, one request refreshes in the background while others get the stale value.\n- **Probabilistic early expiration**: each reader recomputes slightly before expiry with increasing probability, spreading refreshes.\n- **TTL jitter** so many keys don't expire together.\n- **Request coalescing** in-process (one in-flight future per key).\nFor example, a per-seller dashboard summary viewed by an org's whole team at 9am would use a rebuild lock plus stale-while-revalidate so the CTE query runs once instead of 200 times."
+    },
+    {
+      "question": "Can you use Redis to guarantee that a nightly settlement job for a seller never runs twice concurrently?",
+      "difficulty": "hard",
+      "answer_md": "Not on Redis alone, if 'never' is a correctness requirement. A Redis lock (`SET NX PX`) has a TTL; if the holder stalls (GC pause, network partition, slow I/O) beyond the TTL, the lock expires and another worker acquires it while the first one still thinks it holds it. Redlock across multiple nodes doesn't fix process pauses or clock issues.\n\nFor correctness I'd make the database the arbiter: claim the job with a conditional update (`UPDATE jobs SET status='running', run_id=... WHERE id=... AND status='queued' RETURNING id`), or `SELECT ... FOR UPDATE SKIP LOCKED`, or a Postgres advisory lock held on the session doing the work. Writes include a **fencing token** (e.g. the job's monotonically increasing run number) checked by the database so a stale worker's writes are rejected. Make the job idempotent (upserts) so a duplicate run is harmless. Redis locks remain useful to *reduce* duplicate work cheaply."
+    }
+  ]
+}

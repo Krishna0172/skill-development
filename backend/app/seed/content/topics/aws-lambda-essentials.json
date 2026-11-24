@@ -1,0 +1,124 @@
+{
+  "slug": "aws-lambda-essentials",
+  "title": "AWS Lambda Essentials: Execution Model, Invocation Types and Limits",
+  "skill": "aws-lambda",
+  "extra_skills": [
+    "boto3",
+    "cloudwatch",
+    "aws-api-gateway"
+  ],
+  "category": "Cloud & DevOps",
+  "difficulty": "intermediate",
+  "tags": [
+    "aws",
+    "lambda",
+    "serverless",
+    "cold-start",
+    "async-invocation",
+    "layers"
+  ],
+  "summary": "AWS Lambda runs your function code in response to events without you managing servers; you pay per request and per millisecond of compute. Each execution environment handles one request at a time and is reused for later requests, so code outside the handler runs once per environment and should hold expensive setup like clients and connections. Functions can run for at most 15 minutes, and can be invoked synchronously, asynchronously (fire-and-forget with built-in retries), or by polling sources like SQS.",
+  "details_md": "### Execution environment lifecycle\n1. **Init**: Lambda creates a micro-VM (Firecracker), downloads your code or image, starts the runtime, and runs your **module-level code** (imports, clients, config). This is the **cold start**.\n2. **Invoke**: calls your `handler(event, context)`. One environment processes **one event at a time**.\n3. The environment is **frozen** between invocations and **reused** (warm start) for later events; module-level objects survive. Eventually it's shut down.\n\nSo: create boto3 clients and DB connections **outside** the handler, lazily, and handle stale connections. `/tmp` (512 MB by default, configurable up to 10 GB) also persists across warm invocations, so clean up large files.\n\n### Invocation types\n- **Synchronous** (`RequestResponse`): the caller waits for the result. API Gateway, `invoke()` by default. Errors go back to the caller; no automatic retries by Lambda. 6 MB request/response payload limit.\n- **Asynchronous** (`Event`): Lambda queues the event and immediately returns **202**. Lambda retries failed attempts (2 retries by default, configurable 0–2) and keeps events for up to 6 hours; configure **on-failure destinations** (SQS/SNS/EventBridge/Lambda) or a DLQ, or failures are lost. Used by S3 notifications, SNS, EventBridge, and `invoke(InvocationType=\"Event\")`. The async payload limit is smaller than the synchronous one, so pass references (S3 keys, IDs), not big data.\n- **Event source mapping** (polling): Lambda polls SQS, Kinesis, DynamoDB Streams or Kafka and invokes you with **batches**. For SQS, return `batchItemFailures` (with `ReportBatchItemFailures` enabled) so only failed messages are retried.\n\nBecause async and polled invocations can deliver an event **more than once**, handlers must be **idempotent**.\n\n### Limits worth memorising\n- Timeout up to **15 minutes**. For longer jobs use ECS Fargate, Step Functions, or split the work.\n- Memory 128 MB to 10,240 MB; **CPU scales with memory** (about 1 vCPU at 1,769 MB, up to 6 vCPUs).\n- Deployment: 50 MB zipped for direct upload, **250 MB unzipped** including up to **5 layers**; container images up to 10 GB.\n- Concurrency: an account-level regional limit (1,000 by default, can be raised). **Reserved concurrency** caps (and guarantees) a function's share; **provisioned concurrency** keeps environments pre-initialised to remove cold starts.\n\n### Packaging\n- **Zip + Layers**: layers hold shared dependencies (pandas, psycopg2) mounted at `/opt`; Python finds them under `/opt/python`. Native wheels must match Amazon Linux and the architecture (x86_64 vs arm64).\n- **Container images** (from AWS base images or with the Runtime Interface Client) for big dependency sets.\n- **arm64 (Graviton)** is about 20% cheaper per GB-second and often faster.\n\n### Observability and permissions\nEvery function has an **execution role** (IAM) defining what it can call. `print`/`logging` output goes to **CloudWatch Logs**; metrics include Invocations, Errors, Duration, Throttles, ConcurrentExecutions, and AsyncEventAge. Use structured JSON logs and include the `context.aws_request_id`.\n\n### Cold start mitigation\nKeep the deployment small, import lazily, prefer arm64, use provisioned concurrency or **SnapStart** (supported for Python since late 2024) for latency-sensitive APIs, and avoid creating clients per invocation.",
+  "code_md": "```python\n# 1) Handler structure: init once, handle many\nimport json, logging, os\nimport boto3\n\nlogger = logging.getLogger()\nlogger.setLevel(logging.INFO)\n\ns3 = boto3.client(\"s3\", region_name=os.environ.get(\"AWS_REGION\", \"ap-south-1\"))  # reused across warm starts\n\ndef handler(event, context):\n    logger.info(json.dumps({\"request_id\": context.aws_request_id, \"event_keys\": list(event)}))\n    remaining_ms = context.get_remaining_time_in_millis()   # stop early before the timeout\n    body = json.loads(event.get(\"body\") or \"{}\")            # API Gateway proxy event\n    return {\"statusCode\": 200,\n            \"headers\": {\"Content-Type\": \"application/json\"},\n            \"body\": json.dumps({\"ok\": True, \"org\": body.get(\"orgid\")})}\n```\n\n```python\n# 2) Invoking another Lambda: sync vs async\nimport json, boto3\n\nlam = boto3.client(\"lambda\", region_name=\"ap-south-1\")\npayload = json.dumps({\"orgid\": 7, \"upload_id\": \"u-123\"}).encode()\n\n# Async: returns 202 immediately; Lambda retries on failure (configure a destination!)\nresp = lam.invoke(FunctionName=\"profitability-calc\", InvocationType=\"Event\", Payload=payload)\nassert resp[\"StatusCode\"] == 202\n\n# Sync: waits for the result; function errors come back in FunctionError\nresp = lam.invoke(FunctionName=\"profitability-calc\", InvocationType=\"RequestResponse\", Payload=payload)\nif \"FunctionError\" in resp:\n    raise RuntimeError(resp[\"Payload\"].read())\nresult = json.loads(resp[\"Payload\"].read())\n```\n\n```python\n# 3) SQS-triggered handler with partial batch failure reporting\ndef handler(event, context):\n    failures = []\n    for record in event[\"Records\"]:\n        try:\n            process(json.loads(record[\"body\"]))          # must be idempotent\n        except Exception:\n            logger.exception(\"failed message %s\", record[\"messageId\"])\n            failures.append({\"itemIdentifier\": record[\"messageId\"]})\n    return {\"batchItemFailures\": failures}               # only these get redelivered\n```\n\n```bash\n# 4) Building a Python layer for Lambda (Linux-compatible wheels)\nmkdir -p layer/python\npip install pandas psycopg2-binary \\\n  --platform manylinux2014_x86_64 --only-binary=:all: \\\n  --python-version 3.12 --target layer/python\ncd layer && zip -r ../deps-layer.zip python\naws lambda publish-layer-version --layer-name etl-deps \\\n  --zip-file fileb://../deps-layer.zip --compatible-runtimes python3.12\n```",
+  "use_cases_md": "- API backends behind API Gateway (short request/response work).\n- Event processing: S3 uploads, SQS messages, DynamoDB Streams, EventBridge schedules.\n- Fan-out of background work via asynchronous invocation (e.g. a downstream calculation after a load).\n- Glue code and automation: scheduled clean-ups, notifications, triggering ECS tasks.\n- Lightweight ETL steps that fit in 15 minutes and the memory limit.",
+  "mistakes_md": "- **Creating clients/connections inside the handler**: slower invocations and connection storms. Initialise at module level and reuse.\n- **Async invocation without a failure destination or DLQ**: events that fail all retries are dropped silently. Configure on-failure destinations.\n- **Non-idempotent handlers**: retries and at-least-once delivery cause duplicate side effects. Use idempotency keys or upserts.\n- **Long jobs in Lambda**: hit the 15-minute timeout mid-way. Use ECS/Fargate or Step Functions, or checkpoint progress.\n- **Large payloads in events**: hit payload limits. Pass S3 keys instead.\n- **Unbounded concurrency against a database**: thousands of environments exhaust `max_connections`. Use reserved concurrency and RDS Proxy.\n- **Layers built on Windows/macOS**: native wheels (psycopg2, numpy) fail to import. Build for manylinux and the right architecture.\n- **Filling /tmp across warm invocations**: \"No space left on device\". Delete temp files or use streaming.",
+  "best_practices_md": "- Keep handlers thin: parse the event, call plain functions you can test locally.\n- Configure timeouts deliberately (and lower than any upstream timeout, like API Gateway's 29 s default).\n- Use structured logs with the request ID; alarm on Errors, Throttles and async DLQ depth.\n- Pin dependency versions; share them via layers or a container image.\n- Grant least-privilege IAM per function.\n- Tune memory with real measurements (more memory = more CPU = often cheaper overall).\n- Manage functions as infrastructure as code (Pulumi, CDK, SAM, Terraform).",
+  "my_context_md": "You already use Lambda in several ways. The downstream profitability Lambda is invoked asynchronously with `boto3.client('lambda').invoke()`, so the caller gets a 202 and Lambda's own retry policy applies. That means the profitability function should be idempotent, and an on-failure destination is how you'd make sure a failed run doesn't vanish. Your dependencies are shared through Lambda Layers, which is why native packages such as psycopg2/pandas must be built for Amazon Linux and the function's architecture. Work that can exceed the 15-minute limit is the reason a container on ECS Fargate (your `run_task` after Snapdeal settlements) is the right tool for some steps, and all of it is provisioned with Pulumi in ap-south-1.",
+  "related": [
+    "ecs-fargate",
+    "s3-presigned-urls",
+    "message-queues",
+    "dynamodb-essentials",
+    "docker-essentials",
+    "retries-backoff-idempotency"
+  ],
+  "flashcards": [
+    {
+      "front": "Maximum Lambda timeout?",
+      "back": "15 minutes (900 s)."
+    },
+    {
+      "front": "What runs during a cold start?",
+      "back": "Environment creation, runtime start, and your module-level (init) code, before the first handler call."
+    },
+    {
+      "front": "What does invoke(InvocationType='Event') return and what happens on failure?",
+      "back": "HTTP 202 immediately; Lambda retries up to 2 times (configurable), then sends to an on-failure destination/DLQ if configured, else drops it."
+    },
+    {
+      "front": "How does Lambda CPU scale?",
+      "back": "Proportionally to configured memory; about 1 vCPU at 1,769 MB, up to 6 vCPUs at 10,240 MB."
+    },
+    {
+      "front": "Unzipped size limit for function + layers?",
+      "back": "250 MB (up to 5 layers); container images up to 10 GB."
+    },
+    {
+      "front": "How do you retry only failed SQS messages in a batch?",
+      "back": "Enable ReportBatchItemFailures and return {\"batchItemFailures\": [{\"itemIdentifier\": messageId}, ...]}."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Where should you create a boto3 client in a Lambda function?",
+      "options": [
+        "Inside the handler on every call",
+        "In an environment variable",
+        "In a layer",
+        "At module level (outside the handler)"
+      ],
+      "answer_index": 3,
+      "explanation": "Module-level objects persist across warm invocations of the same environment."
+    },
+    {
+      "question": "A job needs 40 minutes of processing. Best AWS compute choice?",
+      "options": [
+        "ECS Fargate task",
+        "Lambda with provisioned concurrency",
+        "Lambda with 10 GB memory",
+        "API Gateway"
+      ],
+      "answer_index": 0,
+      "explanation": "Lambda's hard limit is 15 minutes; Fargate tasks can run for as long as needed."
+    },
+    {
+      "question": "Which invocation is retried automatically by Lambda on function error?",
+      "options": [
+        "RequestResponse from boto3",
+        "Event (asynchronous)",
+        "DryRun",
+        "API Gateway proxy invocation"
+      ],
+      "answer_index": 1,
+      "explanation": "Asynchronous invocations get up to 2 retries by default; synchronous callers handle their own retries."
+    },
+    {
+      "question": "What does reserved concurrency do?",
+      "options": [
+        "Pre-warms environments",
+        "Increases the timeout",
+        "Caps and guarantees concurrency for one function",
+        "Enables SnapStart"
+      ],
+      "answer_index": 2,
+      "explanation": "Provisioned concurrency pre-warms; reserved concurrency sets a maximum and reserves that capacity."
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is a Lambda cold start and how do you reduce its impact?",
+      "difficulty": "medium",
+      "answer_md": "A cold start happens when no idle execution environment is available: Lambda must create a micro-VM, fetch the code or image, start the runtime, and run module-level init code before calling the handler. It adds anywhere from roughly 100 ms to a few seconds, depending on package size, imports (pandas is heavy), VPC/ENI setup and runtime.\n\nReduce it:\n- **Smaller packages and lazy imports**: import heavy libraries only in code paths that need them.\n- **Do expensive init once** at module level (clients, config), so warm invocations skip it.\n- **Provisioned concurrency** keeps N environments initialised for latency-critical APIs (costs money even when idle).\n- **SnapStart** (Java, Python, .NET) snapshots the initialised environment and restores from it.\n- **arm64** and enough memory (more CPU means faster init).\n- For non-latency-sensitive work (async processing, batch), cold starts usually don't matter; don't over-engineer.\n\nMeasure with the `Init Duration` field in the REPORT log line and CloudWatch metrics before optimising."
+    },
+    {
+      "question": "Explain synchronous vs asynchronous Lambda invocation and their failure handling.",
+      "difficulty": "medium",
+      "answer_md": "**Synchronous (`RequestResponse`)**: the caller waits for the function to finish and receives the result or the error. Lambda does **not** retry; the caller decides (API Gateway returns a 5xx; boto3 shows `FunctionError` in the response). Used for APIs and when the caller needs the result.\n\n**Asynchronous (`Event`)**: Lambda places the event on an internal queue and returns **202** immediately. A poller invokes the function; on error or throttle Lambda **retries** (2 retries by default, configurable 0–2, with a maximum event age up to 6 hours). After that the event goes to an **on-failure destination** or DLQ if configured, otherwise it's discarded. On-success destinations can also chain workflows.\n\n```python\nboto3.client(\"lambda\").invoke(FunctionName=\"downstream\", InvocationType=\"Event\",\n                               Payload=json.dumps({\"upload_id\": uid}))\n```\n\nConsequences:\n- Async handlers must be **idempotent**, because retries can re-run partially completed work and delivery is at-least-once.\n- Monitor `AsyncEventAge` and `AsyncEventsDropped`, and alarm on the DLQ.\n- If you need ordering, back-pressure or visibility, put SQS in between explicitly."
+    },
+    {
+      "question": "How would you protect a PostgreSQL database from being overwhelmed by Lambda?",
+      "difficulty": "hard",
+      "answer_md": "Problem: Lambda scales out by adding environments; each one opens its own DB connection. A burst of 500 concurrent invocations means 500 connections, exceeding `max_connections` and degrading the database with process overhead.\n\nDefences:\n1. **Reserved concurrency** on the function to cap parallelism to what the DB can handle.\n2. **RDS Proxy** (or PgBouncer) to multiplex many client connections onto a small pool of DB connections and absorb bursts. Note that with transaction pooling, session state (temp tables, `SET`, prepared statements) can't be relied on across transactions.\n3. **Queue in front** (SQS + event source mapping with a maximum concurrency setting) so bursts are buffered rather than hitting the DB at once.\n4. **Reuse connections** per environment (module-level, reconnect on failure) and keep transactions short.\n5. **Batch writes** (`execute_values`, COPY) so each invocation does fewer, larger operations.\n6. **Timeouts**: `connect_timeout`, `statement_timeout`, and a Lambda timeout that leaves room for cleanup.\n7. Monitor `DatabaseConnections`, CPU and locks; alarm on Lambda Throttles to see when the cap is hit.\n\nHeavy, long-running database work (big reconciliations) often fits better in an ECS task with a controlled pool than in many parallel Lambdas."
+    }
+  ]
+}

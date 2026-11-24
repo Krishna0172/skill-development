@@ -1,0 +1,69 @@
+{
+  "slug": "database-normalization",
+  "why_md": "- Schema design decides data quality: duplicated facts drift apart, and missing constraints let bad marketplace data in.\n- Natural/unique keys are what make idempotent loads and upserts possible.\n- Knowing when to denormalize (reporting tables, JSONB, materialized views) is a senior-level judgement call.\n- Interviewers ask 1NF/2NF/3NF with examples and multi-tenant key design.",
+  "revision_notes_md": "- 1NF: atomic values, no repeating groups (no comma-separated SKUs in one column).\n- 2NF: no non-key column depends on only part of a composite key.\n- 3NF: no non-key column depends on another non-key column (transitive dependency).\n- Anomalies of denormalized data: update, insert and delete anomalies.\n- Surrogate key (bigint identity) for joins + UNIQUE on the natural key (e.g. orgid, marketplace_order_id) for idempotency.\n- Use constraints: NOT NULL, UNIQUE, FOREIGN KEY, CHECK — the database is the last line of defence.\n- Denormalize deliberately for reads (summary tables, materialized views), with a clear refresh path.\n- JSONB fits sparse/variable attributes; query-critical fields belong in real columns.",
+  "exercises_md": "1. Take one wide table built from a marketplace report and decompose it to 3NF on paper (list functional dependencies first). Decide which columns you'd keep denormalized for reporting and why.\n2. Audit three of your largest tables for missing NOT NULL / UNIQUE / FK constraints and write the migration SQL (including how you'd clean existing violations).",
+  "my_context_md": "Your `python-postgres` tables rely on composite natural keys for `INSERT ... ON CONFLICT` upserts, which only works because unique constraints exist on those keys. JSONB is used heavily there — worth reviewing which JSONB fields are filtered or joined on often enough to deserve real, constrained columns.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "A table where `customer_city` depends on `customer_id`, which is not the key of the orders table, violates ____ normal form.",
+      "answers": [
+        "third",
+        "3nf",
+        "3rd",
+        "third normal form"
+      ],
+      "explanation": "That's a transitive dependency (order_id → customer_id → city), which 3NF forbids."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To make re-running an import idempotent, declare a ____ constraint on the natural key, e.g. (orgid, marketplace_order_id).",
+      "answers": [
+        "unique"
+      ],
+      "explanation": "A UNIQUE constraint enables ON CONFLICT and stops duplicate rows."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''\nCREATE TABLE orders(id INT, customer TEXT, city TEXT);\nINSERT INTO orders VALUES (1,'ravi','Pune'),(2,'ravi','Pune'),(3,'ravi','Pune');\nUPDATE orders SET city = 'Mumbai' WHERE id = 3;\n''')\nprint(db.execute('''SELECT customer, COUNT(DISTINCT city)\nFROM orders GROUP BY customer''').fetchall())",
+      "answers": [
+        "[('ravi', 2)]"
+      ],
+      "explanation": "Duplicating the customer's city on every order allowed a partial update; now one customer has two cities — an update anomaly."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.execute('''CREATE TABLE orders(id INTEGER PRIMARY KEY, orgid INT,\n  mp_order_id TEXT, UNIQUE(orgid, mp_order_id))''')\nbatch = [(7, \"A-1\"), (7, \"A-2\"), (8, \"A-1\")]\nfor run in range(2):\n    db.executemany('''INSERT INTO orders(orgid, mp_order_id) VALUES (?, ?)\n      ON CONFLICT(orgid, mp_order_id) DO NOTHING''', batch)\nprint(db.execute(\"SELECT COUNT(*) FROM orders\").fetchone()[0])",
+      "answers": [
+        "3"
+      ],
+      "explanation": "The second run conflicts on the (orgid, mp_order_id) unique key and inserts nothing; A-1 exists for two different orgs, which is allowed."
+    },
+    {
+      "type": "debug",
+      "prompt": "This schema causes bugs in reports and makes 'orders containing SKU X' slow and error-prone. What's wrong and how do you fix it?",
+      "code": "CREATE TABLE orders (\n  id          bigint PRIMARY KEY,\n  orgid       int,\n  skus        text,      -- e.g. 'SKU1,SKU7,SKU9'\n  quantities  text,      -- e.g. '1,2,1'\n  org_name    text\n);",
+      "answer": "- `skus`/`quantities` as comma-separated strings violate 1NF: you can't index, join or constrain individual items, and the two lists can get out of sync.\n- `org_name` depends on `orgid`, not on the order → transitive dependency (3NF), causing update anomalies.\n- `orgid` is nullable and has no FK.\n\n```sql\nCREATE TABLE orders (\n  id bigint PRIMARY KEY,\n  orgid int NOT NULL REFERENCES orgs(id)\n);\nCREATE TABLE order_items (\n  order_id bigint NOT NULL REFERENCES orders(id),\n  sku text NOT NULL,\n  qty int NOT NULL CHECK (qty > 0),\n  PRIMARY KEY (order_id, sku)\n);\n-- org_name lives only in orgs\n```",
+      "rubric": [
+        "Comma-separated lists violate 1NF",
+        "org_name is a transitive dependency (3NF) → move to orgs",
+        "Child table order_items with proper keys/constraints",
+        "Add NOT NULL / FK"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "When would you deliberately denormalize a PostgreSQL schema, and how do you keep it correct?",
+      "answer": "Normalize the source of truth first; denormalize only for a measured read problem:\n- Dashboards aggregating millions of rows on every request → a summary table or materialized view.\n- A hot join on every request for one or two columns → copy the column (e.g. `orgid` onto child rows for tenant filtering/partitioning).\n- Sparse, variable attributes from different marketplaces → JSONB.\n\nKeeping it correct:\n- One writer owns the copy: refresh via `REFRESH MATERIALIZED VIEW CONCURRENTLY` (needs a unique index), a scheduled job, or a trigger.\n- Document staleness tolerance (e.g. 'updated every 15 minutes').\n- Reconcile periodically: a query comparing the denormalized totals with the source.\n\nTrade-off: faster reads vs extra writes, storage and the risk of drift.",
+      "rubric": [
+        "Denormalize only for measured read needs",
+        "Examples: summary tables / materialized views / JSONB / copied keys",
+        "Single refresh path (MV refresh, job, trigger) and staleness agreement",
+        "Reconcile against the source of truth"
+      ]
+    }
+  ]
+}

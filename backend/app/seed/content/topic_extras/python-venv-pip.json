@@ -1,0 +1,55 @@
+{
+  "slug": "python-venv-pip",
+  "why_md": "Reproducible environments are what make 'works on my machine' go away: the same pinned dependencies in dev, CI, Docker images and Lambda. Packaging problems (compiled wheels like psycopg2/pandas, platform mismatches) are among the most common production breakages, and interviewers ask how you manage and lock dependencies.",
+  "revision_notes_md": "- `python -m venv .venv`; activate (`.venv\\Scripts\\activate` on Windows) or call `.venv/Scripts/python` directly.\n- Always `python -m pip ...` so pip matches the interpreter.\n- Never commit `.venv/`; commit `pyproject.toml` + a lock (`requirements.txt` pinned / `uv.lock`).\n- Separate direct deps (ranges) from the lock (exact versions + hashes).\n- `pip freeze` dumps everything installed - fine as a lock, poor as a spec.\n- Compiled wheels are platform-specific: build Lambda packages for Linux (Docker or `--platform manylinux2014_x86_64 --only-binary=:all:`).\n- `psycopg2-binary` for dev; source `psycopg2` recommended for production builds.\n- `uv` is a fast drop-in for venv + pip + locking.",
+  "exercises_md": "1. Create a fresh venv for one of your services, install only what its imports need, and produce a pinned requirements file; compare it with what's installed globally.\n2. Build a Lambda-compatible zip containing pandas from Windows using `pip install --platform manylinux2014_x86_64 --only-binary=:all: --target build/`, and list which packages contain `.so` files.",
+  "my_context_md": "Your services deploy to AWS Lambda and ECS with compiled dependencies (psycopg2, pandas) and boto3, so building packages for the Linux target rather than from the Windows dev machine is directly relevant. With 179 services in one repo, per-service pinned requirements are what keep one service's upgrade from breaking another.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To guarantee pip installs into the same interpreter you run, invoke it as `python -m ____ install requests`.",
+      "answers": [
+        "pip"
+      ],
+      "explanation": "python -m pip binds pip to that interpreter."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To create a virtual environment in a folder named .venv you run `python -m ____ .venv`.",
+      "answers": [
+        "venv"
+      ],
+      "explanation": "venv is the stdlib module."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sys\nin_venv = sys.prefix != sys.base_prefix\nprint(type(in_venv).__name__)\nprint(sys.version_info >= (3, 8))",
+      "answers": [
+        "bool\nTrue"
+      ],
+      "explanation": "sys.prefix vs sys.base_prefix is how you detect a venv; the comparison yields a bool. This environment runs Python >= 3.8."
+    },
+    {
+      "type": "debug",
+      "prompt": "The Lambda deployment fails with `No module named 'pandas._libs.interval'`. The build script is below. What's wrong?",
+      "code": "# run on a Windows laptop\npip install -r requirements.txt -t build/\ncd build && zip -r ../lambda.zip .",
+      "answer": "pip on Windows downloaded **Windows** wheels (`.pyd` binaries); Lambda runs Amazon Linux and can't load them. Build for the target platform:\n\n```bash\npip install -r requirements.txt -t build/ \\\n  --platform manylinux2014_x86_64 --implementation cp \\\n  --python-version 3.12 --only-binary=:all:\n```\nor build inside a Lambda-compatible Docker image (or use a container image Lambda / layer).",
+      "rubric": [
+        "Compiled extension wheels are OS/architecture specific",
+        "Install with --platform manylinux... --only-binary=:all: or build in Docker",
+        "Match the Lambda Python version"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between dependency specification and a lock file.",
+      "answer": "The spec (`pyproject.toml` dependencies) lists your direct dependencies with acceptable ranges - what your code needs. The lock (`requirements.txt` from pip-compile/`pip freeze`, `uv.lock`) records the exact resolved version of every package including transitive ones, ideally with hashes. You edit the spec, regenerate the lock, and install from the lock everywhere (CI, Docker, Lambda) so builds are reproducible and a transitive release can't silently break production.",
+      "rubric": [
+        "Spec = direct deps with ranges",
+        "Lock = exact versions of all (transitive) deps",
+        "Install from the lock in CI/prod for reproducibility"
+      ]
+    }
+  ]
+}

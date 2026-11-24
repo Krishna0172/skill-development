@@ -1,0 +1,148 @@
+{
+  "slug": "paginated-api-iterator",
+  "title": "Iterator protocol for a paginated API",
+  "category": "advanced-python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "api-integration",
+  "concepts": [
+    "iterator protocol",
+    "__iter__/__next__",
+    "StopIteration",
+    "lazy pagination",
+    "cursors"
+  ],
+  "related_topics": [
+    "python-generators-iterators",
+    "rest-api-design",
+    "python-oop-dataclasses"
+  ],
+  "problem_md": "Marketplace APIs return orders a page at a time with a `nextToken`. Callers shouldn't care - they want `for order in PageIterator(fetch_page): ...`. Implement the iterator protocol **by hand** (a class with `__iter__` and `__next__`, no generator function):\n\n```python\nclass PageIterator:\n    def __init__(self, fetch_page): ...   # fetch_page(cursor) -> {\"items\": [...], \"next\": cursor_or_None}\n```\n\n- The first call is `fetch_page(None)`; then follow `next` until it is `None`.\n- Fetch **lazily**: request a page only when the current one is used up and the caller asks for more.\n- Pages can be **empty** but still have a `next` cursor - skip them.\n- `__iter__` returns `self`; once exhausted, keep raising `StopIteration` (never fetch again).\n\nTests call the starter's `simulate(pages, take)` harness; `fetched` lists which pages were requested.",
+  "examples": [
+    {
+      "input": "simulate([[1,2],[3],[4,5]], take=3)",
+      "output": "{'items': [1,2,3], 'fetched': [0,1], 'iter_is_self': True, 'exhausted_again': None}",
+      "explanation": "Page 2 is never requested."
+    }
+  ],
+  "hints": [
+    "Keep a buffer (`collections.deque`) of the current page's items, the next cursor, and a `done` flag.",
+    "In `__next__`, `while not buffer:` - if done raise `StopIteration`, otherwise fetch the next page, extend the buffer and set `done = resp['next'] is None`. Then `return buffer.popleft()`."
+  ],
+  "starter_code": "class PageIterator:\n    def __init__(self, fetch_page):\n        # Eagerly loads every page up front - fix this.\n        self.items = []\n        cursor = None\n        while True:\n            resp = fetch_page(cursor)\n            self.items.extend(resp['items'])\n            cursor = resp['next']\n            if cursor is None:\n                break\n\n    def __iter__(self):\n        return iter(self.items)\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). `pages` simulates the API: page i holds pages[i]\n# and points to i+1 (None after the last page).\n# ---------------------------------------------------------------------------\ndef simulate(pages, take=None):\n    from itertools import islice\n    fetched = []\n\n    def fetch_page(cursor):\n        idx = 0 if cursor is None else cursor\n        fetched.append(idx)\n        nxt = idx + 1 if idx + 1 < len(pages) else None\n        return {\"items\": list(pages[idx]), \"next\": nxt}\n\n    it = PageIterator(fetch_page)\n    items = list(islice(it, take)) if take is not None else list(it)\n    return {\"items\": items, \"fetched\": fetched, \"iter_is_self\": iter(it) is it,\n            \"exhausted_again\": list(it) == [] if take is None else None}\n",
+  "solution_code": "from collections import deque\n\n\nclass PageIterator:\n    def __init__(self, fetch_page):\n        self._fetch = fetch_page\n        self._buffer = deque()\n        self._cursor = None\n        self._done = False\n\n    def __iter__(self):\n        return self\n\n    def __next__(self):\n        while not self._buffer:\n            if self._done:\n                raise StopIteration\n            resp = self._fetch(self._cursor)\n            self._buffer.extend(resp['items'])\n            self._cursor = resp['next']\n            self._done = self._cursor is None\n        return self._buffer.popleft()\n\n\n# ---------------------------------------------------------------------------\n# Test harness (do not change). `pages` simulates the API: page i holds pages[i]\n# and points to i+1 (None after the last page).\n# ---------------------------------------------------------------------------\ndef simulate(pages, take=None):\n    from itertools import islice\n    fetched = []\n\n    def fetch_page(cursor):\n        idx = 0 if cursor is None else cursor\n        fetched.append(idx)\n        nxt = idx + 1 if idx + 1 < len(pages) else None\n        return {\"items\": list(pages[idx]), \"next\": nxt}\n\n    it = PageIterator(fetch_page)\n    items = list(islice(it, take)) if take is not None else list(it)\n    return {\"items\": items, \"fetched\": fetched, \"iter_is_self\": iter(it) is it,\n            \"exhausted_again\": list(it) == [] if take is None else None}\n",
+  "solution_md": "An *iterator* has `__next__` and an `__iter__` that returns itself; `for` and `islice` just call `next()` until `StopIteration`. The `while not buffer` loop handles empty pages with a cursor, and the `done` flag makes the iterator stay exhausted (the protocol requires that once `StopIteration` is raised, it keeps being raised). Laziness means `islice(it, 10)` costs one API call, not 50 - important under rate limits.\n\nMemory is O(page size); `deque.popleft` is O(1) unlike `list.pop(0)`.\n\nThe generator version is shorter (`while True: resp = fetch(cursor); yield from resp['items']; ...`) and is what you'd normally write; the class form is useful when the iterator needs extra state/methods (e.g. exposing `.cursor` to resume a crashed sync). Async APIs use `__aiter__`/`__anext__` the same way.",
+  "tests": {
+    "function": "simulate",
+    "cases": [
+      {
+        "args": [
+          [
+            [
+              1,
+              2
+            ],
+            [
+              3
+            ],
+            [
+              4,
+              5
+            ]
+          ]
+        ],
+        "kwargs": {
+          "take": 3
+        },
+        "expected": {
+          "items": [
+            1,
+            2,
+            3
+          ],
+          "fetched": [
+            0,
+            1
+          ],
+          "iter_is_self": true,
+          "exhausted_again": null
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              1,
+              2
+            ],
+            [],
+            [],
+            [
+              3
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "items": [
+            1,
+            2,
+            3
+          ],
+          "fetched": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "iter_is_self": true,
+          "exhausted_again": true
+        }
+      },
+      {
+        "args": [
+          [
+            []
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "items": [],
+          "fetched": [
+            0
+          ],
+          "iter_is_self": true,
+          "exhausted_again": true
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "a"
+            ],
+            [
+              "b"
+            ],
+            [
+              "c"
+            ]
+          ]
+        ],
+        "kwargs": {
+          "take": 1
+        },
+        "expected": {
+          "items": [
+            "a"
+          ],
+          "fetched": [
+            0
+          ],
+          "iter_is_self": true,
+          "exhausted_again": null
+        }
+      }
+    ]
+  }
+}

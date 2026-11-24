@@ -1,0 +1,152 @@
+{
+  "slug": "ai-embedding-models",
+  "title": "Choosing and operating embedding models",
+  "skill": "rag",
+  "extra_skills": [
+    "nlp-basics",
+    "ai-production"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "embedding-models",
+    "dimensions",
+    "normalization",
+    "multilingual",
+    "sentence-transformers",
+    "re-embedding"
+  ],
+  "summary": "The embedding model decides what 'similar' means in your search. Choose it by evaluating on your own queries, considering dimension (storage and speed), max input length, languages, licence and hosting (API vs local sentence-transformers). Normalise vectors, record which model produced them, and plan a full re-embed whenever the model changes.",
+  "why_md": "- Swapping an embedding model can change retrieval quality more than any prompt tweak.\n- Dimensions drive storage, index size and query latency in Postgres.\n- Vectors from different models are incompatible - a model change is a data migration.\n- Interview: 'how would you pick an embedding model?' and 'how do you migrate to a new one?'",
+  "details_md": "### What to compare\n- **Retrieval quality on your data**: public leaderboards (e.g. MTEB retrieval tasks) give a shortlist; then test 2-3 candidates on 50-100 of your own query -> relevant chunk pairs with recall@k/MRR. Domain fit (e-commerce policies, product titles, Indian/English mixed text) matters more than leaderboard rank.\n- **Dimension**: 384-1536+ floats per vector are common. Storage is roughly dims x 4 bytes per row (float32) before index overhead, so 1M chunks x 1024 dims ~ 4 GB raw. HNSW memory and distance cost grow with dimension. Some models support truncating to fewer dimensions (Matryoshka-style); check the model card.\n- **Max input length**: longer than your chunk size, or text gets truncated.\n- **Languages**: multilingual models map the same meaning in different languages close together - useful for reviews in several languages.\n- **Hosting**: API embeddings (no infra, per-token cost, data leaves your network, rate limits) vs local `sentence-transformers` on CPU/GPU (free per call, private, you operate it). Look up current model names, dimensions and prices on provider pages and model cards.\n- **Licence** for commercial use.\n\n### Normalisation and metric\nMost retrieval models are meant for cosine similarity. L2-normalising vectors at write time makes dot product == cosine and lets you use inner-product indexes. Never mix normalised and unnormalised vectors in one index.\n\n### Query vs document asymmetry\nSome models expect instructions or prefixes ('query: ' / 'passage: ', or a task instruction) and perform noticeably worse without them. Follow the model card exactly, consistently at index and query time.\n\n### Model identity is part of the data\nStore `embedding_model` (name + version/revision) with each row or table. A vector is meaningless without knowing which model produced it. Pin library and model revisions so a dependency upgrade doesn't silently change vectors.\n\n### Re-embedding on model change\nNew model = new vector space (and maybe new dimension). Steps: add a new column/table (`embedding_v2 vector(1024)`), backfill in batches (a job queue with `FOR UPDATE SKIP LOCKED` works well), build the index, run the eval set against both, switch reads via config, then drop the old column. Never compare a query embedded with model B against documents from model A. Budget the time and cost for a full corpus re-embed before choosing an API model.\n",
+  "code_md": "```python\n# Local embeddings with sentence-transformers, normalised, with model identity recorded\nfrom sentence_transformers import SentenceTransformer\n\nEMBED_MODEL = \"<model id from your evaluation>\"     # pin it; don't use 'latest'\nEMBED_REVISION = \"<commit hash or version>\"\nmodel = SentenceTransformer(EMBED_MODEL, revision=EMBED_REVISION)\nDIM = model.get_sentence_embedding_dimension()\n\ndef embed_documents(texts: list[str]) -> list[list[float]]:\n    # follow the model card: some models need a 'passage: ' / 'query: ' prefix\n    return model.encode(texts, batch_size=64, normalize_embeddings=True).tolist()\n\nassert DIM == 768, \"column is vector(768); dimension mismatch means wrong model\"\n```\n\n```sql\n-- Zero-downtime re-embedding to a new model\nALTER TABLE doc_chunks ADD COLUMN embedding_v2 vector(1024);\nALTER TABLE doc_chunks ADD COLUMN embedding_v2_model text;\n\n-- Backfill worker: claim a batch without blocking other workers\nWITH batch AS (\n  SELECT id FROM doc_chunks\n  WHERE embedding_v2 IS NULL\n  ORDER BY id\n  LIMIT 500\n  FOR UPDATE SKIP LOCKED\n)\nSELECT c.id, c.content FROM doc_chunks c JOIN batch USING (id);\n-- ... embed in Python, then UPDATE ... SET embedding_v2 = %s, embedding_v2_model = %s WHERE id = %s\n\nCREATE INDEX CONCURRENTLY ON doc_chunks USING hnsw (embedding_v2 vector_cosine_ops);\n-- evaluate both, flip the read path via config, later DROP COLUMN embedding\n```",
+  "use_cases_md": "- Policy RAG for one org: a small local model may match a large API model on your eval set at zero per-call cost.\n- Multilingual review search across marketplaces.\n- Product title matching across marketplaces with short texts.\n- Migrating to a better model: dual columns, backfill job, eval, switch.",
+  "mistakes_md": "- **Choosing by leaderboard only** - not tested on your queries.\n- **Not storing the model name/version** - impossible to know which vectors are compatible.\n- **Changing the model for queries only** - results become noise.\n- **Ignoring required query/passage prefixes**.\n- **Chunks longer than the model's max input** - silent truncation.\n- **Unpinned model downloads** - an upstream update changes vectors.",
+  "best_practices_md": "- Shortlist from leaderboards, decide on your own labelled set.\n- Normalise; use the model's metric consistently.\n- Record model + revision per vector; pin versions.\n- Size storage: rows x dims x 4 bytes + index overhead.\n- Batch embedding calls; respect API rate limits or use local GPU/CPU.\n- Treat model changes as migrations with dual-write/backfill and eval gates.",
+  "my_context_md": "The re-embedding backfill is a direct reuse of `ForcesightJobSchedulerAndRunner`: claiming batches with `SELECT ... FOR UPDATE SKIP LOCKED` and processing them with a `ThreadPoolExecutor`. Embeddings aren't used anywhere in your repo yet, so a local sentence-transformers model is the low-risk, no-cost way to start.",
+  "revision_notes_md": "- Pick by eval on your data (recall@k/MRR); leaderboards only shortlist.\n- Dimension -> storage (dims x 4 B) and latency.\n- Max input tokens >= chunk size.\n- Multilingual models for mixed languages.\n- API vs local: cost, privacy, ops, rate limits.\n- normalize_embeddings=True -> dot == cosine.\n- Follow model-card prefixes for query/passage.\n- Store model + revision; new model = re-embed everything.\n- Migration: new column, SKIP LOCKED backfill, index, eval, switch, drop.",
+  "exercises_md": "1. Embed the same 500 policy chunks with two local models; compare recall@5 and MRR on 30 labelled questions, plus encode time.\n2. Compute storage for 2M chunks at 384, 768 and 1536 dims and check actual table + index size in Postgres for a sample.\n3. Write the SKIP LOCKED backfill worker for `embedding_v2` with batch size, retries and progress logging.\n4. Verify normalisation: assert every stored vector has norm ~1.0 in a pytest test.",
+  "related": [
+    "ai-embeddings",
+    "ai-semantic-search",
+    "ai-vector-databases",
+    "ai-rag-evaluation",
+    "be-postgres-locking-deadlocks"
+  ],
+  "flashcards": [
+    {
+      "front": "How to estimate raw storage for embeddings?",
+      "back": "rows x dimensions x 4 bytes (float32), plus index overhead."
+    },
+    {
+      "front": "What must happen when you change embedding model?",
+      "back": "Re-embed the whole corpus; old and new vectors are not comparable."
+    },
+    {
+      "front": "Why normalise embeddings?",
+      "back": "Unit vectors make dot product equal cosine similarity and keep the metric consistent."
+    },
+    {
+      "front": "Best way to choose an embedding model?",
+      "back": "Shortlist via public benchmarks, then evaluate on your own labelled queries (recall@k, MRR), plus cost/latency/licence."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You switch to a better embedding model with the same dimension. What's required?",
+      "options": [
+        "Nothing; same dimension means compatible",
+        "Only re-embed queries",
+        "Re-embed all documents with the new model",
+        "Rebuild the index but keep old vectors"
+      ],
+      "answer_index": 2,
+      "explanation": "Different models define different vector spaces regardless of dimension."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is the strongest signal when choosing between two embedding models?",
+      "options": [
+        "Larger dimension",
+        "Recall@k on your own labelled queries",
+        "Higher download count",
+        "Newer release date"
+      ],
+      "answer_index": 1,
+      "explanation": "Your data and queries decide; generic signals only shortlist."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In sentence-transformers, `model.encode(texts, ____=True)` returns unit-length vectors.",
+      "answers": [
+        "normalize_embeddings"
+      ],
+      "explanation": "normalize_embeddings=True."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "1,000,000 vectors of 768 float32 values need about ____ GB of raw storage (decimal GB, rounded to one decimal).",
+      "answers": [
+        "3.1",
+        "3.07",
+        "3"
+      ],
+      "explanation": "1e6 x 768 x 4 B = 3.072e9 bytes ~ 3.1 GB."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (normalisation makes dot product equal cosine)",
+      "code": "import math\n\ndef norm(v):\n    n = math.sqrt(sum(x * x for x in v))\n    return [x / n for x in v]\n\ndef dot(a, b):\n    return sum(x * y for x, y in zip(a, b))\n\na, b = [3.0, 4.0], [4.0, 3.0]\nprint(dot(a, b))\nprint(round(dot(norm(a), norm(b)), 4))\nprint([round(x, 2) for x in norm(a)])\nrows, dims = 2_000_000, 384\nprint(f\"{rows * dims * 4 / 1e9:.2f} GB\")",
+      "answers": [
+        "24.0\n0.96\n[0.6, 0.8]\n3.07 GB"
+      ],
+      "explanation": "Raw dot = 12 + 12 = 24.0 (depends on vector length). Normalised a = [0.6, 0.8], b = [0.8, 0.6]; dot = 0.48 + 0.48 = 0.96 = cosine. Storage: 2e6 x 384 x 4 = 3.072e9 bytes."
+    },
+    {
+      "type": "debug",
+      "prompt": "After upgrading packages, search quality dropped sharply although no code changed. Here's the setup. What's wrong and how do you fix it?",
+      "code": "model = SentenceTransformer(\"some-org/embedder\")  # no revision pinned\n\ndef index(doc):\n    vec = model.encode(doc.text)\n    cur.execute(\"UPDATE doc_chunks SET embedding = %s WHERE id = %s\", (to_pgvector(vec), doc.id))\n\ndef search(q):\n    vec = model.encode(\"query: \" + q)   # prefix only on queries\n    ...",
+      "answer": "- Model revision not pinned, and no model id stored per row: an upgrade pulled a different model version, so new queries (and newly indexed docs) live in a different space than old vectors.\n- Vectors not normalised while the index uses cosine/inner product assumptions.\n- Inconsistent prefixes: the model card's passage prefix isn't applied to documents.\n\n```python\nmodel = SentenceTransformer(EMBED_MODEL, revision=EMBED_REVISION)\n\ndef index(doc):\n    vec = model.encode(\"passage: \" + doc.text, normalize_embeddings=True)\n    cur.execute(\"UPDATE doc_chunks SET embedding = %s, embedding_model = %s WHERE id = %s\",\n                (to_pgvector(vec), f\"{EMBED_MODEL}@{EMBED_REVISION}\", doc.id))\n```\nThen re-embed all rows whose `embedding_model` differs from the current one.",
+      "rubric": [
+        "Pin model revision and record model id per vector",
+        "Re-embed vectors from the old model",
+        "Normalise consistently",
+        "Apply prefixes per the model card for both docs and queries"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd migrate a production RAG system to a new embedding model without downtime.",
+      "answer": "Treat it like a schema migration. Add `embedding_v2 vector(new_dim)` plus a model-id column. Run a backfill job that claims batches with `FOR UPDATE SKIP LOCKED`, embeds with the pinned new model and writes v2; new/updated documents are dual-written to both columns meanwhile. Build the ANN index on v2 (`CREATE INDEX CONCURRENTLY`). Run the eval set against both columns; if v2 wins, switch the read path (query embedding + column) via config, possibly per org. Keep v1 briefly for rollback, then drop it. Never mix query embeddings from one model with document vectors from the other.",
+      "rubric": [
+        "New column/table, dual-write new docs",
+        "Batched backfill (SKIP LOCKED), concurrent index build",
+        "Evaluate before switching; config flip with rollback",
+        "Never mix models between query and documents"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What are the trade-offs between API-hosted embeddings and a local sentence-transformers model?",
+      "answer": "API: no infrastructure, often strong quality, scales easily; but per-token cost (including every full re-embed), rate limits, network latency, data leaves your environment, and vendor model deprecations force re-embedding. Local: no per-call cost, data stays private, works offline, versions fully under your control; but you run CPU/GPU capacity, batch throughput is limited by hardware, and you own upgrades. Decide using your eval set plus cost for initial and repeated full-corpus embedding.",
+      "rubric": [
+        "API: easy, scalable, but cost, rate limits, privacy, deprecations",
+        "Local: private, free per call, controlled; but ops/hardware",
+        "Decide by eval + total cost incl. re-embedding"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you choose an embedding model for RAG over e-commerce policies and product data?",
+      "difficulty": "medium",
+      "answer_md": "1. **Constraints**: data privacy (can text leave our network?), languages, budget, latency, expected corpus size (storage = rows x dims x 4 bytes + index).\n2. **Shortlist** 3-4 models from public retrieval benchmarks and model cards (max input length >= chunk size, licence, recommended metric and prefixes), including at least one local sentence-transformers option.\n3. **Evaluate on our data**: 50-100 real questions labelled with relevant chunks; measure recall@5/10 and MRR, plus embedding throughput and query latency.\n4. **Operational fit**: rate limits for bulk re-embedding, version pinning, deprecation risk.\n5. Pick the smallest/cheapest model within a few points of the best, record the model id per vector, and keep the eval set to re-run when considering a switch."
+    },
+    {
+      "question": "Why can't you mix vectors from different embedding models in one index?",
+      "difficulty": "easy",
+      "answer_md": "Each model learns its own vector space: the axes, scale and geometry have no shared meaning across models. A similarity between a vector from model A and one from model B is essentially arbitrary - even when dimensions match, so Postgres won't complain but results are noise. Different dimensions fail outright (`vector(768)` vs 1024). That's why the model name/revision is stored with vectors, queries must use the same model as the documents, and a model change means re-embedding the corpus (ideally into a new column, then switching)."
+    }
+  ],
+  "category": "AI"
+}

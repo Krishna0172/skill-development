@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, empty, chips, question_form %}
+{% block title %}Revision session{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Revision session</h1><p>{{ done }} done · {{ remaining }} remaining</p></div>
+  <div class="actions"><a class="btn" href="/revision">End session</a></div>
+</div>
+{{ chips("type", item_types, type, "/revision/session") }}
+
+<div class="mt" style="max-width:860px">
+{% if not item %}
+  {{ empty("All caught up 🎉" if done else "Nothing due right now", (done ~ " items reviewed this session.") if done else "Come back tomorrow, or take a quick quiz.") }}
+  <div class="row mt"><a class="btn" href="/revision">Back to revision</a><a class="btn primary" href="/revision/quiz">Quick quiz</a></div>
+{% elif item.item_type == "question" %}
+  <div class="small faint mb">{{ badge("question") }} {% if item.topic %}<a href="/topics/{{ item.topic_id }}">{{ item.topic }}</a>{% endif %} · due {{ item.due_date|rel }}</div>
+  <form method="post" action="/revision/session/{{ item.id }}/answer">
+    <input type="hidden" name="type" value="{{ type }}"><input type="hidden" name="done" value="{{ done }}"><input type="hidden" name="started" value="{{ started }}">
+    {{ question_form(item.question, done + 1) }}
+    <div class="row mt"><button class="btn primary">Check answer</button></div>
+  </form>
+{% else %}
+  {% call card() %}
+    <div class="small faint mb">{{ badge(item.item_type) }} {% if item.topic %}{{ item.topic }} · {% endif %}due {{ item.due_date|rel }} · stage {{ item.stage }}</div>
+    <div class="md" style="font-size:1.05em">{{ item.prompt|md }}</div>
+    <details class="fold mt"><summary>Reveal answer</summary>
+      <div class="md">{{ (item.answer_md or "_No stored answer — compare with the topic page._")|md }}</div>
+      {% if item.detail_md %}<div class="md mt">{{ item.detail_md|md }}</div>{% endif %}
+      {% if item.item_type == "topic" %}<div class="small mt"><a href="/topics/{{ item.item_id }}" target="_blank">Open full topic ↗</a></div>{% endif %}
+    </details>
+    <form method="post" action="/revision/session/{{ item.id }}/rate" class="row mt">
+      <input type="hidden" name="type" value="{{ type }}"><input type="hidden" name="done" value="{{ done }}"><input type="hidden" name="started" value="{{ started }}">
+      {% for value, text, tone in ratings %}
+        <button class="btn {{ tone }}" name="rating" value="{{ value }}">{{ text }} <span class="tiny faint">{{ item.preview[value] }}d</span></button>
+      {% endfor %}
+    </form>
+  {% endcall %}
+{% endif %}
+</div>
+{% endblock %}

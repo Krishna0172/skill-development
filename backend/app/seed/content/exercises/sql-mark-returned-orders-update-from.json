@@ -1,0 +1,78 @@
+{
+  "slug": "sql-mark-returned-orders-update-from",
+  "title": "Mark returned orders (UPDATE ... FROM an aggregate)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "medium",
+  "skill": "sql-joins",
+  "concepts": [
+    "UPDATE ... FROM",
+    "aggregate before join",
+    "CASE in SET",
+    "join fan-out"
+  ],
+  "related_topics": [
+    "sql-joins",
+    "sql-group-by",
+    "transactions-isolation"
+  ],
+  "problem_md": "A returns report has been loaded into `returns` (one row per returned unit batch; an order can have several\nreturns). Update `orders` so it reflects the returns:\n\n- `returned_qty` = total returned quantity for the order.\n- `status` = `'RETURNED'` if `returned_qty >= total_qty`, otherwise `'PARTIALLY_RETURNED'`.\n- Only touch orders whose current status is `'DELIVERED'`. (A return row for a `CANCELLED` or `SHIPPED` order is a\n  data issue to investigate, not to apply.)\n- Orders with no returns stay unchanged.\n\n```sql\nCREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  order_ref    TEXT NOT NULL,\n  status       TEXT NOT NULL,\n  total_qty    INTEGER NOT NULL,\n  returned_qty INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE TABLE returns (\n  return_id   INTEGER PRIMARY KEY,\n  order_id    INTEGER NOT NULL,\n  quantity    INTEGER NOT NULL,\n  return_date TEXT NOT NULL,\n  reason      TEXT\n);\n```\n\n**Task.** Write the `UPDATE` statement. The checker then runs:\n\n```sql\nSELECT order_id, status, returned_qty FROM orders ORDER BY order_id;\n```",
+  "examples": [
+    {
+      "input": "order 1 (DELIVERED, total_qty 3) has two returns of 1 unit; order 4 is CANCELLED with a return row",
+      "output": "order_id | status             | returned_qty\n1        | PARTIALLY_RETURNED | 2\n4        | CANCELLED          | 0"
+    }
+  ],
+  "hints": [
+    "Joining `orders` directly to `returns` gives several matching rows per order - an UPDATE would just use one of them. Aggregate returns per order first.",
+    "`UPDATE orders AS o SET ... FROM (SELECT order_id, SUM(quantity) AS qty FROM returns GROUP BY order_id) AS r WHERE r.order_id = o.order_id AND o.status = 'DELIVERED'`.",
+    "Set `returned_qty = r.qty` and `status = CASE WHEN r.qty >= o.total_qty THEN 'RETURNED' ELSE 'PARTIALLY_RETURNED' END`. Column names on the left of SET are never qualified."
+  ],
+  "starter_code": "-- Write your UPDATE statement here\n",
+  "solution_code": "UPDATE orders AS o\nSET returned_qty = r.qty,\n    status = CASE WHEN r.qty >= o.total_qty THEN 'RETURNED'\n                  ELSE 'PARTIALLY_RETURNED' END\nFROM (\n  SELECT order_id, SUM(quantity) AS qty\n  FROM returns\n  GROUP BY order_id\n) AS r\nWHERE r.order_id = o.order_id\n  AND o.status = 'DELIVERED';",
+  "solution_md": "**`UPDATE ... FROM`** (PostgreSQL syntax, supported by SQLite >= 3.33) joins the target table to other relations;\neach target row that matches the `WHERE` is updated using values from the joined row.\n\n**Aggregate before joining.** Order 5 has three return rows. If you wrote `FROM returns r WHERE r.order_id =\no.order_id`, the target row would match three source rows and PostgreSQL would apply **one arbitrary** match\n(`SET returned_qty = r.quantity` might give 1 or 2 instead of 4) - with no error. Always collapse the source to\none row per target key first (subquery or CTE).\n\n- The SET expressions see the *old* row values (`o.total_qty`, `o.status`) - all assignments are evaluated against\n  the pre-update row, so the order of assignments doesn't matter.\n- `o.status = 'DELIVERED'` protects cancelled/shipped orders; orders without returns have no `r` match and are\n  untouched.\n- Running it twice gives the same result (`returned_qty` is recomputed from the source, not incremented), which is\n  what makes it safe to re-run after a failed batch. `returned_qty = returned_qty + r.qty` would not be.\n  (Strictly, the second run won't touch the orders because their status is no longer DELIVERED; if a new return\n  arrives for a PARTIALLY_RETURNED order you'd extend the filter to `status IN ('DELIVERED','PARTIALLY_RETURNED')`.)\n\n**Portable alternative** (correlated subqueries, works in any SQL database):\n\n```sql\nUPDATE orders\nSET returned_qty = (SELECT SUM(quantity) FROM returns r WHERE r.order_id = orders.order_id),\n    status = CASE WHEN (SELECT SUM(quantity) FROM returns r WHERE r.order_id = orders.order_id) >= total_qty\n                  THEN 'RETURNED' ELSE 'PARTIALLY_RETURNED' END\nWHERE status = 'DELIVERED'\n  AND EXISTS (SELECT 1 FROM returns r WHERE r.order_id = orders.order_id);\n```\n\n**Operational notes.** Run in a transaction, check the affected-row count, and on big tables update in batches\n(e.g. by `order_id` ranges) to keep locks and WAL volume small. `returns (order_id)` should be indexed.",
+  "tests": {
+    "schema_sql": "CREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  order_ref    TEXT NOT NULL,\n  status       TEXT NOT NULL,\n  total_qty    INTEGER NOT NULL,\n  returned_qty INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE TABLE returns (\n  return_id   INTEGER PRIMARY KEY,\n  order_id    INTEGER NOT NULL,\n  quantity    INTEGER NOT NULL,\n  return_date TEXT NOT NULL,\n  reason      TEXT\n);\n\nINSERT INTO orders (order_id, order_ref, status, total_qty) VALUES\n (1,'MYN-1001','DELIVERED',3),\n (2,'MYN-1002','DELIVERED',2),\n (3,'NYK-5001','DELIVERED',1),\n (4,'NYK-5002','CANCELLED',2),\n (5,'MYN-1003','DELIVERED',4),\n (6,'BLK-77',  'SHIPPED',  1);\n\nINSERT INTO returns VALUES\n (1,1,1,'2024-03-10','SIZE_ISSUE'),\n (2,1,1,'2024-03-12','SIZE_ISSUE'),\n (3,2,2,'2024-03-11','DAMAGED'),\n (4,3,1,'2024-03-11',NULL),\n (5,4,2,'2024-03-09','CUSTOMER_CANCELLED'),\n (6,5,1,'2024-03-10','QUALITY'),\n (7,5,2,'2024-03-14','QUALITY'),\n (8,5,1,'2024-03-15','SIZE_ISSUE');",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "order_id",
+        "status",
+        "returned_qty"
+      ],
+      "rows": [
+        [
+          1,
+          "PARTIALLY_RETURNED",
+          2
+        ],
+        [
+          2,
+          "RETURNED",
+          2
+        ],
+        [
+          3,
+          "RETURNED",
+          1
+        ],
+        [
+          4,
+          "CANCELLED",
+          0
+        ],
+        [
+          5,
+          "RETURNED",
+          4
+        ],
+        [
+          6,
+          "SHIPPED",
+          0
+        ]
+      ]
+    },
+    "check_sql": "SELECT order_id, status, returned_qty FROM orders ORDER BY order_id"
+  }
+}

@@ -1,0 +1,194 @@
+{
+  "slug": "ai-python-ml-toolkit-basics",
+  "title": "The Python ML toolkit: Jupyter, numpy, pandas, matplotlib",
+  "skill": "numpy",
+  "extra_skills": [
+    "ml-fundamentals",
+    "etl-data-processing"
+  ],
+  "category": "AI",
+  "difficulty": "beginner",
+  "tags": [
+    "jupyter",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "train-test-split",
+    "beginner"
+  ],
+  "summary": "A guided first tour of the four tools almost every ML notebook uses: Jupyter for experiments, numpy for fast arrays, pandas for tables and matplotlib for charts. It also explains the train/test split, the single most important habit in machine learning.",
+  "why_md": "- Nearly all ML tutorials, papers' code and team experiments live in notebooks using these libraries.\n- You will read and debug other people's data-science code; knowing the vocabulary (array, DataFrame, shape, axis) makes that possible.\n- Train/test split is the foundation of honest evaluation and a classic interview question.\n- As a backend developer you often receive a notebook from a data scientist and must productionise it; this is the bridge.",
+  "details_md": "### Jupyter notebooks\nA notebook is a document made of **cells**; each cell is code or text. You run cells one at a time and see output (tables, charts) right beneath. Variables stay alive between cells in a running **kernel**. Great for exploring data, poor for production: hidden state means cells run out of order can give different results. Rule: before sharing, *Restart kernel and run all*. When code works, move it into normal `.py` modules with tests.\n\n### numpy: fast arrays\nA Python list of a million numbers is slow because each item is a full Python object. A numpy **array** stores numbers in one block of memory with one type (`float64`, `int32`) and does maths in compiled C.\n- `shape` is the size in each dimension: `(3, 2)` means 3 rows, 2 columns.\n- **Vectorised** operations apply to the whole array without a Python loop: `a * 2`, `a + b`, `a.mean()`.\n- **Axis**: `a.sum(axis=0)` collapses rows (one result per column); `axis=1` collapses columns.\n- **Broadcasting**: numpy stretches smaller arrays to match, e.g. subtracting a per-column mean from every row.\n\n### pandas: tables\nA **DataFrame** is a table with labelled columns, like a SQL result or spreadsheet; a **Series** is one column. You already know the ideas: `df[df.price > 10]` is WHERE, `df.groupby(\"category\")[\"price\"].mean()` is GROUP BY, `df.merge(other, on=\"id\")` is JOIN. `df.head()`, `df.info()` and `df.describe()` are the first three things to run on any new dataset. `df.isna().sum()` counts missing values.\n\n### matplotlib: charts\n`plt.plot`, `plt.scatter`, `plt.hist` draw lines, points and histograms; `plt.show()` displays. A scatter plot of two columns or a histogram of one is usually the fastest way to spot outliers and skew. Always label axes.\n\n### Features and labels\nIn ML tables, the input columns are **features** (usually called `X`) and the answer column is the **label / target** (`y`). Example: features = price, rating, review_count; target = will_sell_out.\n\n### Train/test split: the key habit\nIf you test a model on the same data it learned from, it can look perfect just by memorising. So you split the rows *before training*:\n- **Training set** (commonly ~70-80%): the model learns from this.\n- **Test set** (~20-30%): kept hidden; used once at the end to estimate how the model does on new data.\nAlso shuffle before splitting if the rows are ordered (e.g. by date or class), unless the data is time-based, in which case split by time so you never train on the future. A *validation set* is a third slice used to tune settings so the test set stays untouched.\n\n### Data leakage (an early trap)\nLeakage means information from the test set sneaks into training, for example scaling using the mean of all data before splitting. Always split first, then compute statistics from the training part only.",
+  "code_md": "numpy basics:\n```python\nimport numpy as np\n\na = np.array([[1, 2], [3, 4], [5, 6]])   # shape (3, 2)\nprint(a.shape, a.dtype)\nprint(a * 10)                 # vectorised: no loop\nprint(a.sum(axis=0))          # [ 9 12]  -> one sum per column\nprint(a - a.mean(axis=0))     # broadcasting: subtract each column's mean\n```\npandas basics (SQL ideas in Python):\n```python\nimport pandas as pd\n\ndf = pd.DataFrame({\"sku\": [\"A\", \"B\", \"C\", \"D\"],\n                   \"category\": [\"toy\", \"toy\", \"book\", \"book\"],\n                   \"price\": [10.0, 14.0, 7.5, None]})\nprint(df.describe())                         # quick stats\nprint(df.isna().sum())                       # missing values per column\nprint(df[df.price > 8])                      # WHERE price > 8\nprint(df.groupby(\"category\")[\"price\"].mean())  # GROUP BY\n```\nmatplotlib basics:\n```python\nimport matplotlib.pyplot as plt\nplt.scatter(df[\"price\"], range(len(df)))\nplt.xlabel(\"price\"); plt.ylabel(\"row\"); plt.show()\n```\nA train/test split by hand and with scikit-learn:\n```python\nimport random\nrows = list(range(10))\nrandom.seed(42)\nrandom.shuffle(rows)\ncut = int(len(rows) * 0.8)\ntrain, test = rows[:cut], rows[cut:]      # 8 train, 2 test\n\n# With scikit-learn:\n# from sklearn.model_selection import train_test_split\n# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)\n```",
+  "use_cases_md": "- **Exploring an unfamiliar CSV** from a marketplace report with `df.info()`, `describe()` and a histogram before writing ingestion code.\n- **Spotting outliers** in price or quantity columns with a scatter plot before they corrupt a model.\n- **Quick prototypes**: a data scientist proves an idea in a notebook; you convert it to a tested service.\n- **Honest evaluation**: hold out the most recent weeks of sales as the test set when forecasting.",
+  "mistakes_md": "- **Looping over numpy arrays in Python**: slow and unidiomatic. Fix: use vectorised operations.\n- **Testing on training data**: gives fake-perfect scores. Fix: split first and evaluate only on the test set.\n- **Scaling/imputing before splitting** (leakage). Fix: compute statistics on the training set only.\n- **Random split on time-series data**: trains on the future. Fix: split by time.\n- **Out-of-order notebook cells** producing irreproducible results. Fix: restart and run all; keep logic in modules.\n- **Forgetting a random seed**: results change every run. Fix: set `random_state`.",
+  "best_practices_md": "- Run `head()`, `info()`, `describe()` and `isna().sum()` on every new dataset.\n- Always set random seeds for splits and experiments.\n- Keep notebooks for exploration; move reusable code into `.py` files with tests.\n- Label chart axes and titles.\n- Keep a never-touched test set and report metrics only from it.\n- Pin library versions in `requirements.txt` so notebooks reproduce.",
+  "my_context_md": "In ECSMarketplaceDataUpload you already use pandas (read_csv/read_excel, rename, merge, groupby, apply) to process marketplace reports, so DataFrames will feel familiar. What is new here is numpy-style vectorised thinking, plotting, and the train/test split, none of which appear in your listed services.",
+  "revision_notes_md": "- Jupyter = cells + live kernel; restart and run all before trusting results.\n- numpy array = one typed block of memory; vectorised ops, no Python loops.\n- shape = size per dimension; axis=0 collapses rows, axis=1 collapses columns.\n- Broadcasting stretches smaller arrays to match.\n- pandas DataFrame = table; filter = WHERE, groupby = GROUP BY, merge = JOIN.\n- First look: head(), info(), describe(), isna().sum().\n- X = features, y = target/label.\n- Split before training: train ~80%, test ~20%; shuffle unless time-based.\n- Leakage: any test information used during training or preprocessing.\n- Set random_state for reproducibility.",
+  "exercises_md": "1. In a notebook, create a DataFrame of 20 fake orders (id, category, amount) and answer three questions with groupby and a filter.\n2. Create a (4, 3) numpy array and predict, then verify, the output of `sum(axis=0)`, `sum(axis=1)` and subtracting the column means.\n3. Plot a histogram of an `amount` column with a few extreme outliers and describe what you see.\n4. Take any CSV you have locally, split it 80/20 with a fixed seed, and confirm the two parts have no overlapping row ids.",
+  "related": [
+    "ai-numpy-for-ml",
+    "pandas-essentials",
+    "ai-data-preprocessing",
+    "ai-model-evaluation"
+  ],
+  "flashcards": [
+    {
+      "front": "What is a Jupyter notebook kernel?",
+      "back": "The running process that holds variables between cells; running cells out of order can give inconsistent state, so restart and run all."
+    },
+    {
+      "front": "Why is a numpy array faster than a Python list for maths?",
+      "back": "It stores same-typed numbers in one contiguous block and runs vectorised operations in compiled code."
+    },
+    {
+      "front": "What does axis=0 mean in a.sum(axis=0)?",
+      "back": "Collapse the rows: you get one result per column."
+    },
+    {
+      "front": "DataFrame equivalents of WHERE, GROUP BY, JOIN?",
+      "back": "Boolean filtering df[df.col > x], df.groupby(...), df.merge(...)."
+    },
+    {
+      "front": "Why split data into train and test sets?",
+      "back": "To measure how the model performs on data it has never seen, avoiding the false confidence of memorisation."
+    },
+    {
+      "front": "What is data leakage?",
+      "back": "Information from the test set influencing training or preprocessing, e.g. scaling with the mean of all data before splitting."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "In ML tables, what is the 'target' (label)?",
+      "options": [
+        "Any column with numbers",
+        "The index of the table",
+        "The column the model should predict",
+        "The test set"
+      ],
+      "answer_index": 2,
+      "explanation": "Features are inputs; the target is the answer the model learns to predict."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why must you split the data before computing the mean used for scaling?",
+      "options": [
+        "To avoid leakage of test information into training",
+        "It makes the code shorter",
+        "Because numpy requires it",
+        "To increase the dataset size"
+      ],
+      "answer_index": 0,
+      "explanation": "Computing statistics on all data leaks information about the test set."
+    },
+    {
+      "type": "mcq",
+      "prompt": "For forecasting next month's sales from past months, the best split is:",
+      "options": [
+        "Random shuffle",
+        "Train on the latest, test on the earliest",
+        "Use only the test set",
+        "Train on earlier months, test on the latest months"
+      ],
+      "answer_index": 3,
+      "explanation": "Time-based data should be split by time so the model never trains on the future."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In numpy, `a.sum(axis=____)` gives one total per column of a 2-D array.",
+      "answers": [
+        "0"
+      ],
+      "explanation": "axis=0 collapses the rows, leaving one value per column."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The pandas object that represents a single column is called a ____.",
+      "answers": [
+        "series",
+        "pandas series"
+      ],
+      "explanation": "A DataFrame is a table; one column is a Series."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import random\nrows = list(range(10))\ncut = int(len(rows) * 0.8)\ntrain, test = rows[:cut], rows[cut:]\nprint(len(train), len(test), test)",
+      "answers": [
+        "8 2 [8, 9]"
+      ],
+      "explanation": "No shuffle here, so the last 2 rows are the test set."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "data = [[1, 2], [3, 4], [5, 6]]\ncol_sums = [sum(row[j] for row in data) for j in range(2)]\ncol_means = [s / len(data) for s in col_sums]\ncentered = [[row[j] - col_means[j] for j in range(2)] for row in data]\nprint(col_sums, col_means)\nprint(centered)",
+      "answers": [
+        "[9, 12] [3.0, 4.0]\n[[-2.0, -2.0], [0.0, 0.0], [2.0, 2.0]]"
+      ],
+      "explanation": "Column sums [9, 12], means [3.0, 4.0]; centred rows are [-2.0,-2.0],[0.0,0.0],[2.0,2.0]. This is what numpy broadcasting does in one expression."
+    },
+    {
+      "type": "debug",
+      "prompt": "This evaluation reports 100% accuracy, which is suspicious. What is wrong?",
+      "code": "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)\nmodel.fit(X_train, y_train)\nprint(model.score(X_train, y_train))",
+      "answer": "The model is scored on the training data it memorised, not the held-out test data. Use `model.score(X_test, y_test)`; also set `random_state` for a reproducible split.",
+      "rubric": [
+        "Notices scoring uses the training set",
+        "Says to evaluate on X_test/y_test",
+        "Mentions setting a random seed (optional extra)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain what the train/test split is for, as you would to a teammate new to ML.",
+      "answer": "A model can memorise the examples it was trained on, so its score on them says nothing about new data. We therefore hold back a test set the model never sees during training and use it once at the end to estimate real-world performance. Split before any preprocessing to avoid leakage, shuffle unless the data is time-ordered, and use a separate validation set if you need to tune settings.",
+      "rubric": [
+        "Explains memorisation / honest estimate",
+        "Test set unseen during training",
+        "Mentions split-first or leakage or time-based split"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why is a Jupyter notebook risky for production code, and what is the usual fix?",
+      "answer": "Notebooks keep hidden state in a kernel, so cells run out of order give different results; they are hard to test, review and deploy. Use them for exploration, then move stable logic into .py modules with tests and a pinned requirements file, and always restart-and-run-all before trusting a notebook.",
+      "rubric": [
+        "Hidden state / out-of-order cells",
+        "Hard to test or deploy",
+        "Move code to modules with tests"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which pandas line is the closest equivalent of SQL `WHERE price > 8`?",
+      "options": [
+        "df.groupby('price')",
+        "df[df.price > 8]",
+        "df.merge(8)",
+        "df.describe()"
+      ],
+      "answer_index": 1,
+      "explanation": "Boolean indexing filters rows."
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is vectorisation and why does it matter?",
+      "difficulty": "easy",
+      "answer_md": "Vectorisation means applying an operation to a whole array at once instead of looping in Python. numpy runs the loop in compiled code over contiguous typed memory, which is often 10-100x faster than a Python for-loop. Example: `a * 2 + 1` over a million floats versus a list comprehension. It also makes code shorter and closer to the maths."
+    },
+    {
+      "question": "What is data leakage and how can it happen in preprocessing?",
+      "difficulty": "medium",
+      "answer_md": "Leakage is when information from outside the training set influences the model, making evaluation unrealistically optimistic. A common case is fitting a scaler or imputer on the full dataset before splitting, so test statistics shape the training features. Another is including a column that is derived from the target. Fix: split first, fit preprocessing on training data only, apply it to test data, and review features for target-derived columns."
+    },
+    {
+      "question": "How would you split data for a model that forecasts weekly demand?",
+      "difficulty": "medium",
+      "answer_md": "Use a time-based split: train on earlier weeks, validate on a later block, test on the most recent block, never shuffling across time. Optionally use rolling or expanding-window cross-validation to check stability across periods. A random split would let the model see future patterns and overstate accuracy."
+    }
+  ]
+}

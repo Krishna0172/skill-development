@@ -1,0 +1,26 @@
+{% if run %}
+<div class="q {{ 'correct' if run.passed else 'incorrect' }}">
+  <div class="qhead">
+    {% if run.passed %}<span class="good">✓ all tests passed</span>{% elif run.tests_total %}<span class="bad">{{ run.tests_passed }}/{{ run.tests_total }} tests passed</span>{% else %}<span class="bad">not run</span>{% endif %}
+    <span>scratch run — not recorded</span>
+  </div>
+  {% if run.error %}<pre class="block">{{ run.error }}</pre>{% endif %}
+  {% for r in run.results %}
+    <details class="fold mt" {{ 'open' if not r.passed and loop.index0 < 3 }}>
+      <summary><span class="{{ 'good' if r.passed else 'bad' }}">{{ "✓" if r.passed else "✗" }}</span> Test {{ (r.index or loop.index0) + 1 }}{% if r.ms is defined %} <span class="tiny faint">{{ r.ms }} ms</span>{% endif %}{% if r.message %} — {{ r.message }}{% endif %}</summary>
+      {% if r.input %}<div class="small muted">Input</div><pre class="block">{{ r.input }}</pre>{% endif %}
+      {% if not r.passed %}
+        {% if r.expected is defined %}<div class="small muted">Expected</div><pre class="block">{{ r.expected }}</pre>{% endif %}
+        {% if r.got is defined %}<div class="small muted">Got</div><pre class="block">{{ r.got }}</pre>{% endif %}
+        {% if r.error %}<div class="small muted">Error</div><pre class="block">{{ r.error }}</pre>{% endif %}
+      {% endif %}
+      {% if r.stdout %}<div class="small muted">Printed during this test</div><pre class="block">{{ r.stdout }}</pre>{% endif %}
+    </details>
+  {% endfor %}
+  {% if run.columns %}
+    <div class="table-wrap mt"><table class="table"><tr>{% for c in run.columns %}<th>{{ c }}</th>{% endfor %}</tr>
+      {% for row in (run.rows or [])[:20] %}<tr>{% for v in row %}<td class="small">{{ v }}</td>{% endfor %}</tr>{% endfor %}</table></div>
+  {% endif %}
+  {% if run.stdout %}<div class="small muted mt">Output</div><pre class="block">{{ run.stdout }}</pre>{% endif %}
+</div>
+{% endif %}

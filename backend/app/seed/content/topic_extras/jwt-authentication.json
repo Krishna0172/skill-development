@@ -1,0 +1,56 @@
+{
+  "slug": "jwt-authentication",
+  "why_md": "Almost every API you'll build for an AI product needs to know who the caller is and which org's data they can touch. JWTs are the most common token format for that, and interviewers love their pitfalls: signature vs encryption, expiry and revocation, algorithm confusion, and authorization (tenant checks) beyond authentication.",
+  "revision_notes_md": "- JWT = base64url(header).base64url(payload).signature - signed, NOT encrypted; anyone can read the payload.\n- Verify signature, `exp`, and expected `aud`/`iss`; pin `algorithms=[\"HS256\"]` (or RS256) explicitly.\n- Short-lived access tokens (5-15 min) + refresh tokens (rotated, revocable, stored server-side).\n- HS256 = shared secret; RS256/ES256 = private key signs, public key verifies (JWKS).\n- Authentication (who) != authorization (what): always check org/tenant ownership of resources.\n- Never put secrets/PII in claims; keep tokens small.\n- Browser: HttpOnly Secure SameSite cookie beats localStorage for XSS exposure.\n- Hash passwords with argon2/bcrypt, never SHA-256.",
+  "exercises_md": "1. Using PyJWT, write `create_access_token(user_id, org_id)` and `decode_token(token)` that enforces `exp`, `aud` and an algorithm allow-list; write tests for expired, wrong-audience and tampered tokens.\n2. Build only the stdlib version: sign and verify an HS256 token with `hmac` + `base64.urlsafe_b64encode`, then tamper one payload byte and confirm verification fails.",
+  "my_context_md": "JWT/auth implementation is listed as not used in the work repo, so this is a genuine gap. The closest existing skill is `ECSAmazonBankStatementPostgres/AwsSignature.py`, a hand-written AWS SigV4 signer using `hmac`/`hashlib` - the same HMAC-signing idea that underpins HS256 JWTs. The multi-tenant LLM chat backend (`GetLlmData`, per-org cost tracking) is where org-scoped authorization claims would matter.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "JWT payloads are signed but not ____, so never put secrets in them.",
+      "answers": [
+        "encrypted",
+        "encryption"
+      ],
+      "explanation": "base64url is encoding, not encryption."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The registered claim holding a token's expiry time (Unix seconds) is ____.",
+      "answers": [
+        "exp"
+      ],
+      "explanation": "Verifiers must reject tokens past exp."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import base64, json, hmac, hashlib\n\ndef b64(d):\n    return base64.urlsafe_b64encode(d).rstrip(b\"=\").decode()\n\nheader = b64(json.dumps({\"alg\": \"HS256\", \"typ\": \"JWT\"}).encode())\npayload = b64(json.dumps({\"sub\": \"42\", \"org\": 7}).encode())\nsig = b64(hmac.new(b\"secret\", f\"{header}.{payload}\".encode(), hashlib.sha256).digest())\ntoken = f\"{header}.{payload}.{sig}\"\n\npart = token.split(\".\")[1]\nprint(json.loads(base64.urlsafe_b64decode(part + \"=\" * (-len(part) % 4))))\nprint(token.count(\".\"))",
+      "answers": [
+        "{'sub': '42', 'org': 7}\n2"
+      ],
+      "explanation": "Anyone can decode the payload without the secret - it is only base64url-encoded. A JWT has three parts, so two dots."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong with this verification code?",
+      "code": "import jwt\n\ndef current_user(token: str):\n    claims = jwt.decode(token, options={\"verify_signature\": False})\n    return get_user(claims[\"sub\"])\n\ndef get_upload(token, upload_id):\n    user = current_user(token)\n    return db.fetch_upload(upload_id)",
+      "answer": "1. Signature verification is disabled - anyone can forge a token with any `sub`.\n2. No algorithm allow-list / `exp` / audience check.\n3. Authorization missing - any authenticated user can read any org's upload.\n\n```python\ndef current_user(token: str):\n    claims = jwt.decode(token, SECRET, algorithms=[\"HS256\"], audience=\"devgrowth-api\")\n    return get_user(claims[\"sub\"])\n\ndef get_upload(token, upload_id):\n    user = current_user(token)\n    upload = db.fetch_upload(upload_id)\n    if upload is None or upload.org_id != user.org_id:\n        raise NotFound()   # 404 avoids leaking existence\n    return upload\n```",
+      "rubric": [
+        "Signature verification must not be disabled",
+        "Pin algorithms and validate exp/aud",
+        "Check resource ownership (tenant/org authorization)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the access-token + refresh-token flow and why it exists.",
+      "answer": "Access tokens are short-lived JWTs sent on every request and verified statelessly, so a leaked one is useful only briefly - but stateless tokens can't easily be revoked. A long-lived refresh token, stored server-side (hashed) and sent only to the refresh endpoint, is exchanged for new access tokens. Rotating it on each use and detecting reuse lets you revoke sessions (logout, compromise). This balances stateless verification performance with revocability.",
+      "rubric": [
+        "Short-lived access tokens limit damage, verified statelessly",
+        "Refresh token is long-lived, server-tracked, revocable",
+        "Rotation + reuse detection"
+      ]
+    }
+  ]
+}

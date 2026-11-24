@@ -1,0 +1,152 @@
+{
+  "slug": "ai-vector-databases",
+  "title": "Vector databases and pgvector",
+  "skill": "rag",
+  "extra_skills": [
+    "postgresql",
+    "query-optimization"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "pgvector",
+    "hnsw",
+    "ivfflat",
+    "ann",
+    "multi-tenant",
+    "metadata-filtering"
+  ],
+  "summary": "A vector database stores embeddings and finds the nearest ones to a query vector. Exact search compares against every row; approximate nearest neighbour (ANN) indexes such as HNSW and IVF trade a little recall for large speedups. pgvector adds this to PostgreSQL, so vectors live next to your relational data with joins, transactions and org_id filtering.",
+  "why_md": "- Retrieval is the 'R' in RAG; its speed and recall bound answer quality.\n- pgvector lets a Postgres-strong engineer build RAG without a new datastore.\n- Multi-tenant filtering (org_id) interacts with ANN indexes in non-obvious ways - a classic production bug.\n- Interviews: HNSW vs IVF, pgvector vs dedicated vector DB, filtering trade-offs.",
+  "details_md": "### Exact vs approximate search\nExact k-NN computes distance to every vector: O(N x d). Fine for tens of thousands of rows, too slow for millions at low latency. ANN indexes search a subset and may miss some true neighbours; quality is measured as **recall** versus exact search.\n\n### HNSW\nHierarchical Navigable Small World builds a multi-layer graph: sparse upper layers for long jumps, dense bottom layer for local search. A query greedily walks the graph from an entry point. Parameters: `m` (links per node), `ef_construction` (build-time candidate list), and query-time `ef_search` (bigger = better recall, slower). Good recall/latency, no training step, but slower to build and memory-hungry.\n\n### IVF (ivfflat in pgvector)\nClusters vectors into `lists` with k-means at build time; a query scans only the `probes` nearest clusters. Faster to build and smaller, but needs representative data when the index is created (build after loading data) and recall drops if data drifts.\n\n### pgvector essentials\n`CREATE EXTENSION vector;` adds the `vector(n)` type. Distance operators: `<->` L2, `<=>` cosine distance, `<#>` negative inner product. An index is built per operator class (`vector_cosine_ops`, `vector_l2_ops`, `vector_ip_ops`) and is only used when the query's `ORDER BY embedding <=> $1 LIMIT k` uses the matching operator. Tune with `SET hnsw.ef_search` or `SET ivfflat.probes`, check with `EXPLAIN ANALYZE`.\n\n### Filtering and multi-tenancy\n`WHERE org_id = $2 ORDER BY embedding <=> $1 LIMIT 10` with an HNSW index finds the nearest candidates *first* and filters *after*: if org 42 owns 1% of rows, most candidates are discarded and you may get fewer than 10 results. Options: raise `ef_search`; recent pgvector versions offer iterative index scans that keep searching until enough rows pass the filter; partial indexes per large tenant or partitioning by org; or, for small tenants, skip the ANN index and do an exact scan over that org's rows using a B-tree on `org_id`. Always enforce the tenant filter in SQL (or RLS), never trust the application to post-filter.\n\n### pgvector vs dedicated vector DBs\npgvector: one system, ACID, joins with metadata, existing backups/ops; ideal up to millions of vectors. Dedicated engines (Qdrant, Milvus, Weaviate, Pinecone, etc.) offer built-in sharding, filtered-ANN optimisations, quantisation and hybrid search at larger scale, at the cost of another system to sync and secure.\n",
+  "code_md": "```sql\n-- pgvector schema for product/policy chunks, multi-tenant\nCREATE EXTENSION IF NOT EXISTS vector;\n\nCREATE TABLE doc_chunks (\n  id          bigserial PRIMARY KEY,\n  org_id      int    NOT NULL,\n  document_id bigint NOT NULL,\n  chunk_index int    NOT NULL,\n  content     text   NOT NULL,\n  metadata    jsonb  NOT NULL DEFAULT '{}',\n  embedding   vector(768) NOT NULL,          -- must equal the embedding model's dimension\n  UNIQUE (document_id, chunk_index)\n);\nCREATE INDEX ON doc_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);\nCREATE INDEX ON doc_chunks (org_id);\n\n-- Top-5 chunks for one org; operator <=> matches vector_cosine_ops so the index is usable\nSET hnsw.ef_search = 100;                    -- more candidates -> survives the org filter better\nSELECT id, content, 1 - (embedding <=> %(q)s::vector) AS cosine_similarity\nFROM doc_chunks\nWHERE org_id = %(org_id)s\nORDER BY embedding <=> %(q)s::vector\nLIMIT 5;\n```\n\n```python\n# psycopg2: pass the embedding as a pgvector literal (or use the pgvector-python adapter)\ndef to_pgvector(vec: list[float]) -> str:\n    return \"[\" + \",\".join(f\"{x:.7f}\" for x in vec) + \"]\"\n\ndef search(cur, org_id: int, query_vec: list[float], k: int = 5):\n    cur.execute(\n        '''SELECT id, content FROM doc_chunks\n           WHERE org_id = %s\n           ORDER BY embedding <=> %s::vector LIMIT %s''',\n        (org_id, to_pgvector(query_vec), k),\n    )\n    return cur.fetchall()\n```",
+  "use_cases_md": "- RAG over return/shipping policies and product manuals, filtered by org_id.\n- 'Similar products' from description embeddings for an e-commerce catalogue.\n- Semantic search over customer reviews per ASIN.\n- Retrieving relevant table descriptions to build a text-to-SQL prompt.",
+  "mistakes_md": "- **Operator/opclass mismatch** (`<->` query on a `vector_cosine_ops` index) - index not used, sequential scan.\n- **Building IVFFlat on an empty table** - clusters are meaningless; build after loading.\n- **Post-filtering a selective tenant filter** - fewer than k results, silently.\n- **No ORDER BY ... LIMIT** - the ANN index is only used for nearest-neighbour ordering with a limit.\n- **Mixing embeddings from different models/dimensions** in one column.\n- **Filtering tenants in Python after retrieval** - leaks and wrong top-k.",
+  "best_practices_md": "- Store vectors alongside chunk text, document id, org_id and metadata.\n- Start exact; add HNSW when latency demands; measure recall vs exact on a sample.\n- Match the distance operator to the opclass and the embedding model's intended metric.\n- Tune `ef_search`/`probes` with `EXPLAIN ANALYZE` and a recall test.\n- Enforce tenant filters in SQL/RLS; handle selective filters explicitly.\n- Record the embedding model + version per row or per table.",
+  "my_context_md": "You already run heavy PostgreSQL with JSONB, CTEs and a pooled psycopg2 setup (`AmazonVendorBankRecon/db.py` behind PgBouncer). pgvector slots into that stack: same pool, same `db_transaction()` context manager, same upsert patterns (`INSERT ... ON CONFLICT`) for re-embedding chunks. Every service in your repo is multi-org e-commerce data, so the org_id filtering section is the part to internalise.",
+  "revision_notes_md": "- Exact kNN = scan all; ANN = approximate, measured by recall.\n- HNSW: layered graph; m, ef_construction, ef_search; no training; more memory.\n- IVFFlat: k-means lists, probes; build after data loaded.\n- pgvector ops: <-> L2, <=> cosine distance, <#> negative inner product.\n- Opclass must match operator; ORDER BY ... LIMIT k uses the index.\n- Filters applied after ANN can return < k rows; raise ef_search / iterative scans / partition / exact scan per org.\n- pgvector = one system + joins + ACID; dedicated DBs = scale features.",
+  "exercises_md": "1. Run Postgres with pgvector in Docker, create `doc_chunks`, load 50k random 384-dim vectors across 100 orgs.\n2. Compare exact vs HNSW results for 50 queries: compute recall@10 and latency with different `ef_search` values.\n3. Reproduce the 'fewer than k results' issue with a tiny tenant and fix it (exact scan or higher ef_search).\n4. Build an IVFFlat index on an empty table vs a loaded one and compare recall.",
+  "related": [
+    "ai-embeddings",
+    "ai-semantic-search",
+    "ai-embedding-models",
+    "postgres-indexes",
+    "explain-analyze",
+    "ai-hybrid-search"
+  ],
+  "flashcards": [
+    {
+      "front": "pgvector operators?",
+      "back": "<-> L2 distance, <=> cosine distance, <#> negative inner product."
+    },
+    {
+      "front": "HNSW query-time knob in pgvector?",
+      "back": "hnsw.ef_search - larger means better recall, slower queries."
+    },
+    {
+      "front": "IVFFlat build caveat?",
+      "back": "It clusters existing data with k-means; build after loading representative data, tune lists/probes."
+    },
+    {
+      "front": "Risk of WHERE org_id = X with an HNSW index?",
+      "back": "Filter is applied after the approximate search, so a selective filter can return fewer than k rows."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Your index is `USING hnsw (embedding vector_cosine_ops)`. Which ORDER BY can use it?",
+      "options": [
+        "ORDER BY embedding <-> $1",
+        "ORDER BY cosine(embedding, $1) DESC",
+        "ORDER BY embedding <#> $1",
+        "ORDER BY embedding <=> $1"
+      ],
+      "answer_index": 3,
+      "explanation": "<=> is cosine distance, matching vector_cosine_ops."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which statement about IVFFlat vs HNSW is correct?",
+      "options": [
+        "IVFFlat should be built after loading data because it clusters existing vectors",
+        "HNSW requires k-means clustering",
+        "IVFFlat needs no training data",
+        "Both always return exact results"
+      ],
+      "answer_index": 0,
+      "explanation": "IVFFlat computes cluster centroids from existing rows at build time."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In pgvector, `SET hnsw.____ = 100;` increases the candidate list size at query time for better recall.",
+      "answers": [
+        "ef_search"
+      ],
+      "explanation": "hnsw.ef_search."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The fraction of true nearest neighbours an ANN index returns is called ____.",
+      "answers": [
+        "recall",
+        "recall@k"
+      ],
+      "explanation": "Recall vs exact search."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (post-filtering after an approximate search)",
+      "code": "rows = [  # (id, org_id, distance to query)\n    (1, 7, 0.10), (2, 7, 0.12), (3, 42, 0.15), (4, 7, 0.18),\n    (5, 7, 0.20), (6, 42, 0.31), (7, 42, 0.33), (8, 7, 0.40),\n]\n\ndef ann_then_filter(org, k, candidates):\n    nearest = sorted(rows, key=lambda r: r[2])[:candidates]\n    return [r[0] for r in nearest if r[1] == org][:k]\n\ndef filter_then_exact(org, k):\n    mine = [r for r in rows if r[1] == org]\n    return [r[0] for r in sorted(mine, key=lambda r: r[2])[:k]]\n\nprint(ann_then_filter(42, 3, candidates=4))\nprint(ann_then_filter(42, 3, candidates=8))\nprint(filter_then_exact(42, 3))",
+      "answers": [
+        "[3]\n[3, 6, 7]\n[3, 6, 7]"
+      ],
+      "explanation": "With only 4 candidates, just row 3 belongs to org 42 -> one result instead of three. A bigger candidate list (like raising ef_search) recovers [3, 6, 7], matching an exact search over the org's rows."
+    },
+    {
+      "type": "debug",
+      "prompt": "This RAG query is slow (sequential scan) and sometimes returns chunks from other customers. What's wrong and how do you fix it?",
+      "code": "-- index: CREATE INDEX ON doc_chunks USING hnsw (embedding vector_cosine_ops);\nrows = cur.execute(f\"\"\"\n    SELECT id, org_id, content, embedding <-> '{vec}' AS d\n    FROM doc_chunks ORDER BY d LIMIT 50\"\"\").fetchall()\nresults = [r for r in rows if r.org_id == org_id][:5]",
+      "answer": "- Query uses `<->` (L2) but the index is cosine (`vector_cosine_ops`), so the planner can't use it -> seq scan.\n- Tenant filtering in Python after fetching 50 rows: if a bug skips the filter, other orgs' content leaks; and you may get < 5 results.\n- f-string interpolation of the vector.\n\n```python\ncur.execute(\n    '''SELECT id, content FROM doc_chunks\n       WHERE org_id = %s\n       ORDER BY embedding <=> %s::vector\n       LIMIT 5''',\n    (org_id, to_pgvector(vec)))\n```\nPlus `SET hnsw.ef_search` higher (or iterative scans / exact scan for small tenants) so the filtered query still returns 5 rows; consider RLS on `org_id`.",
+      "rubric": [
+        "Operator must match the index opclass",
+        "Apply org_id filter in SQL (or RLS), not in Python",
+        "Parameterise the query",
+        "Handle filtered ANN returning fewer rows (ef_search/iterative/exact)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how an HNSW index finds nearest neighbours and what its parameters trade off.",
+      "answer": "HNSW builds a layered proximity graph. Each vector is a node linked to `m` near neighbours; upper layers contain few nodes and act like express lanes, the bottom layer contains all nodes. A query starts at the top entry point, greedily moves to the neighbour closest to the query, drops a layer, and repeats; at the bottom it keeps a candidate list of size `ef_search` and returns the best k. Larger `m` and `ef_construction` give a better graph (higher recall) but slower builds and more memory; larger `ef_search` raises recall and latency per query. It's approximate: greedy search can miss true neighbours, so you measure recall against exact search.",
+      "rubric": [
+        "Layered graph with greedy descent",
+        "m / ef_construction affect build quality, memory",
+        "ef_search trades recall for latency",
+        "Approximate - measure recall"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When would you choose pgvector over a dedicated vector database?",
+      "answer": "pgvector when you already run Postgres, vectors number in the low millions or less, you need joins with relational metadata (org, product, permissions), transactional consistency between documents and their chunks, and want one backup/security story. A dedicated vector DB when you have hundreds of millions of vectors, need horizontal sharding, heavy filtered-ANN workloads, built-in quantisation or hybrid search features, and can afford running and syncing another system.",
+      "rubric": [
+        "pgvector: existing Postgres, joins, ACID, simpler ops",
+        "Dedicated: very large scale, sharding, specialised features",
+        "Trade-off is extra system to sync/secure"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you implement multi-tenant vector search in PostgreSQL?",
+      "difficulty": "hard",
+      "answer_md": "Table `doc_chunks(org_id, document_id, chunk_index, content, metadata jsonb, embedding vector(d))`, B-tree on `org_id`, HNSW on `embedding` with the opclass matching the metric. Every query includes `WHERE org_id = $1 ORDER BY embedding <=> $2 LIMIT k`, ideally enforced by row-level security with the org set per connection/transaction so no code path can forget it.\n\nThe trap: HNSW returns approximate neighbours across *all* tenants, then the filter drops other orgs' rows, so small tenants get fewer than k results. Mitigations: higher `hnsw.ef_search`; pgvector's iterative index scans in recent versions; partition by org (or partial indexes) for big tenants; exact search (B-tree on org_id, then sort by distance) for small tenants where it's cheap. Validate with recall tests per tenant size."
+    },
+    {
+      "question": "Explain HNSW vs IVFFlat.",
+      "difficulty": "medium",
+      "answer_md": "**HNSW**: multi-layer graph, greedy navigation; tuned by `m`, `ef_construction`, `ef_search`. Strong recall/latency trade-off, no training step, can be built on an empty table and handles inserts well; slower to build and uses more memory.\n\n**IVFFlat**: k-means partitions vectors into `lists`; queries scan the `probes` closest lists. Faster to build and smaller, but must be built on representative data, and recall degrades as data drifts (rebuild periodically).\n\nRule of thumb: HNSW as the default for read-heavy RAG; IVFFlat when build time/memory matters and data is fairly static. Either way, measure recall@k against exact search and tune the query-time parameter."
+    }
+  ],
+  "category": "AI"
+}

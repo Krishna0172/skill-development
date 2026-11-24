@@ -1,0 +1,121 @@
+{
+  "slug": "python-oop-dataclasses",
+  "title": "OOP & Dataclasses",
+  "skill": "python",
+  "extra_skills": [
+    "backend-architecture"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "python",
+    "oop",
+    "classes",
+    "dataclasses",
+    "inheritance",
+    "protocols"
+  ],
+  "summary": "Classes bundle data and the behaviour that works on it. `@dataclass` writes the boring parts (`__init__`, `__repr__`, `__eq__`) for classes that mainly hold data. Prefer composition (objects holding other objects) over deep inheritance, and use properties, classmethods and dunder methods to make objects pleasant to use.",
+  "details_md": "### Classes in Python\nA class is itself an object; instances keep their attributes in `__dict__` (unless `__slots__` is used). Methods are functions whose first parameter receives the instance (`self`). Attribute lookup checks the instance, then the class, then base classes in **MRO** order (`Cls.__mro__`, C3 linearisation), which also determines what `super()` calls.\n\n- `@classmethod` receives the class (`cls`) - ideal for alternative constructors (`Config.from_env()`).\n- `@staticmethod` receives nothing special - a namespaced function.\n- `@property` exposes computed or validated attributes with attribute syntax.\n- Dunder methods plug into language features: `__repr__`, `__eq__`, `__hash__`, `__len__`, `__iter__`, `__enter__/__exit__`, `__call__`.\n\n### Dataclasses\n`@dataclass` inspects class annotations and generates `__init__`, `__repr__` and `__eq__`. Options:\n- `frozen=True` - immutable instances (assignment raises `FrozenInstanceError`) and hashable.\n- `slots=True` (3.10+) - generates `__slots__`: less memory, faster attribute access, no accidental new attributes.\n- `kw_only=True` (3.10+) - all fields keyword-only.\n- `order=True` - comparison methods.\n- `field(default_factory=list)` - safe mutable defaults (a plain `= []` raises `ValueError`).\n- `__post_init__` - validation or derived fields after init.\n- `dataclasses.asdict()`, `replace()` (copy with changes).\n\nDataclasses do **no runtime type validation**. For untrusted input (JSON, API bodies) use Pydantic models; dataclasses are for internal, already-validated data.\n\n### Inheritance vs composition\nInheritance models \"is-a\" and shares implementation; it couples child to parent internals. Composition (\"has-a\") injects collaborators: a `ReportProcessor` that *has* a `DatabaseManager` is easier to test (pass a fake) than one that *inherits* from it. Keep hierarchies shallow; use abstract base classes (`abc.ABC`, `@abstractmethod`) when you need to enforce an interface for subclasses.\n\n### Protocols (structural typing)\n`typing.Protocol` defines an interface by shape: any class with matching methods satisfies it, no inheritance required. Great for dependency injection and test doubles.\n\n### Encapsulation conventions\nPython has no private keyword. `_name` means \"internal\"; `__name` triggers name mangling (`_Class__name`) mainly to avoid clashes in subclasses. Use properties to add validation later without changing the public API.\n\n### Equality and hashing\nIf you define `__eq__`, Python sets `__hash__ = None` unless you define it, making instances unhashable. Frozen dataclasses with `eq=True` get a generated `__hash__` from their fields.\n\n### Enums\n`enum.Enum` / `StrEnum` (3.11+) give named constants - ideal for statuses like `Processing`/`Completed`/`Error` instead of raw strings scattered in code.",
+  "code_md": "```python\n# Dataclass with defaults, validation and derived fields\nfrom dataclasses import dataclass, field, asdict, replace\nfrom datetime import datetime, UTC\nfrom enum import StrEnum\n\nclass UploadStatus(StrEnum):\n    PROCESSING = \"Processing\"\n    COMPLETED = \"Completed\"\n    ERROR = \"Error\"\n\n@dataclass(slots=True, kw_only=True)\nclass UploadJob:\n    upload_id: int\n    org_id: int\n    report_type: str\n    status: UploadStatus = UploadStatus.PROCESSING\n    errors: list[str] = field(default_factory=list)     # safe mutable default\n    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))\n\n    def __post_init__(self):\n        if self.org_id <= 0:\n            raise ValueError(\"org_id must be positive\")\n\njob = UploadJob(upload_id=1, org_id=7, report_type=\"amazon_orders\")\ndone = replace(job, status=UploadStatus.COMPLETED)     # copy with change\nprint(asdict(done)[\"status\"])                          # Completed\n```\n\n```python\n# Frozen dataclass as a hashable value object / dict key\nfrom dataclasses import dataclass\n\n@dataclass(frozen=True, slots=True)\nclass ProductKey:\n    id: int\n    orgid: int\n\nstock = {ProductKey(101, 7): 40}\nprint(stock[ProductKey(101, 7)])      # 40 - equal & same hash\n# ProductKey(1, 2).id = 5  -> FrozenInstanceError\n```\n\n```python\n# Composition + Protocol for testability\nfrom typing import Protocol\n\nclass Writer(Protocol):\n    def write_rows(self, table: str, rows: list[dict]) -> int: ...\n\nclass ReportProcessor:\n    def __init__(self, writer: Writer):        # has-a, injected\n        self.writer = writer\n\n    @classmethod\n    def with_defaults(cls) -> \"ReportProcessor\":\n        return cls(writer=PrintWriter())\n\n    def run(self, rows: list[dict]) -> int:\n        clean = [r for r in rows if r.get(\"sku\")]\n        return self.writer.write_rows(\"inventory\", clean)\n\nclass PrintWriter:                              # satisfies Writer structurally\n    def write_rows(self, table, rows):\n        print(f\"{table}: {len(rows)} rows\")\n        return len(rows)\n\nReportProcessor.with_defaults().run([{\"sku\": \"A\"}, {\"sku\": None}])\n```\n\n```python\n# Property for validation without breaking the API\nclass Price:\n    def __init__(self, amount: float):\n        self.amount = amount              # goes through the setter\n\n    @property\n    def amount(self) -> float:\n        return self._amount\n\n    @amount.setter\n    def amount(self, value: float) -> None:\n        if value < 0:\n            raise ValueError(\"price cannot be negative\")\n        self._amount = round(value, 2)\n\n    def __repr__(self):\n        return f\"Price({self._amount})\"\n```",
+  "use_cases_md": "- Dataclasses for internal records: jobs, config objects, parsed rows, results passed between pipeline stages.\n- Frozen dataclasses as value objects and composite keys.\n- Classes that own a resource and its operations (a database manager, an API client with a session).\n- Abstract base classes / Protocols for pluggable processors, storage backends and test fakes.\n- Enums for statuses and fixed option sets.",
+  "mistakes_md": "- **Mutable class attributes shared by all instances** (`class A: items = []`). Fix: initialise in `__init__` or use `field(default_factory=list)`.\n- **Deep inheritance for code reuse** - fragile coupling. Fix: composition and small helper functions.\n- **Expecting dataclasses to validate types** - `UploadJob(org_id=\"7\")` is accepted. Fix: validate in `__post_init__` or use Pydantic for external input.\n- **Defining `__eq__` and then using instances in sets** - `__hash__` becomes None. Fix: `frozen=True` dataclass or define `__hash__` consistently.\n- **God classes** - one class doing DB access, parsing, HTTP and business rules. Fix: split responsibilities.\n- **Using classes where a function suffices** - a class with only `__init__` and one method is usually a function.",
+  "best_practices_md": "- Default to `@dataclass(slots=True)` for data holders; add `frozen=True` when immutability makes sense.\n- Inject dependencies through `__init__` so they can be swapped in tests.\n- Use `@classmethod` alternative constructors (`from_row`, `from_env`) instead of overloaded `__init__` logic.\n- Always implement a useful `__repr__` (dataclasses do it for you).\n- Prefer `Protocol` for interfaces you don't control, ABCs when you want shared implementation plus enforcement.\n- Replace magic status strings with `StrEnum`.",
+  "my_context_md": "- Your `DatabaseManager` class in helper.py is a resource-owning class: injecting it into processors (composition) rather than having processors create it themselves would make each of the 150+ report processors testable with a fake writer - relevant given there are no automated tests yet.\n- The `fs_upload` statuses (Processing/Completed/Error) are a natural `StrEnum`.\n- Your FastAPI apps already use Pydantic request models - the validating cousin of dataclasses; dataclasses fit internal structures like the background job entries you keep in the in-memory dict.",
+  "related": [
+    "python-typing",
+    "python-data-structures",
+    "fastapi-essentials",
+    "registry-dispatcher-pattern",
+    "pytest-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "Which methods does `@dataclass` generate by default?",
+      "back": "`__init__`, `__repr__`, `__eq__` (plus `__hash__` handling based on eq/frozen)."
+    },
+    {
+      "front": "How do you give a dataclass field a list default?",
+      "back": "`items: list[str] = field(default_factory=list)`"
+    },
+    {
+      "front": "What does `slots=True` do on a dataclass?",
+      "back": "Generates `__slots__`: lower memory, faster attribute access, prevents adding undeclared attributes."
+    },
+    {
+      "front": "classmethod vs staticmethod?",
+      "back": "classmethod receives `cls` (use for alternative constructors); staticmethod receives nothing (namespaced function)."
+    },
+    {
+      "front": "Do dataclasses validate types at runtime?",
+      "back": "No. Annotations are only used to find fields; use `__post_init__` or Pydantic for validation."
+    },
+    {
+      "front": "What is `typing.Protocol`?",
+      "back": "Structural interface: any class with matching methods/attributes satisfies it without inheriting."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "What happens with `@dataclass class A: items: list = []`?",
+      "options": [
+        "Each instance gets its own list",
+        "ValueError: mutable default not allowed",
+        "All instances share one list silently",
+        "TypeError at instantiation"
+      ],
+      "answer_index": 1,
+      "explanation": "Dataclasses reject list/dict/set defaults at class creation; use `field(default_factory=list)`."
+    },
+    {
+      "question": "Which is the best way to make a dataclass usable as a dict key?",
+      "options": [
+        "@dataclass(order=True)",
+        "@dataclass(slots=True)",
+        "@dataclass(kw_only=True)",
+        "@dataclass(frozen=True)"
+      ],
+      "answer_index": 3,
+      "explanation": "frozen=True (with eq=True default) generates a field-based `__hash__` and prevents mutation."
+    },
+    {
+      "question": "A ReportProcessor needs to write to the database. Which design is easiest to test?",
+      "options": [
+        "Inject a writer object via __init__",
+        "Inherit from DatabaseManager",
+        "Create a global connection inside run()",
+        "Use a staticmethod that opens a connection"
+      ],
+      "answer_index": 0,
+      "explanation": "Composition with dependency injection lets tests pass a fake writer."
+    },
+    {
+      "question": "What determines which method `super()` calls in multiple inheritance?",
+      "options": [
+        "Alphabetical class names",
+        "The order methods were defined",
+        "The MRO (C3 linearisation)",
+        "The first base class only"
+      ],
+      "answer_index": 2,
+      "explanation": "`super()` follows the class's method resolution order, visible via `Cls.__mro__`."
+    }
+  ],
+  "interview": [
+    {
+      "question": "When would you use a dataclass vs a Pydantic model vs a plain class?",
+      "difficulty": "medium",
+      "answer_md": "- **Dataclass**: internal data you already trust - records passed between functions, config objects, results. Zero dependencies, fast, generates `__init__/__repr__/__eq__`. No runtime validation or coercion.\n- **Pydantic model**: data crossing a trust boundary - API request/response bodies, JSON from third-party APIs, env-based settings. It validates and coerces (`\"7\"` -> `7`), produces clear error messages and JSON schema. FastAPI uses it for request parsing and OpenAPI docs. Costs some performance (much less in v2, which has a Rust core).\n- **Plain class**: objects defined mostly by **behaviour** and owned resources - a database manager holding a pool, an API client with a session, a state machine. Data is secondary.\n\nRule of thumb: validate at the edges with Pydantic, then convert to dataclasses or plain domain objects inside.\n```python\nclass OrderIn(BaseModel):          # edge\n    sku: str\n    qty: int = Field(ge=0)\n\n@dataclass(slots=True)\nclass OrderRow:                    # internal\n    sku: str\n    qty: int\n    org_id: int\n```"
+    },
+    {
+      "question": "Explain composition over inheritance with an example.",
+      "difficulty": "medium",
+      "answer_md": "Inheritance says \"B **is an** A\" and gives B all of A's implementation - and coupling to A's internals. Changes in the base ripple to every subclass, and mixing behaviours requires multiple inheritance.\n\nComposition says \"B **has an** A\": B holds a reference to a collaborator and delegates to it. Behaviours are swapped by passing different objects.\n\n```python\n# Inheritance: every processor IS a database manager - hard to test, rigid\nclass AmazonOrders(DatabaseManager):\n    def run(self, df): self.execute_batch(...)\n\n# Composition: processors HAVE a writer\nclass AmazonOrders:\n    def __init__(self, writer: Writer, notifier: Notifier):\n        self.writer, self.notifier = writer, notifier\n    def run(self, df):\n        n = self.writer.upsert(\"orders\", df)\n        self.notifier.done(n)\n```\nBenefits: tests inject fakes, writers can change (Postgres, S3, dry-run) without touching processors, and each class has one responsibility. Inheritance is still fine for genuine is-a relationships with small, stable base classes (e.g. custom exception hierarchies, ABCs defining a template method)."
+    },
+    {
+      "question": "What are __slots__ and when do they matter?",
+      "difficulty": "hard",
+      "answer_md": "By default each instance stores attributes in a per-instance `__dict__`, which is flexible but memory-heavy (a dict per object). Declaring `__slots__ = (\"a\", \"b\")` tells Python to allocate fixed slots via descriptors on the class instead, with no `__dict__`.\n\nEffects:\n- **Memory**: significantly smaller instances - matters when you create millions of objects (rows, events, nodes).\n- **Speed**: slightly faster attribute access.\n- **Safety**: assigning an undeclared attribute raises `AttributeError`, catching typos like `job.stauts = ...`.\n\nTrade-offs: no dynamic attributes; every class in the hierarchy needs `__slots__` to get the full benefit; `weakref` needs `__weakref__` in slots; class-level defaults conflict with slot names (dataclasses handle this for you).\n\nWith dataclasses just use `@dataclass(slots=True)` (3.10+). For tabular data at real scale, though, a pandas DataFrame or NumPy array will beat millions of Python objects regardless of slots."
+    }
+  ]
+}

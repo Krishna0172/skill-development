@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% from "macros.html" import question_form %}
+{% block title %}Assess: {{ topic.title }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><div class="small faint"><a href="/topics/{{ topic.id }}">{{ topic.title }}</a></div><h1>Assessment</h1>
+    <p>{{ questions|length }} questions. Pass mark {{ pass_pct }}%. Answer everything before revealing model answers — self-graded questions count only the points you tick.</p></div>
+</div>
+<form method="post" action="/topics/{{ topic.id }}/assess">
+  <input type="hidden" name="started" value="{{ started }}">
+  {% for q in questions %}{{ question_form(q, loop.index) }}{% endfor %}
+  <div class="row mt"><button class="btn primary">Submit answers</button><a class="btn" href="/topics/{{ topic.id }}">Cancel</a></div>
+</form>
+{% endblock %}

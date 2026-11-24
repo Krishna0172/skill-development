@@ -1,0 +1,185 @@
+{
+  "slug": "sql-views-materialized",
+  "title": "Views and materialized views",
+  "skill": "postgresql",
+  "extra_skills": [
+    "query-optimization",
+    "database-design"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "views",
+    "materialized-view",
+    "refresh",
+    "security",
+    "reporting"
+  ],
+  "summary": "A view is a saved query you can select from like a table; it stores no data and always shows current results. A materialized view stores the query result on disk, so reads are fast but the data is stale until you refresh it. Choosing between them is a speed-versus-freshness decision.",
+  "why_md": "- Views hide complex joins behind a stable name, so many services can share one definition.\n- Materialized views turn slow dashboards and reports into instant reads.\n- 'View vs materialized view' and 'how do you refresh without blocking readers' are common interview questions.\n- Views can restrict which columns or rows a role sees (a simple security layer).",
+  "details_md": "### Plain view\n`CREATE VIEW active_customers AS SELECT id, name FROM customers WHERE deleted_at IS NULL;` stores only the query text. When you `SELECT * FROM active_customers`, PostgreSQL **expands the definition inline** and plans the whole thing as if you had written the underlying query, so filters you add on top can still use indexes of the base tables. A view therefore costs nothing to store and is always current, but is exactly as slow as its query.\n\nUse `CREATE OR REPLACE VIEW` to change the definition (you can add columns at the end but not drop or reorder). `DROP VIEW` removes it; objects depending on it block the drop unless you use CASCADE.\n\n### Updatable views\nSimple views (one table, no aggregates, no DISTINCT, no GROUP BY) are automatically updatable: INSERT/UPDATE/DELETE go to the base table. `WITH CHECK OPTION` rejects writes that would make the row disappear from the view. Complex views need `INSTEAD OF` triggers.\n\n### Security\nViews can expose only chosen columns/rows, and you grant privileges on the view rather than the table. Caveat: by default the view runs with the **owner's** privileges; in PostgreSQL 15+ `WITH (security_invoker = true)` makes it run with the caller's rights, which matters with row-level security.\n\n### Materialized view\n`CREATE MATERIALIZED VIEW daily_sales AS SELECT ... GROUP BY ...;` runs the query once and **stores the rows**. You can index it like a table. Data does not change until `REFRESH MATERIALIZED VIEW daily_sales;`, which re-runs the query and locks the view against reads while it swaps in new data.\n`REFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales;` builds the new result beside the old one and applies the difference, so readers are not blocked. It requires at least one **unique index** on the materialized view and is slower than a plain refresh. `WITH NO DATA` creates it empty (not scannable until refreshed). PostgreSQL does not refresh materialized views automatically: schedule it (cron, pg_cron, your job runner) or refresh from the loader after each batch.\n\n### Choosing\n- Cheap query, need current data: plain view.\n- Expensive aggregation read often, staleness of minutes/hours acceptable: materialized view.\n- Need incremental freshness: maintain a summary table with your own upserts/triggers instead.\n\n### Caveat on layers\nViews stacked on views make plans hard to read and can hide expensive joins; check `EXPLAIN` on the final query.",
+  "code_md": "```sql\n-- Plain view: a named query\nCREATE VIEW order_summary AS\nSELECT o.id, c.name AS customer, o.total, o.status\nFROM orders o\nJOIN customers c ON c.id = o.customer_id;\n\nSELECT * FROM order_summary WHERE status = 'paid';   -- planned as the inlined query\n```\n```sql\n-- Materialized view for an expensive daily report\nCREATE MATERIALIZED VIEW daily_sales AS\nSELECT date_trunc('day', created_at) AS day,\n       count(*)                      AS orders,\n       sum(total)                    AS revenue\nFROM orders\nWHERE status = 'paid'\nGROUP BY 1\nWITH DATA;\n\n-- A unique index enables CONCURRENTLY refresh\nCREATE UNIQUE INDEX daily_sales_day_uidx ON daily_sales (day);\n\nREFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales;   -- readers are not blocked\n```\n```sql\n-- Restrict rows/columns and run with the caller's rights (PostgreSQL 15+)\nCREATE VIEW my_orders WITH (security_invoker = true) AS\nSELECT id, total, status FROM orders;\nGRANT SELECT ON my_orders TO reporting_role;\n```",
+  "use_cases_md": "- Dashboard of daily revenue per marketplace served from a materialized view refreshed after each import.\n- A `v_orders_enriched` view joining orders, customers and shipments, used by several services.\n- A read-only reporting role granted access to views only.\n- Backward compatibility: keep an old table name alive as a view during a schema migration.",
+  "mistakes_md": "- **Expecting a plain view to be fast**: it is just the query; heavy joins stay heavy.\n- **Forgetting that materialized views go stale**: nothing refreshes them automatically.\n- **`REFRESH ... CONCURRENTLY` without a unique index**: error. Create one first.\n- **Plain REFRESH during business hours**: blocks readers while it runs. Use CONCURRENTLY.\n- **`SELECT *` in a view**: the column list is fixed at creation, later new base columns do not appear and can cause confusion.\n- **Deep view stacks**: unreadable plans, accidental cartesian joins.",
+  "best_practices_md": "- Name views with a clear prefix (`v_`, `mv_`).\n- List columns explicitly; avoid `SELECT *` in definitions.\n- Index materialized views for the access pattern; add a unique index to enable CONCURRENTLY.\n- Schedule refreshes and monitor their duration and last refresh time.\n- Use `security_invoker` (PG15+) when callers' privileges or RLS must apply.\n- Check `EXPLAIN` of queries on top of views.",
+  "my_context_md": "",
+  "revision_notes_md": "- View = stored query text; no data; always fresh; inlined into the plan.\n- Materialized view = stored rows; fast; stale until REFRESH.\n- `REFRESH MATERIALIZED VIEW` locks readers; `CONCURRENTLY` does not but needs a unique index and is slower.\n- Materialized views can be indexed.\n- Simple views are auto-updatable; `WITH CHECK OPTION` guards writes.\n- Views use owner privileges unless `security_invoker = true` (PG15+).\n- No automatic refresh: use cron/pg_cron/job runner.\n- Alternative for incremental freshness: your own summary table.",
+  "exercises_md": "1. Create a view joining orders and customers and compare its `EXPLAIN` with the equivalent hand-written join.\n2. Build a materialized view of daily revenue, insert new orders, show that it is stale, then refresh it.\n3. Try `REFRESH ... CONCURRENTLY` before and after creating a unique index and note the error.\n4. Write a small Python function that refreshes the materialized view after an import job completes.",
+  "related": [
+    "sql-ctes",
+    "sql-group-by",
+    "postgres-indexes",
+    "explain-analyze"
+  ],
+  "flashcards": [
+    {
+      "front": "Does a plain view store data?",
+      "back": "No, only the query; it is expanded into the calling query and is always current."
+    },
+    {
+      "front": "Materialized view downside?",
+      "back": "Data is stale until refreshed; refreshing costs time and a plain refresh blocks readers."
+    },
+    {
+      "front": "What does REFRESH ... CONCURRENTLY require?",
+      "back": "At least one UNIQUE index on the materialized view; it avoids blocking readers."
+    },
+    {
+      "front": "Are materialized views refreshed automatically?",
+      "back": "No; schedule it yourself (cron, pg_cron, job runner)."
+    },
+    {
+      "front": "What does WITH CHECK OPTION do?",
+      "back": "Rejects inserts/updates through the view that would produce rows not visible through it."
+    },
+    {
+      "front": "Can you index a view?",
+      "back": "Not a plain view (index the base tables); you can index a materialized view."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A plain view in PostgreSQL ...",
+      "options": [
+        "Must be refreshed",
+        "Cannot be joined",
+        "Stores a copy of the data",
+        "Stores only the query and is always current"
+      ],
+      "answer_index": 3,
+      "explanation": "It is a stored query text expanded at run time."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is required for REFRESH MATERIALIZED VIEW CONCURRENTLY?",
+      "options": [
+        "A primary key on the base table",
+        "A unique index on the materialized view",
+        "WITH NO DATA",
+        "Superuser"
+      ],
+      "answer_index": 1,
+      "explanation": "CONCURRENTLY diffs old and new rows using a unique index."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Dashboard query takes 8 seconds, data may be 1 hour old. Best tool?",
+      "options": [
+        "UNION ALL",
+        "Plain view",
+        "Materialized view refreshed hourly",
+        "Bigger work_mem only"
+      ],
+      "answer_index": 2,
+      "explanation": "Precompute and store the result, refresh on a schedule."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Create a stored, indexable snapshot of a query with CREATE ____ VIEW.",
+      "answers": [
+        "materialized"
+      ],
+      "explanation": "CREATE MATERIALIZED VIEW."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To update a materialized view without blocking readers: REFRESH MATERIALIZED VIEW ____ name;",
+      "answers": [
+        "concurrently"
+      ],
+      "explanation": "CONCURRENTLY needs a unique index."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (SQLite views behave like PostgreSQL plain views)",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table o(id integer primary key, total integer, status text);\"\n                \"insert into o(total,status) values (10,'paid'),(20,'new'),(30,'paid');\"\n                \"create view paid as select id, total from o where status = 'paid';\")\nprint(c.execute(\"select count(*), sum(total) from paid\").fetchone())\nc.execute(\"insert into o(total,status) values (5,'paid')\")\nc.execute(\"update o set status='paid' where id=2\")\nprint(c.execute(\"select count(*), sum(total) from paid\").fetchone())",
+      "answers": [
+        "(2, 40)\n(4, 65)"
+      ],
+      "explanation": "The view re-runs its query each time so it sees later changes."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (a manual 'materialized view' as a table)",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table o(id integer primary key, total integer);\"\n                \"insert into o(total) values (10),(20);\"\n                \"create table mv as select count(*) n, sum(total) s from o;\")\nc.execute(\"insert into o(total) values (70)\")\nprint(c.execute(\"select n, s from mv\").fetchone())\nc.executescript(\"delete from mv; insert into mv select count(*), sum(total) from o;\")\nprint(c.execute(\"select n, s from mv\").fetchone())",
+      "answers": [
+        "(2, 30)\n(3, 100)"
+      ],
+      "explanation": "The snapshot stays stale until it is rebuilt."
+    },
+    {
+      "type": "debug",
+      "prompt": "The nightly job fails with an error. What is wrong and how do you fix it?",
+      "code": "REFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales;\n-- ERROR: cannot refresh materialized view \"public.daily_sales\" concurrently\n-- HINT: Create a unique index with no WHERE clause on one or more columns of the materialized view.",
+      "answer": "CONCURRENTLY needs a unique index (not partial) on the materialized view so PostgreSQL can match old and new rows.\n```sql\nCREATE UNIQUE INDEX daily_sales_day_uidx ON daily_sales (day);\nREFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales;\n```",
+      "rubric": [
+        "Unique index required",
+        "Index must not be partial",
+        "Create it once, then refresh concurrently"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between a view and a materialized view and how to choose.",
+      "answer": "A view is a saved query: no storage, always current, as slow as its query. A materialized view stores the result rows so reads are fast and indexable, but it is stale until refreshed. Choose a view for freshness and cheap queries, a materialized view for expensive aggregates where some staleness is acceptable.",
+      "rubric": [
+        "View stores no data",
+        "Materialized view stores and goes stale",
+        "Decision is speed versus freshness"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you keep a daily revenue materialized view fresh without blocking dashboards?",
+      "answer": "Create a unique index on the day column, then run `REFRESH MATERIALIZED VIEW CONCURRENTLY` from a scheduler (pg_cron, cron or your job runner) after the nightly import. Monitor refresh duration; if too slow consider an incremental summary table.",
+      "rubric": [
+        "Unique index",
+        "CONCURRENTLY refresh",
+        "Scheduled after data load"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How does PostgreSQL execute a query on a view?",
+      "difficulty": "medium",
+      "answer_md": "The rewriter replaces the view reference with its definition (a subquery), and the planner optimises the combined query. Predicates and joins can be pushed down into the view's tables, so indexes are used. Nothing is cached, so the view is as expensive as the query it hides."
+    },
+    {
+      "question": "What are the trade-offs of REFRESH CONCURRENTLY?",
+      "difficulty": "medium",
+      "answer_md": "Readers are not blocked, but it needs a unique index, computes the full new result into a temp table and diffs it against the old, so it is slower and uses more resources than a plain refresh. It also still reads the entire source data every time."
+    },
+    {
+      "question": "When would you avoid a materialized view?",
+      "difficulty": "hard",
+      "answer_md": "When data must be near-real-time or the base data is huge and refresh would take too long. Then maintain an incremental summary table (upsert on write or via triggers/CDC), or use partial recomputation of recent partitions."
+    },
+    {
+      "question": "How can views help security?",
+      "difficulty": "easy",
+      "answer_md": "Expose only needed columns and rows through a view and grant privileges on it rather than on the base table. With `security_invoker = true` (PG 15+) the view runs with the caller's privileges, so row-level security still applies."
+    }
+  ]
+}

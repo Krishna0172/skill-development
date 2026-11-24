@@ -1,0 +1,154 @@
+{
+  "slug": "be-alembic-migrations",
+  "title": "Schema migrations with Alembic (and zero-downtime changes)",
+  "skill": "sqlalchemy",
+  "extra_skills": [
+    "postgresql",
+    "ci-cd",
+    "database-design"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "alembic",
+    "migrations",
+    "schema-changes",
+    "zero-downtime",
+    "backfill",
+    "ci"
+  ],
+  "summary": "Migrations put database schema changes under version control: each Alembic revision has `upgrade()`/`downgrade()` functions and points to its parent, forming a chain recorded in the `alembic_version` table. Autogenerate drafts revisions from SQLAlchemy models, but you review every one. On busy Postgres tables, changes follow expand → migrate → contract patterns so deploys never lock or break running code.",
+  "why_md": "- Ad-hoc `ALTER TABLE` in a SQL console means environments drift and nobody knows the real schema.\n- Migrations make schema changes reviewable, repeatable in CI, and deployable alongside code.\n- Zero-downtime techniques (nullable column, batched backfill, `NOT VALID` constraints, concurrent indexes) prevent production lockups.\n- Interviewers ask how you'd rename a column or add NOT NULL on a big table without downtime.",
+  "details_md": "### How Alembic works\n`alembic init migrations` creates `alembic.ini`, `env.py` (connects and sets `target_metadata`) and `versions/`. Each revision file has `revision`, `down_revision` (its parent) and `upgrade()`/`downgrade()` using `op.*` (`op.add_column`, `op.create_index`, `op.execute`). The database's `alembic_version` table stores the current head; `alembic upgrade head` applies revisions in chain order, `alembic downgrade -1` reverts one, `alembic current`/`history` inspect state. Two branches with the same parent produce **multiple heads**; fix with `alembic merge`.\n\n### Autogenerate\n`alembic revision --autogenerate -m \"add listings.asin\"` diffs `target_metadata` (your SQLAlchemy models) against the live DB. It detects tables, columns, nullability, indexes, FKs; it does **not** reliably detect renames (shows drop + add — data loss!), some type changes, CHECK constraints, or server defaults. Always read and edit the file. Without ORM models (raw SQL codebases) you write revisions by hand with `op.execute(\"...\")` — still worthwhile for versioning and ordering.\n\n### Data migrations\nSchema and data changes can live in a revision (`op.execute(\"UPDATE ...\")`), but large backfills inside one migration transaction hold locks and bloat WAL. Do big backfills in batches via a separate script/job, keep migrations fast, and never import application models into migrations (they change later) — use `sa.table()` lightweight definitions or raw SQL.\n\n### Zero-downtime patterns (expand → migrate → contract)\n- **Add a NOT NULL column**: add nullable (fast, metadata-only) → deploy code writing it → backfill in batches → add `CHECK (col IS NOT NULL) NOT VALID` then `VALIDATE CONSTRAINT` (doesn't block writes) → `SET NOT NULL` (PG12+ uses the validated check to skip the scan). Adding a column with a constant default is metadata-only since PG11.\n- **Rename**: add new column, dual-write, backfill, switch reads, drop old later.\n- **Indexes**: `CREATE INDEX CONCURRENTLY` (must run outside a transaction: `with op.get_context().autocommit_block():`).\n- **FKs**: add `NOT VALID`, then validate.\n- Set `lock_timeout` so a migration waiting for a lock fails fast instead of queueing all traffic behind it.\n\n### In CI/CD\nCI spins up Postgres, runs `alembic upgrade head` on an empty DB (and ideally upgrade → downgrade → upgrade), then tests. Check for multiple heads. Deploy runs migrations once (a pre-deploy ECS task), not from every app container at startup.",
+  "code_md": "```python\n# versions/20241118_add_asin.py\n\"\"\"add listings.asin (expand step)\"\"\"\nfrom alembic import op\nimport sqlalchemy as sa\n\nrevision = \"a1b2c3d4e5f6\"\ndown_revision = \"9f8e7d6c5b4a\"\n\ndef upgrade():\n    op.execute(\"SET lock_timeout = '3s'\")\n    op.add_column(\"listings\", sa.Column(\"asin\", sa.Text(), nullable=True))   # fast, metadata only\n    with op.get_context().autocommit_block():                              # CONCURRENTLY can't run in a tx\n        op.create_index(\"ix_listings_org_asin\", \"listings\", [\"org_id\", \"asin\"],\n                        postgresql_concurrently=True, if_not_exists=True)\n\ndef downgrade():\n    with op.get_context().autocommit_block():\n        op.drop_index(\"ix_listings_org_asin\", table_name=\"listings\", postgresql_concurrently=True)\n    op.drop_column(\"listings\", \"asin\")\n```\n\n```bash\nalembic revision --autogenerate -m \"add listings.asin\"   # draft from models -> REVIEW IT\nalembic upgrade head                                      # apply all pending\nalembic downgrade -1                                      # revert last\nalembic current && alembic heads                          # where am I / multiple heads?\nalembic upgrade head --sql > plan.sql                     # offline SQL for review\n```\n\n```sql\n-- contract step, after code writes asin and the batched backfill finished\nALTER TABLE listings ADD CONSTRAINT listings_asin_nn CHECK (asin IS NOT NULL) NOT VALID;\nALTER TABLE listings VALIDATE CONSTRAINT listings_asin_nn;   -- scans without blocking writes\nALTER TABLE listings ALTER COLUMN asin SET NOT NULL;         -- PG12+: uses the valid check, no full scan\nALTER TABLE listings DROP CONSTRAINT listings_asin_nn;\n```",
+  "use_cases_md": "- Adding a `marketplace_code` column to a 50M-row orders table without blocking ingestion.\n- Versioning the schema used by a new FastAPI service so dev, staging and prod match.\n- Creating indexes concurrently for a new dashboard query.\n- Splitting a JSONB field into typed columns: add columns → backfill in batches → switch reads → drop JSONB keys.\n- CI job that fails a PR if migrations don't apply cleanly to an empty database or create two heads.",
+  "mistakes_md": "- **Trusting autogenerate blindly**: a renamed column becomes drop + add, deleting data.\n- **`ADD COLUMN … NOT NULL` with a volatile default or immediate NOT NULL on a big table** → long lock/rewrite.\n- **`CREATE INDEX` without CONCURRENTLY** on a hot table → writes blocked for minutes.\n- **Backfilling millions of rows in one transaction** inside the migration.\n- **Importing app models in migrations** — they break when models change later.\n- **Running migrations from every container on startup** → races between tasks.\n- **Dropping a column in the same deploy that stops using it** → old running code crashes.\n- **No downgrade or untested downgrade**.",
+  "best_practices_md": "- Small, single-purpose revisions; review every autogenerated diff.\n- Expand → migrate → contract across separate deploys.\n- `lock_timeout` in migrations; CONCURRENTLY for indexes; `NOT VALID` + `VALIDATE` for constraints.\n- Batched backfills as separate jobs, with progress and resumability.\n- Run migrations once per deploy as a dedicated step; CI checks upgrade/downgrade and single head.\n- Use naming conventions in `MetaData(naming_convention=...)` so constraints have stable names.",
+  "my_context_md": "Your services use raw SQL with psycopg2 and no Alembic, so schema changes across the 179 services sharing one Postgres presumably happen outside a versioned migration chain. Alembic works without an ORM: hand-written revisions with `op.execute(...)` would give you ordering, history and CI checks for that shared schema. The zero-downtime patterns matter most for the large ingestion tables your `ECSMarketplaceDataUpload` writes to.",
+  "revision_notes_md": "- Revision = `revision`, `down_revision`, `upgrade()`, `downgrade()`; state in `alembic_version`.\n- `alembic revision --autogenerate -m`, `upgrade head`, `downgrade -1`, `current`, `heads`, `merge`.\n- Autogenerate misses renames (drop+add!), some types, CHECKs — review.\n- No app model imports in migrations.\n- Expand → migrate → contract.\n- NOT NULL safely: nullable → backfill batches → CHECK NOT VALID → VALIDATE → SET NOT NULL.\n- `CREATE INDEX CONCURRENTLY` via `autocommit_block()`.\n- `SET lock_timeout` in migrations.\n- CI: fresh DB upgrade, downgrade round-trip, single head.",
+  "exercises_md": "1. Set up Alembic against a local Postgres for a toy project with raw-SQL revisions (`op.execute`) — create two tables, then add a column in a second revision.\n2. Write a three-deploy plan (expand/migrate/contract) for renaming `orders.mkt` to `orders.marketplace_code` on a large table.\n3. Write a batched backfill script (10k rows per batch by primary key range, commit per batch, resumable) and time it.\n4. Add a CI step (GitHub Actions with a Postgres service) that runs `alembic upgrade head`, `downgrade base`, `upgrade head` and fails on multiple heads.",
+  "related": [
+    "sqlalchemy-essentials",
+    "database-normalization",
+    "postgres-indexes",
+    "be-postgres-locking-deadlocks",
+    "github-actions-ci",
+    "transactions-isolation"
+  ],
+  "flashcards": [
+    {
+      "front": "Where does Alembic record which revision a database is at?",
+      "back": "In the `alembic_version` table."
+    },
+    {
+      "front": "What does autogenerate do with a renamed column?",
+      "back": "Emits drop column + add column — data loss unless you rewrite it as `op.alter_column(..., new_column_name=...)`."
+    },
+    {
+      "front": "How do you add NOT NULL to a big table without a long blocking scan?",
+      "back": "Backfill, add CHECK (col IS NOT NULL) NOT VALID, VALIDATE CONSTRAINT, then SET NOT NULL (PG12+ skips the scan)."
+    },
+    {
+      "front": "Why must CREATE INDEX CONCURRENTLY be outside a transaction in Alembic?",
+      "back": "Postgres forbids it inside a transaction block; use `op.get_context().autocommit_block()`."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which change is safe to run directly on a large, busy Postgres 16 table?",
+      "options": [
+        "`CREATE INDEX ix ON orders(asin)`",
+        "`ALTER TABLE orders ADD COLUMN note text` (nullable, no default)",
+        "`ALTER TABLE orders ALTER COLUMN amount TYPE numeric(14,2)` from text",
+        "`UPDATE orders SET status = 'x'` for all 80M rows in one transaction"
+      ],
+      "answer_index": 1,
+      "explanation": "Adding a nullable column without a default is a quick catalog change. The others block writes for a long time or rewrite the table."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Two feature branches each added a migration with the same `down_revision`. After merging both, `alembic upgrade head` complains. What's the fix?",
+      "options": [
+        "Delete one of the migrations",
+        "Run `alembic stamp head`",
+        "Edit `alembic_version` manually",
+        "Create a merge revision with `alembic merge` that has both as parents"
+      ],
+      "answer_index": 3,
+      "explanation": "Two revisions sharing a parent create multiple heads; `alembic merge heads -m ...` creates a revision with a tuple down_revision joining them."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To create an index without blocking writes, Postgres uses `CREATE INDEX ____ ix_name ON t(col)`.",
+      "answers": [
+        "CONCURRENTLY",
+        "concurrently"
+      ],
+      "explanation": "CONCURRENTLY builds the index without holding a write-blocking lock (slower, and cannot run in a transaction)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To add a constraint without checking existing rows immediately, add it as `NOT ____` and validate it later.",
+      "answers": [
+        "VALID",
+        "valid"
+      ],
+      "explanation": "`NOT VALID` enforces it for new rows only; `VALIDATE CONSTRAINT` checks old rows with a weaker lock."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib code resolves an Alembic-style revision chain from `down_revision` pointers. What does it print?",
+      "code": "revisions = {\n    \"c3\": \"b2\",\n    \"a1\": None,\n    \"d4\": \"c3\",\n    \"b2\": \"a1\",\n}\n\ndef upgrade_path(current, revs):\n    children = {parent: rev for rev, parent in revs.items()}\n    path, node = [], current\n    while node in children:\n        node = children[node]\n        path.append(node)\n    return path\n\nheads = [r for r in revisions if r not in revisions.values()]\nprint(\"heads:\", heads)\nprint(\"from b2:\", upgrade_path(\"b2\", revisions))\nprint(\"from empty:\", upgrade_path(None, revisions))\n",
+      "answers": [
+        "heads: ['d4']\nfrom b2: ['c3', 'd4']\nfrom empty: ['a1', 'b2', 'c3', 'd4']"
+      ],
+      "explanation": "A head is a revision nobody points to as parent — only d4. Upgrading walks child pointers: from b2 apply c3 then d4; from an empty DB (None) start with the base revision a1."
+    },
+    {
+      "type": "debug",
+      "prompt": "This migration caused a 6-minute outage on the `orders` table during deploy. What went wrong and how should it be written?",
+      "code": "def upgrade():\n    op.add_column(\"orders\", sa.Column(\"marketplace_code\", sa.Text(), nullable=False,\n                                      server_default=\"AMZ_US\"))\n    op.execute(\"UPDATE orders SET marketplace_code = m.code FROM marketplaces m \"\n               \"WHERE m.id = orders.marketplace_id\")\n    op.create_index(\"ix_orders_mkt\", \"orders\", [\"marketplace_code\"])\n",
+      "answer": "- The single-statement `UPDATE` of every row runs inside the migration transaction: it locks all rows (blocking concurrent writes), generates huge WAL and holds the ACCESS EXCLUSIVE lock taken by `ADD COLUMN` until commit, blocking even reads.\n- `create_index` without CONCURRENTLY blocks writes while building.\n- No `lock_timeout`.\n\nSplit into expand / backfill / contract:\n```python\ndef upgrade():\n    op.execute(\"SET lock_timeout = '3s'\")\n    op.add_column(\"orders\", sa.Column(\"marketplace_code\", sa.Text(), nullable=True))\n    with op.get_context().autocommit_block():\n        op.create_index(\"ix_orders_mkt\", \"orders\", [\"marketplace_code\"], postgresql_concurrently=True)\n```\nThen deploy code that writes the column, backfill in batches (e.g. 10k ids per transaction) via a separate job, and finally add `CHECK … NOT VALID` → `VALIDATE` → `SET NOT NULL` in a later migration.",
+      "rubric": [
+        "Full-table UPDATE in the migration transaction holds locks/WAL",
+        "ADD COLUMN lock held until commit blocks reads/writes",
+        "Index built without CONCURRENTLY",
+        "Expand/backfill in batches/contract with lock_timeout"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the expand-migrate-contract approach using renaming `orders.mkt` to `orders.marketplace_code` as the example.",
+      "answer": "Running code and schema must stay compatible at every step, because during a deploy old and new versions run side by side.\n1. **Expand** (migration 1): add `marketplace_code` nullable. Deploy code that writes **both** columns and still reads `mkt` (or a trigger syncs them).\n2. **Migrate**: batched backfill copying `mkt` into `marketplace_code` where null; verify counts match.\n3. **Switch reads**: deploy code reading `marketplace_code` (still dual-writing).\n4. **Contract** (later migration): stop writing `mkt`, then drop it — only after no running code references it. Add NOT NULL via NOT VALID check → VALIDATE → SET NOT NULL if needed.\nEach step is reversible on its own, and no step takes a long lock.",
+      "rubric": [
+        "Old and new code run simultaneously during deploys",
+        "Add new column + dual write",
+        "Batched backfill then switch reads",
+        "Drop old column in a later deploy"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Should each app container run `alembic upgrade head` on startup? What would you do instead?",
+      "answer": "No: with N tasks starting together, several run migrations concurrently (races, lock contention, partial failures), and a failing migration crash-loops every container. Run migrations **once per deploy** as a separate step — e.g. a one-off ECS task or CI/CD job before rolling out the new service version — with the deploy halting if it fails. Migrations must be backward compatible with the currently running version (expand first), so the order 'migrate then deploy' is safe.",
+      "rubric": [
+        "Concurrent runs race / crash loops",
+        "Dedicated migration step once per deploy",
+        "Backward-compatible migrations make migrate-then-deploy safe"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you add a NOT NULL column with a computed value to a 100-million-row table with zero downtime?",
+      "difficulty": "hard",
+      "answer_md": "1. **Expand**: `ALTER TABLE … ADD COLUMN x type NULL` with `lock_timeout` set — metadata-only. (A *constant* default is also metadata-only since PG11, but a computed value isn't.)\n2. **Write path**: deploy code that sets `x` for new and updated rows (or a trigger).\n3. **Backfill** in batches outside the migration: `UPDATE t SET x = … WHERE id BETWEEN %s AND %s AND x IS NULL`, ~5-50k rows per transaction, commit each, sleep briefly to limit replication lag and WAL bursts, make it resumable by tracking the last id.\n4. **Constraint**: `ADD CONSTRAINT t_x_nn CHECK (x IS NOT NULL) NOT VALID` (instant), then `VALIDATE CONSTRAINT` (scans with SHARE UPDATE EXCLUSIVE — doesn't block reads/writes), then `ALTER COLUMN x SET NOT NULL`, which on PG12+ uses the valid CHECK to skip the full scan, then drop the CHECK.\n5. If an index is needed, `CREATE INDEX CONCURRENTLY`.\nEach step is a separate migration/deploy so old code keeps working throughout."
+    },
+    {
+      "question": "What are the limits of Alembic autogenerate and how do you work with them?",
+      "difficulty": "medium",
+      "answer_md": "Autogenerate compares your SQLAlchemy `MetaData` with the database. It handles added/removed tables and columns, nullability, most indexes, unique constraints and foreign keys. It doesn't detect **renames** (it emits drop + add, which loses data), may miss or misreport some **type changes** (configurable with `compare_type`), doesn't handle CHECK constraints well, ignores things not in metadata (views, functions, triggers, extensions, partitions), and can flag noise from server defaults. It also knows nothing about *how* to make a change safely — no CONCURRENTLY, no batching.\n\nSo: treat output as a draft; review every revision in PR; rewrite renames as `op.alter_column(new_column_name=...)` or expand/contract; add `lock_timeout` and concurrent index creation by hand; use naming conventions for deterministic constraint names; and test upgrade/downgrade on a real Postgres in CI."
+    }
+  ]
+}

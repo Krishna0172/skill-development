@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% from "macros.html" import question_form, stat %}
+{% block title %}Result{% if r.topic %}: {{ r.topic.title }}{% endif %}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>{% if r.topic %}<div class="small faint"><a href="/topics/{{ r.topic.id }}">{{ r.topic.title }}</a></div>{% endif %}
+    <h1>{{ r.mode|label }} result</h1><p>{{ r.taken_at|date }}{% if r.duration_seconds %} · {{ (r.duration_seconds / 60)|round|int }} min{% endif %}</p></div>
+  <div class="actions">{% if r.topic %}<a class="btn" href="/topics/{{ r.topic.id }}/assess">Retake</a><a class="btn primary" href="/topics/{{ r.topic.id }}">Back to topic</a>{% endif %}</div>
+</div>
+<div class="grid g3 mb">
+  {{ stat("Score", (r.score_pct|round|int) ~ "%", r.score ~ " / " ~ r.total ~ " points") }}
+  {{ stat("Result", "Passed" if r.passed else "Not yet", "pass mark " ~ r.pass_pct ~ "%") }}
+  {{ stat("Topic status", r.topic.status|label if r.topic else "—", "missed auto-graded questions are scheduled for revision") }}
+</div>
+{% for i in r["items"] %}{% if i.question_id in qs %}{{ question_form(qs[i.question_id], loop.index, revealed=i) }}{% endif %}{% endfor %}
+{% endblock %}

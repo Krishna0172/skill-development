@@ -1,0 +1,221 @@
+{
+  "slug": "lru-cache-sku-lookup",
+  "title": "LRU cache for SKU lookups",
+  "category": "python",
+  "language": "python",
+  "difficulty": "hard",
+  "skill": "python",
+  "concepts": [
+    "classes",
+    "OrderedDict",
+    "eviction policy",
+    "O(1) operations"
+  ],
+  "related_topics": [
+    "python-oop-dataclasses",
+    "python-data-structures"
+  ],
+  "problem_md": "Looking up a SKU's catalogue data hits a slow API, so you want a small in-memory cache that evicts the **least recently used** entry when full.\n\nImplement the class:\n\n```python\nclass LRUCache:\n    def __init__(self, capacity: int): ...\n    def get(self, key: str) -> int: ...\n    def put(self, key: str, value: int) -> None: ...\n```\n\nRules:\n- `get(key)` returns the cached value, or `-1` if the key isn't cached. A successful `get` marks the key as **most recently used**.\n- `put(key, value)` inserts or updates the value and marks the key as most recently used. If inserting a **new** key would exceed `capacity`, first evict the least recently used key. `put` returns `None`.\n- `capacity < 1` → raise `ValueError` in `__init__`.\n- Both `get` and `put` should be O(1).\n\nThe tests call the provided `run_lru(capacity, operations)` harness, where each operation is `[\"put\", key, value]` or `[\"get\", key]`, and it returns the list of return values.",
+  "examples": [
+    {
+      "input": "run_lru(2, [['put','a',1], ['put','b',2], ['get','a'], ['put','c',3], ['get','b']])",
+      "output": "[None, None, 1, None, -1]",
+      "explanation": "Getting 'a' makes 'b' the least recently used, so putting 'c' evicts 'b'."
+    }
+  ],
+  "hints": [
+    "You need a mapping (for O(1) lookup) that also remembers usage order.",
+    "`collections.OrderedDict` has `move_to_end(key)` and `popitem(last=False)` — both O(1).",
+    "On `get`: if present, `move_to_end` and return. On `put`: if present, update + `move_to_end`; else insert, and if `len > capacity`, `popitem(last=False)`."
+  ],
+  "starter_code": "class LRUCache:\n    def __init__(self, capacity: int):\n        self.capacity = capacity\n        # your code here\n\n    def get(self, key: str) -> int:\n        # your code here\n        ...\n\n    def put(self, key: str, value: int) -> None:\n        # your code here\n        ...\n\n\n# Test harness (do not change): replays operations against your class.\ndef run_lru(capacity: int, operations: list) -> list:\n    cache = LRUCache(capacity)\n    outputs = []\n    for op in operations:\n        if op[0] == \"put\":\n            outputs.append(cache.put(op[1], op[2]))\n        elif op[0] == \"get\":\n            outputs.append(cache.get(op[1]))\n        else:\n            raise ValueError(f\"unknown operation {op[0]!r}\")\n    return outputs\n",
+  "solution_code": "from collections import OrderedDict\n\n\nclass LRUCache:\n    def __init__(self, capacity: int):\n        if capacity < 1:\n            raise ValueError(\"capacity must be >= 1\")\n        self.capacity = capacity\n        self._data = OrderedDict()\n\n    def get(self, key: str) -> int:\n        if key not in self._data:\n            return -1\n        self._data.move_to_end(key)\n        return self._data[key]\n\n    def put(self, key: str, value: int) -> None:\n        if key in self._data:\n            self._data.move_to_end(key)\n        self._data[key] = value\n        if len(self._data) > self.capacity:\n            self._data.popitem(last=False)\n\n\n# Test harness (do not change): replays operations against your class.\ndef run_lru(capacity: int, operations: list) -> list:\n    cache = LRUCache(capacity)\n    outputs = []\n    for op in operations:\n        if op[0] == \"put\":\n            outputs.append(cache.put(op[1], op[2]))\n        elif op[0] == \"get\":\n            outputs.append(cache.get(op[1]))\n        else:\n            raise ValueError(f\"unknown operation {op[0]!r}\")\n    return outputs\n",
+  "solution_md": "`OrderedDict` keeps keys in a doubly linked list internally, so:\n\n- `move_to_end(key)` → mark as most recently used, O(1)\n- `popitem(last=False)` → remove the least recently used (front), O(1)\n\nUpdating an existing key never evicts, because the size doesn't grow — the `len > capacity` check after insertion handles that naturally.\n\n- **Time:** O(1) per operation\n- **Space:** O(capacity)\n\n**From scratch:** a dict mapping key → node plus your own doubly linked list with sentinel head/tail nodes — this is what interviewers usually want to see if they forbid `OrderedDict`.\n\n**In real code:** for caching a *function's* results, `functools.lru_cache(maxsize=...)` does all of this for you (keys are the call arguments). For a cache shared across processes or workers, you'd reach for Redis with an eviction policy instead.",
+  "tests": {
+    "function": "run_lru",
+    "cases": [
+      {
+        "args": [
+          2,
+          [
+            [
+              "put",
+              "a",
+              1
+            ],
+            [
+              "put",
+              "b",
+              2
+            ],
+            [
+              "get",
+              "a"
+            ],
+            [
+              "put",
+              "c",
+              3
+            ],
+            [
+              "get",
+              "b"
+            ],
+            [
+              "put",
+              "d",
+              4
+            ],
+            [
+              "get",
+              "a"
+            ],
+            [
+              "get",
+              "c"
+            ],
+            [
+              "get",
+              "d"
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          null,
+          null,
+          1,
+          null,
+          -1,
+          null,
+          -1,
+          3,
+          4
+        ]
+      },
+      {
+        "args": [
+          2,
+          [
+            [
+              "put",
+              "a",
+              1
+            ],
+            [
+              "put",
+              "b",
+              2
+            ],
+            [
+              "put",
+              "a",
+              10
+            ],
+            [
+              "put",
+              "c",
+              3
+            ],
+            [
+              "get",
+              "a"
+            ],
+            [
+              "get",
+              "b"
+            ],
+            [
+              "get",
+              "c"
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          null,
+          null,
+          null,
+          null,
+          10,
+          -1,
+          3
+        ]
+      },
+      {
+        "args": [
+          1,
+          [
+            [
+              "put",
+              "x",
+              5
+            ],
+            [
+              "get",
+              "x"
+            ],
+            [
+              "put",
+              "y",
+              6
+            ],
+            [
+              "get",
+              "x"
+            ],
+            [
+              "get",
+              "y"
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          null,
+          5,
+          null,
+          -1,
+          6
+        ]
+      },
+      {
+        "args": [
+          3,
+          [
+            [
+              "get",
+              "missing"
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          -1
+        ]
+      },
+      {
+        "args": [
+          3,
+          []
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          0,
+          [
+            [
+              "put",
+              "a",
+              1
+            ]
+          ]
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

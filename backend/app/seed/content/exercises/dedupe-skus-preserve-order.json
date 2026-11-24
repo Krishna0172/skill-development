@@ -1,0 +1,120 @@
+{
+  "slug": "dedupe-skus-preserve-order",
+  "title": "Deduplicate SKUs (keep first occurrence)",
+  "category": "python",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "python",
+  "concepts": [
+    "sets",
+    "order preservation",
+    "string normalisation"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "An inventory report exported from a marketplace sometimes repeats the same SKU on several rows, and some rows have stray whitespace around the SKU (`\" A1\"`, `\"A1 \"`). Before upserting into PostgreSQL you need the list of **unique** SKUs.\n\nImplement:\n\n```python\ndef dedupe_skus(skus: list[str]) -> list[str]:\n```\n\nRules:\n- Strip leading/trailing whitespace from each SKU before comparing, and return the stripped value.\n- Keep the **first** occurrence of each SKU and preserve the original order (do not sort).\n- Comparison is case-sensitive: `\"a1\"` and `\"A1\"` are different SKUs.\n- An empty input returns an empty list.",
+  "examples": [
+    {
+      "input": "skus = ['A1', 'B2', 'A1']",
+      "output": "['A1', 'B2']",
+      "explanation": "The second 'A1' is a duplicate and is dropped."
+    },
+    {
+      "input": "skus = [' A1', 'A1 ', 'B2']",
+      "output": "['A1', 'B2']",
+      "explanation": "Both variants strip to 'A1'."
+    }
+  ],
+  "hints": [
+    "You need two things at once: fast 'have I seen this?' checks and an output that keeps insertion order.",
+    "A set gives O(1) membership checks; a separate list keeps the order.",
+    "Loop over the SKUs, strip each one, and append it to the result only if it is not already in a `seen` set (then add it to the set)."
+  ],
+  "starter_code": "def dedupe_skus(skus: list[str]) -> list[str]:\n    # your code here\n    ...\n",
+  "solution_code": "def dedupe_skus(skus: list[str]) -> list[str]:\n    seen = set()\n    result = []\n    for raw in skus:\n        sku = raw.strip()\n        if sku not in seen:\n            seen.add(sku)\n            result.append(sku)\n    return result\n",
+  "solution_md": "Walk the list once, keeping a `seen` set for O(1) membership checks and a `result` list for order.\n\n- **Time:** O(n) (average-case set lookups)\n- **Space:** O(n) for the set and the output\n\n**Alternative:** `list(dict.fromkeys(s.strip() for s in skus))` — dicts preserve insertion order (Python 3.7+), so this is a compact one-liner with the same complexity.\n\nAvoid `list(set(skus))`: it loses the original order, and `if sku not in result` on a list makes the whole thing O(n²).",
+  "tests": {
+    "function": "dedupe_skus",
+    "cases": [
+      {
+        "args": [
+          [
+            "A1",
+            "B2",
+            "A1"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          "A1",
+          "B2"
+        ]
+      },
+      {
+        "args": [
+          []
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          [
+            " A1",
+            "A1 ",
+            "B2"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          "A1",
+          "B2"
+        ]
+      },
+      {
+        "args": [
+          [
+            "a1",
+            "A1"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          "a1",
+          "A1"
+        ]
+      },
+      {
+        "args": [
+          [
+            "C3",
+            "B2",
+            "A1",
+            "B2",
+            "C3"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          "C3",
+          "B2",
+          "A1"
+        ]
+      },
+      {
+        "args": [
+          [
+            "Z9",
+            "Z9",
+            "Z9"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          "Z9"
+        ]
+      }
+    ]
+  }
+}

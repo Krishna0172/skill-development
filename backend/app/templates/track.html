@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% from "macros.html" import card %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>{{ title }}</h1><p>{{ blurb }}</p></div>
+  <div class="actions">{% for k, v in [("python", "Python"), ("backend", "Backend"), ("ai", "AI")] %}<a class="chip {{ 'on' if k == track }}" href="/learn/{{ k }}">{{ v }}</a>{% endfor %}</div>
+</div>
+
+<div class="grid g{{ areas|length if areas|length > 1 else 2 }} mb">
+  {% for a in areas %}
+    <div class="stat"><div class="between"><span class="label">{{ a.label }}</span>{{ charts.ring(a.percent, size=46, label=a.label) }}</div>
+      <div class="sub">{{ a.passed }}/{{ a.topics }} topics demonstrated · {{ a.assessed }} assessed · {{ a.mastered }} mastered</div></div>
+  {% endfor %}
+  {% if areas|length == 1 %}<div class="stat"><div class="label">How progress works</div><div class="sub" style="margin-top:6px">A topic counts once you <strong>pass its assessment (≥ 70%)</strong>. It becomes <strong>mastered</strong> with ≥ 85% plus spaced revisions up to the 14-day interval. Labels: <span class="badge warn">revise</span> used before · <span class="badge accent">deepen</span> used thinly · <span class="badge bad">new</span> not in your code · <span class="badge good">demonstrated</span> strong evidence — quick check.</div></div>{% endif %}
+</div>
+
+{% for m in modules %}
+  {% set it = m.item %}
+  <section class="card mb" id="{{ it.slug }}">
+    <header>
+      <div class="row"><span class="faint num">{{ "%02d"|format(it.module_no or 0) }}</span><h2>{{ it.title }}</h2>{{ badge(it.label) }}</div>
+      <div class="row" style="min-width:160px"><span class="tiny faint num">{{ m.done }}/{{ m.total }}</span><div style="flex:1">{{ progress(100 * m.done / m.total if m.total else 0, "good", thin=True) }}</div></div>
+    </header>
+    <div class="flush"><table class="table">
+      {% for r in m.rows %}
+        <tr>
+          {% if r.topic %}
+            <td style="width:45%"><a href="/topics/{{ r.topic.id }}">{{ r.topic.title }}</a></td>
+            <td>{{ badge(r.topic.status) }}</td>
+            <td class="small muted">{{ r.questions }} questions</td>
+            <td class="small num">{% if r.best is not none %}best <strong class="{{ 'good' if r.best >= 70 else 'warn' }}">{{ r.best|round|int }}%</strong>{% else %}<span class="faint">not assessed</span>{% endif %}</td>
+            <td style="text-align:right"><a class="btn sm" href="/topics/{{ r.topic.id }}/assess">Assess</a></td>
+          {% else %}
+            <td colspan="5" class="small faint">{{ r.step.title }} (content not available yet)</td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+    </table></div>
+  </section>
+{% endfor %}
+
+{% if projects %}
+  <h2 class="section-title mt">Projects to build</h2>
+  <div class="grid g2">
+  {% for p in projects %}
+    {% call card(p.title) %}
+      <div class="md small">{{ p.why_md|md }}</div>
+      <ol class="small">{% for s in p.steps %}<li class="{{ 'faint' if s.done }}">{{ s.title }}</li>{% endfor %}</ol>
+      <a class="small" href="/targets">Track it as a goal →</a>
+    {% endcall %}
+  {% endfor %}
+  </div>
+{% endif %}
+{% endblock %}

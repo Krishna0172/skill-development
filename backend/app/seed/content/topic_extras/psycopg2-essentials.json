@@ -1,0 +1,66 @@
+{
+  "slug": "psycopg2-essentials",
+  "why_md": "- psycopg2 is the driver behind all of your PostgreSQL code; using it correctly decides throughput, safety and connection stability.\n- Parameter binding (not f-strings) is the main defence against SQL injection — critical when any input comes from users or an LLM.\n- Bulk helpers (`execute_values`, COPY) make ingestion 10-100× faster than row-by-row inserts.\n- Interviewers expect you to explain transactions, pooling and injection with your driver of choice.",
+  "revision_notes_md": "- `cur.execute(sql, params)` — params must be a sequence/mapping: `(42,)` not `(42)`.\n- Placeholders are always `%s` / `%(name)s` regardless of type; never quote them.\n- Identifiers (table/column names) can't be parameters: use `psycopg2.sql.SQL` + `sql.Identifier`.\n- A transaction starts implicitly on the first execute; nothing is saved until `conn.commit()`.\n- `with conn:` commits/rolls back but does NOT close the connection; `with conn.cursor() as cur:` closes the cursor.\n- `execute_values` sends multi-row INSERTs (fastest helper); `copy_expert` with COPY is fastest overall.\n- Use server-side (named) cursors to stream large result sets.\n- Pools: `ThreadedConnectionPool` for threads; always `putconn` in `finally`.",
+  "exercises_md": "1. Pick a function that builds SQL with an f-string and rewrite it with parameters, using `psycopg2.sql.Identifier` for any dynamic table/column names. Add a test that passes `\"x'; DROP TABLE t; --\"` as input.\n2. Benchmark loading 100k rows with `executemany`, `execute_batch`, `execute_values` and `copy_expert` into a local PostgreSQL and record the timings.",
+  "my_context_md": "All of `python-postgres` uses psycopg2 directly, including `execute_batch` / `execute_values` and `psycopg2.sql` composition. `AmazonVendorBankRecon/db.py` already shows a solid pattern: a `ThreadedConnectionPool` behind PgBouncer and a `@contextmanager db_transaction()` that commits, rolls back and returns the connection. The main improvement area is the 619 SQL strings built with f-strings — moving those to `%s` parameters and `sql.Identifier` would remove the injection risk.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To safely insert a dynamic column name into a query, wrap it with `psycopg2.sql.____('status')`.",
+      "answers": [
+        "identifier",
+        "sql.identifier"
+      ],
+      "explanation": "sql.Identifier quotes identifiers correctly; parameters (%s) only work for values."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "After INSERTs on a psycopg2 connection without autocommit, you must call `conn.____()` or the data is discarded when the connection closes.",
+      "answers": [
+        "commit"
+      ],
+      "explanation": "psycopg2 opens a transaction implicitly; it's rolled back if not committed."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "params_a = (42)\nparams_b = (42,)\nprint(type(params_a).__name__, type(params_b).__name__)\nprint(len(params_b))",
+      "answers": [
+        "int tuple\n1"
+      ],
+      "explanation": "Parentheses alone don't make a tuple; the trailing comma does. `cur.execute(sql, (42))` passes an int and fails."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nfrom contextlib import contextmanager\ndb = sqlite3.connect(\":memory:\")\ndb.execute(\"CREATE TABLE t(v INT)\")\n@contextmanager\ndef tx(conn):\n    try:\n        yield conn.cursor()\n        conn.commit(); print(\"commit\")\n    except Exception:\n        conn.rollback(); print(\"rollback\"); raise\nwith tx(db) as cur:\n    cur.execute(\"INSERT INTO t VALUES (1)\")\ntry:\n    with tx(db) as cur:\n        cur.execute(\"INSERT INTO t VALUES (2)\"); 1 / 0\nexcept ZeroDivisionError:\n    pass\nprint(db.execute(\"SELECT COUNT(*) FROM t\").fetchone()[0])",
+      "answers": [
+        "commit\nrollback\n1"
+      ],
+      "explanation": "The context manager commits the first block and rolls back the second (exception), leaving one row — the same pattern as a db_transaction() helper."
+    },
+    {
+      "type": "debug",
+      "prompt": "This lookup works in tests but is a security problem and breaks on some SKUs. Fix it.",
+      "code": "def get_product(cur, orgid, sku, table):\n    cur.execute(f\"SELECT * FROM {table} WHERE orgid = {orgid} AND sku = '{sku}'\")\n    return cur.fetchone()\n\n# breaks for sku = \"KID'S-SHOE\"; allows sku = \"x' OR '1'='1\" ",
+      "answer": "Values are interpolated with an f-string, so a quote in `sku` breaks the SQL and crafted input changes the query (SQL injection). The table name is also unvalidated.\n\n```python\nfrom psycopg2 import sql\n\nALLOWED = {\"products\", \"products_archive\"}\n\ndef get_product(cur, orgid, sku, table):\n    if table not in ALLOWED:\n        raise ValueError(table)\n    q = sql.SQL(\"SELECT * FROM {} WHERE orgid = %s AND sku = %s\").format(sql.Identifier(table))\n    cur.execute(q, (orgid, sku))\n    return cur.fetchone()\n```\nThe driver now sends values safely escaped; identifiers are quoted by `sql.Identifier` and restricted to an allow-list.",
+      "rubric": [
+        "f-string interpolation of values → SQL injection / quoting bugs",
+        "Use %s parameters passed separately",
+        "Use sql.Identifier (plus allow-list) for table names"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "How would you load 500k rows from a pandas DataFrame into PostgreSQL with psycopg2, and why that way?",
+      "answer": "Row-by-row `execute` costs a network round-trip per row. Options, from good to best:\n\n- `execute_batch` — groups statements into pages, fewer round-trips.\n- `execute_values` — builds one multi-row `INSERT ... VALUES (...), (...)` per page (`page_size` 1000–5000). Supports `ON CONFLICT` for upserts and `RETURNING` (`fetch=True`).\n- `COPY` via `cur.copy_expert(\"COPY staging FROM STDIN WITH CSV\", buf)` — fastest; stream the DataFrame as CSV into a staging table, then `INSERT ... SELECT ... ON CONFLICT` into the target in one statement.\n\nAlso: convert NaN to None, do it in one transaction (or per chunk for huge loads), de-duplicate keys before upserting, and consider dropping/re-creating non-essential indexes for very large loads.",
+      "rubric": [
+        "Avoid row-by-row round-trips",
+        "execute_values multi-row INSERT (with ON CONFLICT)",
+        "COPY into staging then INSERT ... SELECT for the largest loads",
+        "Transaction/chunking, NaN→None, dedupe keys"
+      ]
+    }
+  ]
+}

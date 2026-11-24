@@ -1,0 +1,80 @@
+{
+  "slug": "sql-settlement-reconciliation",
+  "title": "Reconcile orders against payment settlements",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "hard",
+  "skill": "sql-ctes",
+  "concepts": [
+    "CTE",
+    "pre-aggregation",
+    "LEFT JOIN",
+    "composite join key",
+    "COALESCE",
+    "CASE classification",
+    "tolerance comparison"
+  ],
+  "related_topics": [
+    "sql-ctes",
+    "sql-joins",
+    "sql-group-by",
+    "sql-null-handling"
+  ],
+  "problem_md": "Marketplaces pay out in settlement batches: one order may be paid in several instalments, and adjustments\n(refunds, fee corrections) arrive as **negative** amounts. Order references are only unique **per channel**\n(two channels can both have an order `MYN-1001`).\n\n```sql\nCREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  channel      TEXT NOT NULL,\n  order_ref    TEXT NOT NULL,\n  order_date   TEXT NOT NULL,\n  status       TEXT NOT NULL,\n  total_amount REAL NOT NULL,\n  UNIQUE (channel, order_ref)\n);\n\nCREATE TABLE settlements (\n  settlement_id INTEGER PRIMARY KEY,\n  channel       TEXT NOT NULL,\n  order_ref     TEXT NOT NULL,\n  settled_on    TEXT NOT NULL,\n  amount        REAL NOT NULL      -- negative for refunds/adjustments\n);\n```\n\n> Money columns are `REAL` in this sandbox (they would be `NUMERIC(12,2)` in production PostgreSQL). Dates are ISO `'YYYY-MM-DD'` text.\n\n**Task.** For every order that is **not** `CANCELLED`, compute `settled_amount` = the sum of its settlement\namounts matched on **both** `channel` and `order_ref` (0 if none), and classify:\n\n| recon_status | rule |\n|---|---|\n| `UNSETTLED` | no settlement rows at all |\n| `PARTIAL` | `settled_amount < total_amount - 1.00` |\n| `OVER_SETTLED` | `settled_amount > total_amount + 1.00` |\n| `SETTLED` | otherwise (within a 1.00 rupee rounding tolerance) |\n\nReturn only orders that are **not** `SETTLED`, with columns `channel`, `order_ref`, `total_amount`,\n`settled_amount`, `shortfall` (`total_amount - settled_amount`), `recon_status`. Order by `channel`, `order_ref`.",
+  "examples": [
+    {
+      "input": "Myntra MYN-1002 total 2199 with one settlement of 1500; Nykaa NYK-5002 total 1200 with no settlements; Nykaa NYK-5001 total 650 settled 649.50",
+      "output": "channel | order_ref | total_amount | settled_amount | shortfall | recon_status\nMyntra  | MYN-1002  | 2199         | 1500           | 699       | PARTIAL\nNykaa   | NYK-5002  | 1200         | 0              | 1200      | UNSETTLED",
+      "explanation": "NYK-5001 is within the 1.00 tolerance so it is SETTLED and not returned."
+    }
+  ],
+  "hints": [
+    "Aggregate settlements per (channel, order_ref) in a CTE first - also count the rows so you can tell 'no settlements' from 'settlements summing to 0'.",
+    "LEFT JOIN orders to that CTE on BOTH channel and order_ref; use `COALESCE(s.settled, 0)` for orders without a match. Joining on order_ref alone double-counts MYN-1001.",
+    "Classify with a CASE in a second CTE (`WHEN s.order_ref IS NULL THEN 'UNSETTLED' WHEN ... < total_amount - 1 THEN 'PARTIAL' ...`), then `WHERE recon_status <> 'SETTLED'`."
+  ],
+  "starter_code": "-- Write your query here\nWITH settled AS (\n  SELECT ...\n)\nSELECT ...\n",
+  "solution_code": "WITH settled AS (\n  SELECT channel,\n         order_ref,\n         SUM(amount) AS settled_amount,\n         COUNT(*)    AS settlement_rows\n  FROM settlements\n  GROUP BY channel, order_ref\n),\nrecon AS (\n  SELECT o.channel,\n         o.order_ref,\n         o.total_amount,\n         COALESCE(s.settled_amount, 0) AS settled_amount,\n         o.total_amount - COALESCE(s.settled_amount, 0) AS shortfall,\n         CASE\n           WHEN s.order_ref IS NULL                       THEN 'UNSETTLED'\n           WHEN s.settled_amount < o.total_amount - 1.00  THEN 'PARTIAL'\n           WHEN s.settled_amount > o.total_amount + 1.00  THEN 'OVER_SETTLED'\n           ELSE 'SETTLED'\n         END AS recon_status\n  FROM orders o\n  LEFT JOIN settled s\n         ON s.channel = o.channel\n        AND s.order_ref = o.order_ref\n  WHERE o.status <> 'CANCELLED'\n)\nSELECT channel, order_ref, total_amount, settled_amount, shortfall, recon_status\nFROM recon\nWHERE recon_status <> 'SETTLED'\nORDER BY channel, order_ref;",
+  "solution_md": "**Structure.** Two CTEs keep the logic readable:\n\n1. `settled` collapses settlements to **one row per (channel, order_ref)**. Aggregating *before* the join avoids\n   fan-out: if you also joined `order_items` or `returns` in the same query, a raw join would multiply settlement\n   rows and inflate the sums.\n2. `recon` left-joins each non-cancelled order to its aggregate and classifies it. The final `SELECT` filters on\n   the computed status - something you can't do in the same `SELECT` where the alias is defined (that's why the\n   second CTE exists).\n\n**Edge cases handled:**\n\n- **Composite key.** `MYN-1001` exists on Myntra *and* Nykaa. Joining on `order_ref` alone would give each of them\n  1799 and flag both as `OVER_SETTLED`.\n- **Instalments + refunds.** BLK-77: 400 - 51 = 349, settled. Summing signed amounts handles adjustments naturally.\n- **Tolerance.** NYK-5001 (650 vs 649.50) is within 1.00 and treated as settled - payment gateways and\n  marketplaces round fees differently. Never compare money for exact equality after fee calculations.\n- **UNSETTLED vs zero.** `s.order_ref IS NULL` (no match) is checked first, so an order whose settlements net to\n  0 is classified `PARTIAL`, not `UNSETTLED`.\n- **Cancelled-but-paid.** MYN-1003 is cancelled yet received 899. It's excluded by the spec, but in real\n  reconciliation it's exactly the kind of row you'd report separately (and orphan settlements with no order at\n  all - a `settlements LEFT JOIN orders ... WHERE o.order_id IS NULL` query).\n\n**In PostgreSQL** the same query runs as-is (with `NUMERIC(12,2)` money columns the arithmetic is exact).\nFor production, persist results in a reconciliation table keyed by `(channel, order_ref)` so the finance team can\ntrack ageing of `PARTIAL`/`UNSETTLED` orders.\n\n**Indexes.** `settlements (channel, order_ref)` for the aggregation/join and the existing\n`UNIQUE (channel, order_ref)` on orders. For recurring runs over recent orders, filter by `order_date` and index it.",
+  "tests": {
+    "schema_sql": "CREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  channel      TEXT NOT NULL,\n  order_ref    TEXT NOT NULL,\n  order_date   TEXT NOT NULL,\n  status       TEXT NOT NULL,\n  total_amount REAL NOT NULL,\n  UNIQUE (channel, order_ref)\n);\n\nCREATE TABLE settlements (\n  settlement_id INTEGER PRIMARY KEY,\n  channel       TEXT NOT NULL,\n  order_ref     TEXT NOT NULL,\n  settled_on    TEXT NOT NULL,\n  amount        REAL NOT NULL      -- negative for refunds/adjustments\n);\n\nINSERT INTO orders VALUES\n (1,'Myntra', 'MYN-1001','2024-03-01','DELIVERED',1499.00),\n (2,'Myntra', 'MYN-1002','2024-03-01','DELIVERED',2199.00),\n (3,'Myntra', 'MYN-1003','2024-03-02','CANCELLED', 899.00),\n (4,'Nykaa',  'NYK-5001','2024-03-01','DELIVERED', 650.00),\n (5,'Nykaa',  'NYK-5002','2024-03-02','SHIPPED',  1200.00),\n (6,'Nykaa',  'MYN-1001','2024-03-03','DELIVERED', 300.00),\n (7,'Blinkit','BLK-77',  '2024-03-02','DELIVERED', 349.00),\n (8,'Blinkit','BLK-78',  '2024-03-02','DELIVERED', 225.50);\n\nINSERT INTO settlements VALUES\n (1,'Myntra', 'MYN-1001','2024-03-08',1000.00),\n (2,'Myntra', 'MYN-1001','2024-03-15', 499.00),\n (3,'Myntra', 'MYN-1002','2024-03-08',1500.00),\n (4,'Nykaa',  'NYK-5001','2024-03-09', 649.50),\n (5,'Nykaa',  'MYN-1001','2024-03-10', 300.00),\n (6,'Blinkit','BLK-77',  '2024-03-05', 400.00),\n (7,'Blinkit','BLK-77',  '2024-03-06', -51.00),\n (8,'Blinkit','BLK-78',  '2024-03-05', 250.00),\n (9,'Myntra', 'MYN-1003','2024-03-08', 899.00);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "channel",
+        "order_ref",
+        "total_amount",
+        "settled_amount",
+        "shortfall",
+        "recon_status"
+      ],
+      "rows": [
+        [
+          "Blinkit",
+          "BLK-78",
+          225.5,
+          250,
+          -24.5,
+          "OVER_SETTLED"
+        ],
+        [
+          "Myntra",
+          "MYN-1002",
+          2199,
+          1500,
+          699,
+          "PARTIAL"
+        ],
+        [
+          "Nykaa",
+          "NYK-5002",
+          1200,
+          0,
+          1200,
+          "UNSETTLED"
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

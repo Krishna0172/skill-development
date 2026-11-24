@@ -1,0 +1,191 @@
+{
+  "slug": "be-http-rest-basics",
+  "title": "HTTP and REST APIs from scratch",
+  "skill": "api-design",
+  "extra_skills": [
+    "api-integration"
+  ],
+  "category": "Backend",
+  "difficulty": "beginner",
+  "tags": [
+    "http",
+    "rest",
+    "api",
+    "json",
+    "status-codes"
+  ],
+  "summary": "An API is a menu of requests one program can send to another over the network. HTTP is the language of those requests: a method, a URL, headers, an optional body, and a status code coming back. This topic explains each part in plain words with tiny examples.",
+  "why_md": "- Every backend job starts here: web apps, mobile apps and AI services all talk through HTTP APIs.\n- Knowing status codes and headers lets you debug 'it doesn't work' in minutes instead of hours.\n- Interviews always open with: GET vs POST, what is 404 vs 500, what is idempotent.\n- LLM APIs, payment APIs and marketplace APIs are all just HTTP + JSON.",
+  "details_md": "### What is an API?\nAn API (Application Programming Interface) is an agreed way for one program to ask another for something. Think of a restaurant: you (the client) read the menu, tell the waiter (the API) what you want, the kitchen (the server) does the work, and the waiter brings back a result. You never walk into the kitchen.\n\nA *web API* is reached over the network with HTTP. The client sends a **request**; the server sends back a **response**.\n\n### Anatomy of a request\n1. **Method** - what you want to do.\n2. **URL** - which thing: `https://shop.example.com/products/42?currency=usd`. The part `/products/42` is the *path*; `?currency=usd` is the *query string*.\n3. **Headers** - extra information as `Name: value` pairs (`Content-Type: application/json`, `Authorization: Bearer <token>`).\n4. **Body** - optional data, usually JSON, sent with POST/PUT/PATCH.\n\n### Methods (verbs)\n- `GET` read something. Never changes data. Safe to repeat.\n- `POST` create something (or trigger an action).\n- `PUT` replace something completely.\n- `PATCH` change part of something.\n- `DELETE` remove something.\n\nA method is **idempotent** if doing it twice has the same effect as once. GET, PUT and DELETE are idempotent; POST is not (two POSTs may create two orders).\n\n### Status codes\nThe response starts with a 3-digit number grouped by first digit:\n- `2xx` success: `200 OK`, `201 Created`, `204 No Content`.\n- `3xx` redirect: `301 Moved Permanently`.\n- `4xx` *you* (the client) made a mistake: `400 Bad Request`, `401 Unauthorized` (not logged in), `403 Forbidden` (logged in but not allowed), `404 Not Found`, `429 Too Many Requests`.\n- `5xx` the *server* failed: `500 Internal Server Error`, `503 Service Unavailable`.\n\n### JSON\nJSON is the text format used for bodies. It has objects `{\"name\": \"pen\"}`, lists `[1, 2]`, strings, numbers, `true/false`, `null`. In Python, `json.loads(text)` turns it into dicts/lists and `json.dumps(obj)` goes back.\n\n### REST in one paragraph\nREST is a style for designing HTTP APIs around **resources** (nouns): `/orders`, `/orders/17`. You use the method to say the action: `GET /orders/17` reads, `DELETE /orders/17` removes. Each request carries everything the server needs (it is *stateless*), so servers are easy to scale.\n\n### Headers you will meet first\n`Content-Type` (format of the body you send), `Accept` (format you want back), `Authorization` (who you are), `User-Agent` (which client), and for responses `Retry-After` and rate-limit headers.\n\n### How it works under the hood\nHTTP is plain text over a TCP connection (with TLS for HTTPS). A request is literally lines of text: `GET /products/42 HTTP/1.1`, then headers, a blank line, then the body. Libraries like `requests` and `httpx` just build and parse that text for you.",
+  "code_md": "```python\n# 1) Standard library only: GET and read JSON\nimport json\nfrom urllib.request import urlopen\n\nwith urlopen(\"https://httpbin.org/get?item=pen\") as resp:\n    print(resp.status)                    # 200\n    print(resp.headers[\"Content-Type\"])   # application/json\n    data = json.loads(resp.read())        # text -> dict\n    print(data[\"args\"])                   # {'item': 'pen'}\n```\n\n```python\n# 2) requests library (pip install requests): POST JSON, check status\nimport requests\n\nr = requests.post(\n    \"https://httpbin.org/post\",\n    json={\"sku\": \"PEN-1\", \"qty\": 2},          # sets Content-Type for you\n    headers={\"Authorization\": \"Bearer demo-token\"},\n    timeout=10,                               # ALWAYS set a timeout\n)\nr.raise_for_status()      # raises on 4xx / 5xx\nprint(r.status_code, r.json()[\"json\"])\n```\n\n```bash\n# 3) The same call with curl, showing headers (-i)\ncurl -i -X POST https://httpbin.org/post \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"sku\": \"PEN-1\", \"qty\": 2}'\n```",
+  "use_cases_md": "- Fetching product prices from a marketplace API for an e-commerce dashboard.\n- A mobile app calling `POST /orders` to place an order, getting `201 Created` and the new order id.\n- Your Python service calling an LLM API: POST a JSON prompt, read JSON back.\n- A health check endpoint `GET /health` that a load balancer calls every few seconds.",
+  "mistakes_md": "- **No timeout** on `requests.get`: a slow server hangs your program forever. Always pass `timeout=`.\n- **Ignoring the status code**: `r.json()` on a 500 page crashes confusingly. Call `raise_for_status()` or check `r.ok`.\n- **Using GET to change data**: browsers and caches may repeat GETs. Use POST/PUT/DELETE.\n- **Mixing up 401 and 403**: 401 = who are you? 403 = I know you, but no.\n- **Putting secrets in the URL**: URLs end up in logs. Use headers.\n- **Returning 200 with an error message inside**: use a proper 4xx/5xx code.",
+  "best_practices_md": "- Use nouns for URLs (`/orders/17`), verbs for HTTP methods.\n- Always send and parse JSON with the right `Content-Type`.\n- Set timeouts and handle `4xx` and `5xx` differently (do not retry most 4xx).\n- Use HTTPS only.\n- Read the API's docs for rate limits and error formats before coding.",
+  "my_context_md": "",
+  "revision_notes_md": "- API = agreed way for programs to talk; web API uses HTTP.\n- Request = method + URL + headers + optional body. Response = status + headers + body.\n- GET read, POST create, PUT replace, PATCH partial update, DELETE remove.\n- Idempotent: GET/PUT/DELETE yes, POST no.\n- 2xx ok, 3xx redirect, 4xx client error, 5xx server error. 401 not authenticated, 403 not allowed.\n- JSON: `json.loads` / `json.dumps`.\n- REST = resources as nouns, stateless requests.\n- Always set a timeout; check the status code.",
+  "exercises_md": "1. Use `urllib.request` to GET `https://httpbin.org/status/404` and catch the error; print the status code.\n2. With `requests`, POST a JSON body to `https://httpbin.org/post` and print the headers the server saw.\n3. Run `curl -i https://httpbin.org/get` and label the status line, each header, and the body.\n4. Write a function `get_json(url)` that sets a timeout, raises on 4xx/5xx and returns a dict.",
+  "related": [
+    "rest-api-design",
+    "be-request-lifecycle",
+    "fastapi-essentials",
+    "retries-backoff-idempotency"
+  ],
+  "flashcards": [
+    {
+      "front": "What are the four parts of an HTTP request?",
+      "back": "Method, URL (path + query), headers, optional body."
+    },
+    {
+      "front": "401 vs 403?",
+      "back": "401: not authenticated (no/invalid credentials). 403: authenticated but not allowed."
+    },
+    {
+      "front": "What does idempotent mean?",
+      "back": "Repeating the request has the same effect as doing it once (GET, PUT, DELETE yes; POST no)."
+    },
+    {
+      "front": "What does the 5xx family mean?",
+      "back": "The server failed; the client's request may have been fine."
+    },
+    {
+      "front": "What does REST organise an API around?",
+      "back": "Resources (nouns) addressed by URLs, with HTTP methods as the actions; stateless requests."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which method should be used to read data without changing it?",
+      "options": [
+        "POST",
+        "GET",
+        "DELETE",
+        "PATCH"
+      ],
+      "answer_index": 1,
+      "explanation": "GET is the safe read method."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A client is logged in but tries to open an admin page it has no rights for. Best status code?",
+      "options": [
+        "401",
+        "404",
+        "403",
+        "500"
+      ],
+      "answer_index": 2,
+      "explanation": "403 Forbidden: authenticated but not allowed."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which status code family means the server had an error?",
+      "options": [
+        "2xx",
+        "3xx",
+        "4xx",
+        "5xx"
+      ],
+      "answer_index": 3,
+      "explanation": "5xx are server errors."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which method is NOT idempotent?",
+      "options": [
+        "PUT",
+        "DELETE",
+        "GET",
+        "POST"
+      ],
+      "answer_index": 3,
+      "explanation": "Two POSTs can create two resources."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A successful creation of a resource usually returns status code ____.",
+      "answers": [
+        "201",
+        "201 created"
+      ],
+      "explanation": "201 Created."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In `https://x.com/items?color=red`, the part `color=red` is called the query ____.",
+      "answers": [
+        "string",
+        "parameter",
+        "parameters",
+        "params"
+      ],
+      "explanation": "Query string."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import json\ntext = '{\"sku\": \"PEN\", \"tags\": [\"a\", \"b\"], \"ok\": true}'\nd = json.loads(text)\nprint(type(d).__name__, d[\"tags\"][1], d[\"ok\"])",
+      "answers": [
+        "dict b True"
+      ],
+      "explanation": "JSON object becomes dict, true becomes True."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from urllib.parse import urlparse, parse_qs\nu = urlparse('https://shop.example.com/products/42?currency=usd&page=2')\nprint(u.path)\nprint(parse_qs(u.query)['page'])",
+      "answers": [
+        "/products/42\n['2']"
+      ],
+      "explanation": "path is /products/42; parse_qs returns lists of strings."
+    },
+    {
+      "type": "debug",
+      "prompt": "This code sometimes hangs forever and crashes on error pages. Fix it.",
+      "code": "import requests\nr = requests.get('https://api.example.com/orders/1')\norder = r.json()\nprint(order['id'])",
+      "answer": "No `timeout`, and the status is never checked, so a 500/404 error body is parsed as data.\n\n```python\nr = requests.get(url, timeout=10)\nr.raise_for_status()\norder = r.json()\n```",
+      "rubric": [
+        "Add a timeout",
+        "Check the status code / raise_for_status",
+        "Explain why an error body breaks r.json() or later code"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between 4xx and 5xx status codes to a new teammate.",
+      "answer": "4xx means the client sent something wrong (bad input, not logged in, not found); retrying the same request will fail again. 5xx means the server failed or is overloaded; the same request may succeed later, so retries with backoff make sense.",
+      "rubric": [
+        "4xx = client's fault",
+        "5xx = server's fault",
+        "Retry implications"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is a REST API and why is it called stateless?",
+      "answer": "A REST API exposes resources (orders, products) at URLs and uses HTTP methods as actions. Stateless means each request contains all the info the server needs (auth token, parameters), so the server keeps no per-client session between requests. That makes it easy to add more servers behind a load balancer.",
+      "rubric": [
+        "Resources + HTTP methods",
+        "Each request is self-contained",
+        "Scaling benefit"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between PUT and PATCH?",
+      "difficulty": "easy",
+      "answer_md": "PUT replaces the whole resource with the body you send; missing fields are cleared or defaulted. PATCH sends only the fields to change. Example: `PUT /users/7` with a full user object versus `PATCH /users/7` with `{\"email\": \"new@x.com\"}`. PUT is idempotent by definition; PATCH usually is but not guaranteed."
+    },
+    {
+      "question": "What happens when you type a URL and press enter (HTTP part)?",
+      "difficulty": "medium",
+      "answer_md": "DNS resolves the host to an IP, a TCP connection is opened (TLS handshake for HTTPS), the client sends `GET /path HTTP/1.1` with headers, the server routes it to code, builds a response (status, headers, body) and sends it back. The client then renders it or parses it. Caches, proxies and load balancers may sit in between."
+    },
+    {
+      "question": "Why should API calls have timeouts and retries only for some errors?",
+      "difficulty": "medium",
+      "answer_md": "Without a timeout a stuck server blocks your worker indefinitely. Retries help for transient problems (network errors, 429, 503) but not for 400/404 since the request itself is wrong. Use exponential backoff and only retry idempotent calls, or add an idempotency key for POST."
+    }
+  ]
+}

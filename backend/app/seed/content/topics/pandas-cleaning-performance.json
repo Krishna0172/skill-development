@@ -1,0 +1,122 @@
+{
+  "slug": "pandas-cleaning-performance",
+  "title": "pandas Cleaning & Performance",
+  "skill": "pandas",
+  "extra_skills": [
+    "etl-data-processing",
+    "numpy"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "pandas",
+    "data-cleaning",
+    "performance",
+    "vectorization",
+    "dtypes",
+    "memory"
+  ],
+  "summary": "Real-world files are messy: wrong types, stray whitespace, mixed date formats, duplicates and missing values. Clean them with vectorised `.str`, `to_numeric`, `to_datetime` and `drop_duplicates` calls instead of row loops. For speed and memory, pick good dtypes (category, nullable ints, pyarrow strings), read only needed columns, and process huge files in chunks.",
+  "details_md": "### A cleaning checklist\n1. **Headers**: `df.columns = df.columns.str.strip().str.lower().str.replace(r\"\\s+\", \"_\", regex=True)` then `rename` to canonical names.\n2. **Whitespace & case**: `df[\"sku\"] = df[\"sku\"].str.strip().str.upper()`.\n3. **Numbers**: strip currency/commas, then `pd.to_numeric(s, errors=\"coerce\")` - invalid values become NaN that you can count and report.\n4. **Dates**: `pd.to_datetime(s, format=\"%d-%m-%Y\", errors=\"coerce\")`. Always pass `format` when you know it (faster and unambiguous; `dayfirst=True` for Indian-style dates). Mixed formats: `format=\"mixed\"` (pandas 2.0+), slower. Handle timezones with `tz_localize`/`tz_convert`.\n5. **Missing values**: decide per column - drop rows missing keys, fill defaults, or keep as NULL. Normalise sentinels (`\"NA\"`, `\"-\"`, `\"\"`) with `na_values` on read or `replace`.\n6. **Duplicates**: `drop_duplicates(subset=[keys], keep=\"last\")`; inspect with `duplicated(keep=False)` first.\n7. **Validation**: assert invariants (non-negative qty, known channels via `isin`) and split bad rows into an error report.\n\n### Why vectorisation is fast\nA vectorised operation (`df.a * df.b`) runs one loop in C over contiguous NumPy/Arrow memory. `apply(axis=1)` or `iterrows()` creates a Python object per row and calls a Python function per row - typically 10-100x slower, and `iterrows` also loses dtypes. Order of preference: built-in vectorised ops / `.str` / `.dt` accessors -> `np.where`/`np.select` -> `Series.map(dict)` -> `itertuples()` -> `apply`.\n\n### dtypes and memory\n- `df.info(memory_usage=\"deep\")` shows true memory, including Python string objects.\n- `category` for low-cardinality strings (channel, status, state) - stored as integer codes; faster groupby.\n- Downcast numerics: `pd.to_numeric(s, downcast=\"integer\")`, `float32` where precision allows.\n- Nullable dtypes (`Int64`, `boolean`, `string`) keep missing values without turning ints into floats.\n- Arrow-backed dtypes (`dtype_backend=\"pyarrow\"` on read, or `string[pyarrow]`) are much more compact for text; pandas 3.0 uses a dedicated string dtype for text by default.\n\n### Big files\n- `usecols=[...]` to skip unneeded columns, `dtype={...}` to avoid inference cost.\n- `chunksize=100_000` returns an iterator of DataFrames: process and write each chunk, keeping memory flat.\n- Parquet is columnar and typed - far faster than CSV/Excel for intermediate storage.\n- Excel parsing is slow by nature (XML in a zip); the `calamine` engine (pandas 2.2+) is much faster than openpyxl.\n\n### Faster patterns\n- Build a list of dicts/frames and `pd.concat` once - never `concat`/append in a loop (quadratic).\n- `merge` with a lookup frame instead of `apply` that does per-row lookups.\n- `groupby(..., sort=False, observed=True)` for categoricals.\n- `df.eval`/`query` can reduce temporaries for big arithmetic expressions.\n- Convert to Python objects only at the very end (`itertuples(index=False, name=None)`).\n\n### Measuring\nUse `%timeit` / `time.perf_counter()` and `memory_usage(deep=True)` before optimising. Often the bottleneck is I/O (download, Excel parse, DB writes) rather than transformations.",
+  "code_md": "```python\n# A reusable cleaning step\nimport pandas as pd\n\nraw = pd.DataFrame({\n    \" Order ID \": [\"001\", \"002\", \"002\", \"003\"],\n    \"SKU\": [\" a-1\", \"B-2 \", \"B-2 \", None],\n    \"Amount (Rs)\": [\"1,200.50\", \"abc\", \"abc\", \"300\"],\n    \"Order Date\": [\"05-01-2026\", \"06-01-2026\", \"06-01-2026\", \"bad\"],\n})\n\ndef clean(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:\n    df = df.copy()\n    df.columns = (df.columns.str.strip().str.lower()\n                    .str.replace(r\"[^a-z0-9]+\", \"_\", regex=True).str.strip(\"_\"))\n    df = df.rename(columns={\"amount_rs\": \"amount\"})\n    df[\"sku\"] = df[\"sku\"].str.strip().str.upper()\n    df[\"amount\"] = pd.to_numeric(df[\"amount\"].str.replace(\",\", \"\", regex=False), errors=\"coerce\")\n    df[\"order_date\"] = pd.to_datetime(df[\"order_date\"], format=\"%d-%m-%Y\", errors=\"coerce\")\n    df = df.drop_duplicates(subset=[\"order_id\", \"sku\"], keep=\"last\")\n\n    bad = df[\"sku\"].isna() | df[\"amount\"].isna() | df[\"order_date\"].isna()\n    return df[~bad], df[bad]                     # (good rows, error report)\n\ngood, errors = clean(raw)\nprint(good, errors, sep=\"\\n\\n\")\n```\n\n```python\n# Vectorised vs apply: same result, very different speed\nimport numpy as np, pandas as pd, time\n\ndf = pd.DataFrame({\"qty\": np.random.randint(0, 10, 1_000_000),\n                   \"price\": np.random.rand(1_000_000) * 100})\n\nt = time.perf_counter()\nslow = df.apply(lambda r: r.qty * r.price if r.qty > 5 else 0.0, axis=1)\nprint(\"apply\", time.perf_counter() - t)\n\nt = time.perf_counter()\nfast = np.where(df[\"qty\"] > 5, df[\"qty\"] * df[\"price\"], 0.0)\nprint(\"vectorised\", time.perf_counter() - t)    # typically ~100x faster\n```\n\n```python\n# Memory: dtypes, categories, pyarrow strings\nimport pandas as pd\ndf = pd.DataFrame({\"channel\": [\"amazon\", \"flipkart\", \"meesho\"] * 200_000,\n                   \"qty\": [1, 2, 3] * 200_000})\nprint(df.memory_usage(deep=True).sum() / 1e6, \"MB\")\ndf[\"channel\"] = df[\"channel\"].astype(\"category\")\ndf[\"qty\"] = pd.to_numeric(df[\"qty\"], downcast=\"integer\")   # int8\nprint(df.memory_usage(deep=True).sum() / 1e6, \"MB\")\n# Reading with Arrow-backed dtypes:\n# pd.read_csv(\"big.csv\", dtype_backend=\"pyarrow\", usecols=[\"sku\", \"qty\"])\n```\n\n```python\n# Chunked processing of a huge CSV with bounded memory\nimport pandas as pd\n\ndef process_large(path: str, write_chunk) -> int:\n    total = 0\n    for chunk in pd.read_csv(path, chunksize=100_000, usecols=[\"sku\", \"qty\"],\n                             dtype={\"sku\": \"string\", \"qty\": \"Int64\"}):\n        chunk = chunk.dropna(subset=[\"sku\"])\n        write_chunk(chunk)                 # e.g. execute_batch per chunk\n        total += len(chunk)\n    return total\n```",
+  "use_cases_md": "- Normalising messy marketplace exports whose headers, date formats and number formats differ by source.\n- Producing an error report of rejected rows instead of failing the whole upload.\n- Reducing memory so large files fit within a Lambda or ECS task's memory limit.\n- Speeding up ETL steps that used `apply`/`iterrows`.\n- Chunked ingestion of files too big to load at once.",
+  "mistakes_md": "- **`iterrows`/`apply(axis=1)` for arithmetic** - slow and loses dtypes. Fix: vectorised ops, `np.where`, `np.select`, `map`.\n- **`pd.concat` inside a loop** - quadratic copying. Fix: collect frames in a list, concat once.\n- **Parsing dates without `format`** - slow, and `01-02-2026` may be read as Jan 2 instead of Feb 1. Fix: explicit `format` or `dayfirst=True`.\n- **`errors=\"coerce\"` without counting the NaNs it produced** - silently drops data. Fix: compare null counts before/after and report bad rows.\n- **Using `category` for high-cardinality columns** (order IDs) - more memory, not less. Fix: only low-cardinality columns.\n- **De-duplicating on all columns** when duplicates differ by a timestamp or whitespace. Fix: clean first, then dedupe on the business key.\n- **Converting everything to Python objects early** (`to_dict` then loops). Fix: stay in pandas until the final write.",
+  "best_practices_md": "- Make cleaning a pure function: DataFrame in, (clean, rejected) out - easy to test.\n- Normalise headers, then map to canonical names with a per-source rename dict.\n- Be explicit: `dtype`, `usecols`, `format`, `na_values` on read.\n- Measure with `memory_usage(deep=True)` and timers before optimising.\n- Prefer Parquet over CSV for intermediate data; consider Arrow-backed dtypes.\n- Log row counts at each stage (read, after cleaning, rejected, written).",
+  "my_context_md": "- `read_and_validate()` in ECSMarketplaceDataUpload already validates and renames columns across 150+ report types; per-source header normalisation plus a rename map is the scalable way to handle each marketplace's naming quirks.\n- Because the pipeline runs on Lambda/ECS with fixed memory, dtype choices (`category` for channels/statuses, `usecols`, explicit `dtype`) and `chunksize` directly affect whether big XLSX/CSV reports fit.\n- Your orders upsert with `COALESCE(EXCLUDED.col, table.col)` relies on missing values reaching PostgreSQL as NULL - converting NaN/NaT to `None` before `execute_batch` is part of cleaning.\n- Splitting rejected rows into an error report would give the `fs_upload` Error status a precise, user-facing reason.",
+  "related": [
+    "pandas-essentials",
+    "python-generators-iterators",
+    "sql-null-handling",
+    "postgres-upsert",
+    "python-exceptions"
+  ],
+  "flashcards": [
+    {
+      "front": "Fastest-to-slowest ways to compute a new column?",
+      "back": "Vectorised ops/.str/.dt -> np.where/np.select -> Series.map(dict) -> itertuples -> apply(axis=1)/iterrows."
+    },
+    {
+      "front": "How to convert a messy numeric column safely?",
+      "back": "Strip symbols, then `pd.to_numeric(s, errors='coerce')`, and count/report the NaNs produced."
+    },
+    {
+      "front": "When does `category` dtype save memory?",
+      "back": "For low-cardinality columns (few unique values repeated many times)."
+    },
+    {
+      "front": "How to process a CSV larger than RAM?",
+      "back": "`pd.read_csv(path, chunksize=N)` returns an iterator of DataFrames; process each chunk."
+    },
+    {
+      "front": "Why pass `format=` to `pd.to_datetime`?",
+      "back": "Faster parsing and no ambiguity (day-first vs month-first)."
+    },
+    {
+      "front": "How to see real memory used by string columns?",
+      "back": "`df.info(memory_usage='deep')` or `df.memory_usage(deep=True)`."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Building a DataFrame by calling `pd.concat` on each of 5,000 small frames inside a loop is slow because:",
+      "options": [
+        "concat is always slow",
+        "Each concat copies all previously accumulated data (quadratic)",
+        "pandas locks the GIL",
+        "It disables vectorisation"
+      ],
+      "answer_index": 1,
+      "explanation": "Collect frames in a list and concat once."
+    },
+    {
+      "question": "Which converts '1,200.50' and 'abc' into 1200.5 and NaN?",
+      "options": [
+        "s.astype(float)",
+        "pd.to_numeric(s)",
+        "pd.to_numeric(s.str.replace(',', ''), errors='coerce')",
+        "s.map(float)"
+      ],
+      "answer_index": 2,
+      "explanation": "Remove thousands separators, then coerce invalid values to NaN instead of raising."
+    },
+    {
+      "question": "A column `order_id` has 2 million unique strings. Converting it to `category` will:",
+      "options": [
+        "Likely increase memory and add overhead",
+        "Halve memory",
+        "Speed up every operation",
+        "Fail with an error"
+      ],
+      "answer_index": 0,
+      "explanation": "Categories store each unique value plus codes; with near-unique values there's no saving."
+    },
+    {
+      "question": "What does `pd.read_csv(..., dtype_backend='pyarrow')` give you?",
+      "options": [
+        "A PyArrow Table instead of a DataFrame",
+        "Faster writes to PostgreSQL",
+        "Automatic parallel reading across machines",
+        "A DataFrame using Arrow-backed dtypes (compact strings, native nulls)"
+      ],
+      "answer_index": 3,
+      "explanation": "It still returns a pandas DataFrame, but columns use ArrowDtype, which is memory-efficient and nullable."
+    }
+  ],
+  "interview": [
+    {
+      "question": "A pandas ETL job is slow and runs out of memory on large files. How do you diagnose and fix it?",
+      "difficulty": "hard",
+      "answer_md": "**Diagnose first**\n- Time each stage (download, parse, clean, write) with `time.perf_counter()`; often Excel parsing or row-by-row DB inserts dominate, not transformations.\n- `df.info(memory_usage=\"deep\")` to see which columns are heavy (usually object/string columns).\n- Look for `apply(axis=1)`, `iterrows`, concat-in-loop, and per-row DB calls.\n\n**Fix memory**\n- `usecols` to read only needed columns; explicit `dtype` to skip inference and avoid int->float.\n- `category` for low-cardinality strings; downcast numerics; Arrow-backed strings (`dtype_backend=\"pyarrow\"`).\n- `chunksize` streaming for CSV; for Excel, convert once to CSV/Parquet or use the faster `calamine` engine.\n- `del` intermediates you no longer need; avoid keeping raw + cleaned copies.\n\n**Fix speed**\n- Replace row functions with vectorised ops/`np.where`/`map`/`merge`.\n- Batch DB writes (`execute_values`/`execute_batch` with large page sizes, or `COPY` into a staging table then `INSERT ... ON CONFLICT`).\n- Concat once at the end.\n\nMeasure again after each change - and add a row-count check so optimisation doesn't silently drop data."
+    },
+    {
+      "question": "How do you handle missing values when loading data into PostgreSQL from pandas?",
+      "difficulty": "medium",
+      "answer_md": "pandas represents missing data as `NaN` (float), `NaT` (datetime) or `pd.NA` (nullable dtypes). psycopg2 doesn't map these to SQL NULL automatically: `float('nan')` is inserted as the numeric value `'NaN'` (valid in PostgreSQL numeric/float columns, but wrong semantically), and `pd.NA`/`NaT` may fail to adapt or produce errors.\n\nApproach:\n1. Decide per column what missing means: reject the row (missing key), default it, or store NULL.\n2. Normalise sentinels early (`na_values=[\"\", \"NA\", \"-\", \"null\"]`).\n3. Convert to `None` just before writing:\n```python\ndf = df.astype(object).where(df.notna(), None)\nrows = list(df.itertuples(index=False, name=None))\nexecute_batch(cur, sql, rows, page_size=1000)\n```\n4. Be aware of upsert semantics: with `SET col = COALESCE(EXCLUDED.col, t.col)`, a NULL keeps the existing value, but a `NaN` would *overwrite* it - so correct NULL conversion directly protects data integrity.\n5. Integers with gaps: use `Int64` in pandas to avoid `1.0`-style floats being sent to integer columns."
+    },
+    {
+      "question": "Why is `df.apply(func, axis=1)` slow and what are the alternatives?",
+      "difficulty": "medium",
+      "answer_md": "`apply(axis=1)` iterates in Python: for each row it builds a Series object (boxing every value into Python objects), then calls your Python function. With a million rows that's a million Series constructions and function calls - interpreter overhead dominates. It also may upcast dtypes because a row Series must hold a single dtype.\n\nVectorised alternatives operate on whole columns in C:\n```python\n# conditional value\ndf[\"fee\"] = np.where(df[\"channel\"] == \"amazon\", df[\"price\"] * 0.15, df[\"price\"] * 0.10)\n# multiple conditions\ndf[\"band\"] = np.select([df.qty == 0, df.qty < 10], [\"none\", \"low\"], default=\"high\")\n# lookup\ndf[\"rate\"] = df[\"channel\"].map({\"amazon\": 0.15, \"flipkart\": 0.12})\n# string ops\ndf[\"sku\"] = df[\"sku\"].str.strip().str.upper()\n# date parts\ndf[\"month\"] = df[\"order_date\"].dt.to_period(\"M\")\n# lookup from another table\ndf = df.merge(rates, on=\"channel\", how=\"left\")\n```\nIf logic genuinely needs Python per row (calling an API, complex parsing), use `itertuples()` (much faster than `iterrows`) or a list comprehension over zipped columns - and consider whether the row-level work can be batched instead."
+    }
+  ]
+}

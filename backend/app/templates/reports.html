@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, stat, empty, kv %}
+{% block title %}{{ nav.title }} report{% endblock %}
+{% block content %}
+{% set t = r.totals %}{% set p = r.previous %}
+<div class="page-head">
+  <div><h1>{{ "Weekly" if kind == "weekly" else "Monthly" }} report</h1><p>{{ r.period.start|date }} – {{ r.period.end|date }}</p></div>
+  <div class="actions no-print">
+    <a class="chip {{ 'on' if kind == 'weekly' }}" href="/reports">Weekly</a><a class="chip {{ 'on' if kind == 'monthly' }}" href="/reports?kind=monthly">Monthly</a>
+    <a class="btn" href="{{ nav.csv }}" hx-boost="false">Download CSV</a>
+    <button class="btn" type="button" onclick="window.print()">Print</button>
+  </div>
+</div>
+<div class="between mb no-print">
+  <a class="btn sm" href="{{ nav.prev }}">← Previous</a><h2 style="margin:0">{{ nav.title }}</h2>
+  {% if nav.next %}<a class="btn sm" href="{{ nav.next }}">Next →</a>{% else %}<span></span>{% endif %}
+</div>
+
+{% macro delta(key) -%}{% if p and p[key] is defined %}{% set d = t[key] - p[key] %}{{ "+" if d > 0 }}{{ d|round(1) }} vs previous{% endif %}{%- endmacro %}
+<div class="grid g5 mb">
+  {{ stat("Hours", t.hours, delta("hours")) }}
+  {{ stat("Active days", t.active_days, delta("active_days")) }}
+  {{ stat("Topics learned", t.topics_learned, delta("topics_learned")) }}
+  {{ stat("Exercises solved", t.exercises_solved, delta("exercises_solved")) }}
+  {{ stat("Reviews", t.reviews, delta("reviews")) }}
+</div>
+
+<div class="grid g2">
+  {% if kind == "weekly" and r.next_week_priorities %}
+    {% call card("Priorities for next week") %}<ol class="small">{% for x in r.next_week_priorities %}<li>{{ x }}</li>{% endfor %}</ol>{% endcall %}
+  {% endif %}
+  {% call card("Time by skill") %}{% if r.time_by_skill %}{{ charts.hbars(r.time_by_skill, "skill", "hours", name="h") }}{% else %}{{ empty("No study time recorded") }}{% endif %}{% endcall %}
+
+  {% call card("Topics") %}
+    {{ kv("Learned", r.learned|length) }}{{ kv("Studied", r.studied|length) }}{{ kv("Revised", r.revised|length) }}
+    {% if r.learned %}<div class="small muted mt">Learned</div><ul class="list compact small">{% for x in r.learned %}<li><a href="/topics/{{ x.id }}">{{ x.title }}</a>{% if x.skill %} <span class="faint">· {{ x.skill }}</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+    {% if r.studied %}<div class="small muted mt">Studied</div><div class="small">{% for x in r.studied %}<a href="/topics/{{ x.id }}">{{ x.title }}</a>{{ ", " if not loop.last }}{% endfor %}</div>{% endif %}
+  {% endcall %}
+  {% call card("Coding") %}
+    {% if r.solved %}<div class="small muted">Solved</div><ul class="list compact small">{% for x in r.solved %}<li><a href="/practice/{{ x.id }}">{{ x.title }}</a> {{ badge(x.difficulty) }}</li>{% endfor %}</ul>{% endif %}
+    {% if r.unsolved_attempts %}<div class="small muted mt">Attempted, not solved</div><ul class="list compact small">{% for x in r.unsolved_attempts %}<li><a href="/practice/{{ x.id }}">{{ x.title }}</a></li>{% endfor %}</ul>{% endif %}
+    {% if not r.solved and not r.unsolved_attempts %}{{ empty("No exercises attempted") }}{% endif %}
+  {% endcall %}
+
+  {% call card("Revision") %}
+    {% set rp = r.revision_performance %}
+    {{ kv("Reviews", rp.total) }}{{ kv("Recall rate", (rp.rate|string ~ "%") if rp.rate is not none else "—") }}
+    {% for k, v in rp.by_rating.items() %}{{ kv(k|label, v) }}{% endfor %}
+  {% endcall %}
+  {% call card("Weak areas") %}
+    {% if r.weak_areas.topics %}<div class="small muted">Often forgotten</div><ul class="list compact small">{% for x in r.weak_areas.topics %}<li><a href="/topics/{{ x.id }}">{{ x.title }}</a> <span class="bad">{{ x.misses }}×</span></li>{% endfor %}</ul>{% endif %}
+    {% if r.weak_areas.concepts %}<div class="small muted mt">Weak concepts</div><div class="chips">{% for x in r.weak_areas.concepts %}<span class="chip">{{ x.concept }} · {{ x.count }}</span>{% endfor %}</div>{% endif %}
+    {% if not r.weak_areas.topics and not r.weak_areas.concepts %}<p class="small faint">Nothing stands out.</p>{% endif %}
+  {% endcall %}
+
+  {% if r.skills_improved %}
+    {% call card("Skills improved") %}<ul class="list compact small">{% for x in r.skills_improved %}<li>{{ x.skill }}: {{ x["from"] or "—" }} → <strong>{{ x.to }}</strong></li>{% endfor %}</ul>{% endcall %}
+  {% endif %}
+  {% if kind == "weekly" and r.pending_topics %}
+    {% call card("In progress") %}<ul class="list compact small">{% for x in r.pending_topics[:12] %}<li><a href="/topics/{{ x.id }}">{{ x.title }}</a> {{ badge(x.status) }}</li>{% endfor %}</ul>{% endcall %}
+  {% endif %}
+  {% if kind == "monthly" %}
+    {% call card("Goals & projects") %}
+      {% if r.goals_achieved %}<div class="small muted">Goals achieved</div><ul class="list compact small">{% for g in r.goals_achieved %}<li>✓ {{ g.title }}</li>{% endfor %}</ul>{% endif %}
+      {% if r.projects_progressed %}<div class="small muted mt">Project items completed</div>{% for x in r.projects_progressed %}{{ kv(x.project, x["items"]) }}{% endfor %}{% endif %}
+      {% if not r.goals_achieved and not r.projects_progressed %}<p class="small faint">No goals or project items completed.</p>{% endif %}
+    {% endcall %}
+    {% if r.areas_needing_improvement %}
+      {% call card("Needs attention") %}<ul class="list compact small">{% for x in r.areas_needing_improvement %}<li><a href="/topics/{{ x.id }}">{{ x.title }}</a> {{ badge(x.status) }}</li>{% endfor %}</ul>{% endcall %}
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

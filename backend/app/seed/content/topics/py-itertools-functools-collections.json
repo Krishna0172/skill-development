@@ -1,0 +1,186 @@
+{
+  "slug": "py-itertools-functools-collections",
+  "title": "itertools, functools and collections toolkit",
+  "skill": "python-advanced",
+  "extra_skills": [
+    "python-performance"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "itertools",
+    "functools",
+    "collections",
+    "Counter",
+    "defaultdict",
+    "lru_cache"
+  ],
+  "summary": "Three standard-library modules solve a large share of everyday data-handling problems: itertools for lazy iteration, functools for function tools such as caching and partials, and collections for specialised containers. Learn the handful of tools worth memorising.",
+  "why_md": "- They replace hand-written loops with shorter, tested, faster code.\n- `Counter`, `defaultdict`, `deque`, `lru_cache`, `groupby` and `batched` appear constantly in data-ingestion and API code.\n- Interviewers like questions such as 'group these rows', 'top-k most common', 'cache an expensive call'.",
+  "details_md": "### collections\n- **`Counter`**: counts hashables. `Counter(\"abca\")` gives `{'a': 2, 'b': 1, 'c': 1}`; `.most_common(2)` returns the top pairs; counters add and subtract.\n- **`defaultdict(factory)`**: a dict that creates a default for missing keys. `defaultdict(list)` makes grouping trivial: `groups[key].append(x)`. Careful: merely *reading* a missing key inserts it.\n- **`deque`**: double-ended queue with O(1) `append`/`appendleft`/`pop`/`popleft`; `deque(maxlen=n)` keeps only the last n items (sliding window).\n- **`namedtuple`** / `typing.NamedTuple`: lightweight immutable records with named fields.\n- **`ChainMap`**: layered lookups (defaults, then env, then CLI) without copying.\n\n### itertools (all lazy: they return iterators)\n- `chain(a, b)` / `chain.from_iterable(lists)`: concatenate or flatten one level.\n- `islice(it, n)` / `islice(it, start, stop)`: slice any iterator (e.g. first 5 lines of a file).\n- `groupby(data, key)`: groups *consecutive* equal keys, so **sort by the same key first**. Each group is itself a lazy iterator that dies when you advance, so consume it immediately (`list(g)`).\n- `product(a, b)` (cartesian product), `permutations`, `combinations`.\n- `accumulate(nums)`: running totals (or any binary function).\n- `zip_longest`, `count`, `cycle`, `repeat`, `takewhile`, `dropwhile`, `starmap`, `pairwise` (3.10+) and `batched(it, n)` (3.12+) which yields tuples of up to n items, ideal for chunking inserts.\n\n### functools\n- **`lru_cache(maxsize=128)`** / **`cache`**: memoise a pure function by its (hashable) arguments. `fn.cache_info()` shows hits and misses; `fn.cache_clear()` resets. Arguments must be hashable and the function should be pure; on instance methods it also keeps `self` alive.\n- **`partial(fn, *args, **kw)`**: pre-fill arguments to make a new callable.\n- **`reduce(fn, it, init)`**: fold an iterable to one value; often a loop or `sum` reads better.\n- **`wraps`**: preserve metadata when writing decorators.\n- **`total_ordering`**, **`cached_property`** (computed once per instance), **`singledispatch`** (type-based function overloading).\n\n### Choosing\nIf you are about to write a manual counting dict, a grouping loop, a sliding window or a chunk loop, one of these probably replaces it.\n\n### Laziness reminder\nitertools returns iterators: they are consumed once and use O(1) memory. Wrap in `list()` to materialise, but remember that a consumed iterator is empty.",
+  "code_md": "```python\n# 1. Counter + defaultdict\nfrom collections import Counter, defaultdict\n\nstatuses = [\"ok\", \"fail\", \"ok\", \"ok\", \"retry\", \"fail\"]\nprint(Counter(statuses).most_common(2))\n\nby_sku = defaultdict(list)\nfor sku, qty in [(\"A\", 1), (\"B\", 5), (\"A\", 2)]:\n    by_sku[sku].append(qty)\nprint(dict(by_sku))\n```\n\n```python\n# 2. groupby needs sorted input; batched/islice for chunks\nfrom itertools import groupby, islice, accumulate, chain\nrows = [(\"A\", 1), (\"B\", 2), (\"A\", 3)]\nrows.sort(key=lambda r: r[0])\nfor key, grp in groupby(rows, key=lambda r: r[0]):\n    print(key, sum(v for _, v in grp))\nprint(list(accumulate([1, 2, 3, 4])))\nprint(list(islice(chain([1, 2], [3, 4]), 3)))\n```\n\n```python\n# 3. lru_cache and partial\nfrom functools import lru_cache, partial\n\n@lru_cache(maxsize=None)\ndef fib(n):\n    return n if n < 2 else fib(n - 1) + fib(n - 2)\n\nprint(fib(30), fib.cache_info().hits > 0)\nto_int2 = partial(int, base=2)\nprint(to_int2(\"1011\"))\n```\n\n```python\n# 4. deque sliding window\nfrom collections import deque\nlast3 = deque(maxlen=3)\nfor x in range(6):\n    last3.append(x)\nprint(list(last3))\n```",
+  "use_cases_md": "- `Counter` over report row statuses or error codes to produce summary counts.\n- `defaultdict(list)` to group line items by order id before inserting.\n- `batched(rows, 1000)` (3.12+) or an `islice` loop to chunk bulk inserts.\n- `lru_cache` on a pure lookup (marketplace id to config) to avoid repeated work.\n- `deque(maxlen=n)` for a sliding window of recent latencies; `partial` to preconfigure callbacks for a thread pool.",
+  "mistakes_md": "- **`groupby` on unsorted data** produces repeated groups for the same key.\n- **Consuming a `groupby` group late**: the group is invalid after the next iteration step.\n- **Reusing an exhausted iterator** (`chain`, `islice`, `map` objects): second pass is empty.\n- **`lru_cache` on impure functions** or with unhashable arguments (lists/dicts).\n- **Unbounded `cache`** in long-running services causes memory growth; set `maxsize`.\n- **`defaultdict` side effect**: `d[missing]` creates the key; use `.get()` for read-only checks.",
+  "best_practices_md": "- Prefer `Counter`/`defaultdict` over hand-written counting and grouping.\n- Sort before `groupby`, or use `defaultdict` when order does not matter.\n- Bound caches (`maxsize`) and cache only pure functions.\n- Use `deque` instead of `list.pop(0)` for queues.\n- Use `functools.wraps` in every decorator.\n- Materialise iterators with `list()` only when you need more than one pass.",
+  "my_context_md": "- `ECSMarketplaceDataUpload` routes 150+ report processors via a registry; `functools.lru_cache` is a natural fit for caching the importlib-resolved processor per marketplace.\n- `ForcesightJobSchedulerAndRunner` claims jobs with SKIP LOCKED and runs them in a `ThreadPoolExecutor` (runner.py); `itertools.batched` or `islice` is a clean way to chunk claimed work.\n- Look for manual `if key not in d: d[key] = []` blocks in your services; they are `defaultdict(list)` candidates.",
+  "revision_notes_md": "- `Counter(xs).most_common(n)`; counters support `+` and `-`.\n- `defaultdict(list)` for grouping; reading a missing key inserts it.\n- `deque(maxlen=n)` = sliding window; O(1) both ends.\n- `groupby` only groups consecutive equal keys: sort first.\n- `chain.from_iterable` flattens one level; `islice` slices iterators.\n- `accumulate` running totals; `product`/`combinations` for combinatorics.\n- `batched(it, n)` (3.12+) for chunking.\n- `lru_cache(maxsize)`: pure functions, hashable args, `cache_info()`.\n- `partial` pre-fills arguments; `wraps` preserves metadata.",
+  "exercises_md": "1. Given a list of `(order_id, sku)` tuples, build a `defaultdict(list)` grouping skus by order, then print the 3 most common skus with `Counter`.\n2. Chunk a list of 2,345 ids into batches of 500 using `islice` (and `batched` if on 3.12+).\n3. Cache a function that parses a marketplace config and show `cache_info()` after repeated calls.\n4. Demonstrate the `groupby` unsorted-input bug, then fix it.",
+  "related": [
+    "py-comprehensions",
+    "python-generators-iterators",
+    "python-decorators",
+    "py-performance",
+    "registry-dispatcher-pattern"
+  ],
+  "flashcards": [
+    {
+      "front": "Why sort before `groupby`?",
+      "back": "It only groups consecutive items with the same key; unsorted input yields repeated groups."
+    },
+    {
+      "front": "`deque(maxlen=3)` behaviour?",
+      "back": "Keeps only the 3 most recent items; older ones are dropped automatically."
+    },
+    {
+      "front": "What can you pass to `lru_cache`?",
+      "back": "Hashable arguments only; the function should be pure."
+    },
+    {
+      "front": "`Counter.most_common(2)` returns?",
+      "back": "A list of the 2 most frequent (item, count) pairs."
+    },
+    {
+      "front": "What does `functools.partial` do?",
+      "back": "Creates a new callable with some arguments pre-filled."
+    },
+    {
+      "front": "`itertools.batched(it, n)`?",
+      "back": "Yields tuples of up to n items (Python 3.12+)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What does `itertools.groupby` require for correct grouping of all equal keys?",
+      "options": [
+        "Hashable keys",
+        "Input sorted by the key",
+        "A list, not an iterator",
+        "Unique keys"
+      ],
+      "answer_index": 1,
+      "explanation": "It groups only consecutive runs of equal keys."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which structure gives O(1) removal from the left end?",
+      "options": [
+        "list",
+        "tuple",
+        "deque",
+        "set"
+      ],
+      "answer_index": 2,
+      "explanation": "`deque.popleft()` is O(1); `list.pop(0)` is O(n)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is a requirement for arguments of an `lru_cache`-decorated function?",
+      "options": [
+        "They must be ints",
+        "They must be hashable",
+        "They must be strings",
+        "They must be immutable lists"
+      ],
+      "answer_index": 1,
+      "explanation": "Arguments become part of a dict key, so they must be hashable."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`Counter(words).____(3)` returns the three most frequent items.",
+      "answers": [
+        "most_common"
+      ],
+      "explanation": "`most_common(n)` returns a list of (item, count)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To pre-fill arguments of a function you use `functools.____`.",
+      "answers": [
+        "partial"
+      ],
+      "explanation": "partial returns a new callable with arguments bound."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from collections import Counter, defaultdict\nfrom itertools import groupby, accumulate, islice, chain\n\nprint(Counter([\"ok\", \"fail\", \"ok\", \"ok\", \"retry\", \"fail\"]).most_common(2))\nd = defaultdict(list)\nfor k, v in [(\"A\", 1), (\"B\", 5), (\"A\", 2)]:\n    d[k].append(v)\nprint(dict(d))\nprint(list(accumulate([1, 2, 3, 4])))\nprint(list(islice(chain([1, 2], [3, 4]), 3)))\n",
+      "answers": [
+        "[('ok', 3), ('fail', 2)]\n{'A': [1, 2], 'B': [5]}\n[1, 3, 6, 10]\n[1, 2, 3]"
+      ],
+      "explanation": "Counter order by count; defaultdict groups; accumulate gives running sums; islice takes the first 3 of the chain."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from itertools import groupby\ndata = [\"a\", \"a\", \"b\", \"a\"]\nprint([(k, len(list(g))) for k, g in groupby(data)])\nprint([(k, len(list(g))) for k, g in groupby(sorted(data))])\nfrom collections import deque\nw = deque(maxlen=3)\nfor x in range(6):\n    w.append(x)\nprint(list(w))\n",
+      "answers": [
+        "[('a', 2), ('b', 1), ('a', 1)]\n[('a', 3), ('b', 1)]\n[3, 4, 5]"
+      ],
+      "explanation": "Unsorted groupby splits 'a' into two runs; sorted merges them; deque keeps the last 3."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "from itertools import groupby\nrows = [(\"A\", 1), (\"B\", 2), (\"A\", 3)]\nfor key, grp in groupby(rows, key=lambda r: r[0]):\n    print(key, sum(v for _, v in grp))\n\nfrom functools import lru_cache\n@lru_cache\ndef total(items):\n    return sum(items)\nprint(total([1, 2, 3]))\n",
+      "answer": "(1) `groupby` needs input sorted by the key; otherwise key 'A' appears twice with partial sums. Use `rows.sort(key=...)` first or a `defaultdict`. (2) `lru_cache` needs hashable arguments; a list raises `TypeError: unhashable type: 'list'`. Pass a tuple (`total((1,2,3))`) or convert inside.",
+      "rubric": [
+        "Sort by the same key before groupby",
+        "Lists are unhashable so lru_cache fails",
+        "Use a tuple argument"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain what `lru_cache` does and the cautions when using it.",
+      "answer": "`lru_cache` wraps a function and stores results in a dict keyed by the call arguments; repeated calls with the same arguments return the stored value without re-running the function. LRU means that when `maxsize` is reached the least recently used entry is evicted. Cautions: arguments must be hashable, the function must be pure (no dependence on changing external state), results are shared objects (mutating them affects later callers), `maxsize=None` can grow without bound, and on methods the cache holds references to `self`. `cache_info()` and `cache_clear()` help monitor and reset.",
+      "rubric": [
+        "Memoises by hashable arguments",
+        "LRU eviction with maxsize",
+        "Purity and unbounded growth cautions"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you find the 3 most common error codes in a large log without loading it all in memory?",
+      "answer": "Stream the lines and update a `Counter` per line, e.g. `c = Counter(); for line in f: c[parse_code(line)] += 1`, then `c.most_common(3)`. Memory is proportional to the number of distinct codes, not lines. For counts across many files merge counters with `+`.",
+      "rubric": [
+        "Stream with a loop",
+        "Counter memory depends on distinct keys",
+        "most_common(3)"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "When would you use `defaultdict` vs `dict.setdefault` vs `Counter`?",
+      "difficulty": "easy",
+      "answer_md": "`Counter` is for counting hashables (`c[x] += 1`, `most_common`). `defaultdict(list)` is for grouping, creating a new default value for each missing key. `setdefault(k, default)` does the same on a plain dict but builds the default every call (`d.setdefault(k, [])` allocates a list even if unneeded). Note that reading a missing key in a `defaultdict` inserts it; use `.get()` or `in` to avoid that."
+    },
+    {
+      "question": "How does `groupby` differ from SQL GROUP BY?",
+      "difficulty": "medium",
+      "answer_md": "SQL `GROUP BY` groups all rows with equal keys regardless of order. `itertools.groupby` is streaming and groups only *adjacent* equal keys, using O(1) memory. Sort by the key first if you want SQL-like behaviour (O(n log n)), or use `defaultdict(list)` if the data fits in memory. Also each group iterator is invalidated when you advance to the next key, so consume it right away.\n\n```python\nfor k, g in groupby(sorted(rows, key=f), key=f):\n    items = list(g)\n```"
+    },
+    {
+      "question": "What is the difference between `functools.partial` and a lambda or closure?",
+      "difficulty": "medium",
+      "answer_md": "All can fix some arguments. `partial(f, 1, b=2)` is a picklable callable object that introspects well (`.func`, `.args`, `.keywords`), so it works with `multiprocessing` where lambdas cannot be pickled. A lambda is more flexible (arbitrary expressions) but anonymous and unpicklable. Beware the late-binding closure gotcha: lambdas created in a loop capture the variable, not its value, while `partial` binds the value immediately."
+    },
+    {
+      "question": "How would you process 1M rows in chunks of 1,000?",
+      "difficulty": "easy",
+      "answer_md": "Use `itertools.batched(rows, 1000)` on Python 3.12+; on older versions a helper with `islice`:\n\n```python\nfrom itertools import islice\ndef chunks(it, n):\n    it = iter(it)\n    while batch := list(islice(it, n)):\n        yield batch\n```\nThis works with any iterable (including generators or cursors) in O(n) total time and O(batch) memory, and fits bulk inserts (`execute_values`) and API pagination."
+    }
+  ]
+}

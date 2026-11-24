@@ -1,0 +1,121 @@
+{
+  "slug": "python-data-structures",
+  "title": "Built-in Data Structures",
+  "skill": "python",
+  "extra_skills": [
+    "dsa"
+  ],
+  "category": "Python",
+  "difficulty": "beginner",
+  "tags": [
+    "python",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "collections",
+    "big-o"
+  ],
+  "summary": "Python gives you four core containers: list (ordered, mutable), tuple (ordered, immutable), dict (key -> value, insertion-ordered) and set (unique items). Picking the right one is mostly about how you look things up: dicts and sets find items in O(1) on average, lists need a full scan. The `collections` module adds specialised versions like `defaultdict`, `Counter` and `deque`.",
+  "details_md": "### list\nA `list` is a dynamic array of object references. Indexing and `append` are O(1) (amortised), but `insert(0, x)`, `pop(0)` and `x in lst` are O(n) because elements must be shifted or scanned. Lists over-allocate memory so appends rarely trigger a resize.\n\n### tuple\nA `tuple` is a fixed-size, immutable sequence. Because it cannot change, it is hashable **if all its items are hashable**, so it can be a dict key or set member (e.g. a composite key `(id, orgid)`). Tuples are slightly smaller and faster to create than lists and signal \"this is a record, not a growing collection\". `typing.NamedTuple` adds field names.\n\n### dict\nA `dict` is a hash table. Lookup, insert and delete are O(1) on average. Since Python 3.7 insertion order is guaranteed. Keys must be hashable (immutable built-ins, tuples of hashables, frozen dataclasses). Useful methods: `get(k, default)`, `setdefault`, `pop(k, default)`, `items()`, and the merge operators `a | b` and `a |= b` (3.9+). Dict views (`keys()`, `items()`) are live and support set operations like `d1.keys() & d2.keys()`.\n\n### set / frozenset\nA `set` is a hash table without values. Membership tests are O(1) average, and it supports algebra: `|` union, `&` intersection, `-` difference, `^` symmetric difference. `frozenset` is the immutable, hashable variant. Note `{}` is an empty **dict**; use `set()` for an empty set.\n\n### collections module\n- `defaultdict(list)` creates missing keys automatically - perfect for grouping.\n- `Counter` counts hashables and has `most_common(n)`.\n- `deque` is a double-ended queue with O(1) appends/pops on both ends and an optional `maxlen` for ring buffers.\n- `OrderedDict` still matters for `move_to_end()` (LRU caches) and order-sensitive equality.\n- `ChainMap` layers multiple dicts (e.g. CLI args over env over defaults).\n\n### Mutability and references\nVariables hold references. `b = a` does not copy a list; both names point to the same object. `a.copy()`, `list(a)` or `a[:]` make a **shallow** copy (inner objects still shared); `copy.deepcopy` copies recursively. This is also why mutable default arguments are dangerous.\n\n### Comprehensions\nList, dict and set comprehensions (`[f(x) for x in xs if cond]`, `{k: v for ...}`, `{x for ...}`) are the idiomatic way to build containers. A generator expression `(x for x in xs)` builds nothing up front and is consumed lazily.\n\n### Complexity cheat sheet\n| Operation | list | dict/set |\n|---|---|---|\n| index / key lookup | O(1) | O(1) avg |\n| `x in c` | O(n) | O(1) avg |\n| append / add | O(1) amortised | O(1) avg |\n| insert/delete at front | O(n) | n/a |\n\nWhen you find yourself writing `if x in some_list` inside a loop, converting that list to a set once is usually the single biggest easy win.",
+  "code_md": "```python\n# Grouping rows by key with defaultdict\nfrom collections import defaultdict, Counter, deque\n\nrows = [\n    {\"sku\": \"A1\", \"channel\": \"amazon\", \"qty\": 2},\n    {\"sku\": \"B2\", \"channel\": \"flipkart\", \"qty\": 1},\n    {\"sku\": \"A1\", \"channel\": \"flipkart\", \"qty\": 5},\n]\n\nby_sku = defaultdict(list)          # missing keys start as []\nfor r in rows:\n    by_sku[r[\"sku\"]].append(r)\nprint(dict(by_sku))\n\nqty_per_channel = Counter()\nfor r in rows:\n    qty_per_channel[r[\"channel\"]] += r[\"qty\"]\nprint(qty_per_channel.most_common(1))   # [('flipkart', 6)]\n```\n\n```python\n# O(n*m) vs O(n+m): convert the lookup list to a set once\nexisting_ids = [\"o1\", \"o2\", \"o3\"]          # imagine 100k items\nincoming = [\"o2\", \"o4\", \"o5\"]\n\nexisting = set(existing_ids)               # O(m) once\nnew_ids = [i for i in incoming if i not in existing]  # O(1) per check\nprint(new_ids)                             # ['o4', 'o5']\n\n# Set algebra\na, b = {\"sku1\", \"sku2\"}, {\"sku2\", \"sku3\"}\nprint(a & b, a - b, a | b)\n```\n\n```python\n# Tuples as composite dict keys (like a (id, orgid) primary key)\nstock = {}\nstock[(101, 7)] = 40\nstock[(101, 8)] = 12\nprint(stock.get((101, 7), 0))   # 40\n\n# Dict merge operators (3.9+)\ndefaults = {\"timeout\": 30, \"retries\": 3}\noverrides = {\"retries\": 5}\ncfg = defaults | overrides       # {'timeout': 30, 'retries': 5}\n\n# deque as a bounded buffer of last N log lines\nrecent = deque(maxlen=3)\nfor line in [\"a\", \"b\", \"c\", \"d\"]:\n    recent.append(line)\nprint(list(recent))              # ['b', 'c', 'd']\n```\n\n```python\n# Shallow vs deep copy\nimport copy\norig = {\"cols\": [\"a\", \"b\"]}\nshallow = orig.copy()\ndeep = copy.deepcopy(orig)\norig[\"cols\"].append(\"c\")\nprint(shallow[\"cols\"])  # ['a', 'b', 'c']  <- inner list shared\nprint(deep[\"cols\"])     # ['a', 'b']\n```",
+  "use_cases_md": "- **dict** for column-rename maps, config, lookup tables keyed by ID, and JSON payloads.\n- **set** for de-duplicating IDs, checking \"already processed?\" quickly, and diffing two lists of keys (e.g. expected vs actual CSV columns).\n- **tuple** for fixed records, composite keys like `(id, orgid)`, and immutable registries.\n- **defaultdict / Counter** for grouping and counting during ETL.\n- **deque** for queues, BFS, sliding windows and bounded \"last N\" buffers.",
+  "mistakes_md": "- **Membership tests on a big list inside a loop** - O(n*m). Fix: build a `set` once.\n- **Using `{}` for an empty set** - it is a dict. Fix: `set()`.\n- **Mutating a list while iterating over it** - skips elements. Fix: iterate over a copy or build a new list with a comprehension.\n- **Assuming `b = a` copies** - both names share one object. Fix: `.copy()` or `copy.deepcopy` for nested data.\n- **Using a list as a dict key** - `TypeError: unhashable type`. Fix: convert to a tuple.\n- **`list.pop(0)` as a queue** - O(n) per pop. Fix: `collections.deque.popleft()`.\n- **`[[]] * 3`** - creates three references to the same inner list. Fix: `[[] for _ in range(3)]`.",
+  "best_practices_md": "- Choose the container by access pattern: lookup by key -> dict, membership -> set, ordered sequence -> list, fixed record -> tuple/dataclass.\n- Use `dict.get(k, default)` instead of `try/except KeyError` for optional keys.\n- Prefer comprehensions over manual `append` loops for simple transforms.\n- Use `defaultdict`/`Counter` instead of hand-rolled \"if key not in d\" boilerplate.\n- Use tuples or `frozenset` for constants that must never change (module-level registries).\n- For heavy numeric/tabular work, move to pandas/NumPy rather than nested lists of dicts.",
+  "my_context_md": "- Your `_MODULE_SPECS` registry in ECSMarketplaceDataUpload is a **tuple** - an immutable sequence, a good choice for a module-level constant - and `MODULE_DISPATCH` is a **dict** giving O(1) lookup from report type to processor across 150+ processors.\n- `read_and_validate()` renames columns: a rename mapping is a dict, and checking required columns is naturally a set difference (`required - set(df.columns)`).\n- Your inventory upsert key `(id, orgid)` is exactly the kind of composite key a tuple models in Python (e.g. de-duplicating rows before `execute_batch`).\n- Your FastAPI downloader apps store background jobs in an in-memory dict keyed by job ID.",
+  "related": [
+    "python-functions-args",
+    "python-generators-iterators",
+    "python-oop-dataclasses",
+    "registry-dispatcher-pattern"
+  ],
+  "flashcards": [
+    {
+      "front": "Time complexity of `x in my_list` vs `x in my_set`?",
+      "back": "List: O(n) linear scan. Set: O(1) average (hash lookup)."
+    },
+    {
+      "front": "Why can a tuple be a dict key but a list cannot?",
+      "back": "Dict keys must be hashable. Tuples are immutable (hashable if all items are hashable); lists are mutable and unhashable."
+    },
+    {
+      "front": "How do you create an empty set?",
+      "back": "`set()` - `{}` creates an empty dict."
+    },
+    {
+      "front": "Which collection gives O(1) pops from both ends?",
+      "back": "`collections.deque` (`append`, `appendleft`, `pop`, `popleft`)."
+    },
+    {
+      "front": "Merge two dicts with the right one winning (3.9+)?",
+      "back": "`merged = a | b` (or in place: `a |= b`)."
+    },
+    {
+      "front": "Shallow vs deep copy?",
+      "back": "Shallow (`.copy()`, `list(x)`) copies the outer container; nested objects are shared. `copy.deepcopy` copies recursively."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "You need to check 100,000 incoming order IDs against 500,000 existing IDs. What is the best approach?",
+      "options": [
+        "Loop over incoming and use `in` on the existing list",
+        "Convert existing IDs to a set, then test membership",
+        "Sort both lists and use list.index()",
+        "Use a tuple for existing IDs"
+      ],
+      "answer_index": 1,
+      "explanation": "Building a set is O(m) once and each lookup is O(1) average, so total O(n+m). List membership is O(n*m)."
+    },
+    {
+      "question": "What does `grid = [[0] * 3] * 3; grid[0][0] = 1` produce?",
+      "options": [
+        "Only grid[0][0] is 1",
+        "A TypeError",
+        "The first element of every row is 1",
+        "grid is unchanged"
+      ],
+      "answer_index": 2,
+      "explanation": "`* 3` on the outer list repeats references to the same inner list, so all three rows are the same object."
+    },
+    {
+      "question": "Since which version is dict insertion order guaranteed by the language?",
+      "options": [
+        "Python 2.7",
+        "Python 3.5",
+        "Python 3.10",
+        "Python 3.7"
+      ],
+      "answer_index": 3,
+      "explanation": "CPython 3.6 implemented it; Python 3.7 made it part of the language spec."
+    },
+    {
+      "question": "Which is the idiomatic way to group rows by a key?",
+      "options": [
+        "`collections.defaultdict(list)`",
+        "`collections.deque`",
+        "A list of tuples sorted later",
+        "`frozenset`"
+      ],
+      "answer_index": 0,
+      "explanation": "`defaultdict(list)` creates an empty list for new keys, so you can `append` without existence checks."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How is a Python dict implemented and what are its performance characteristics?",
+      "difficulty": "medium",
+      "answer_md": "A dict is a **hash table**. When you insert `d[k] = v`, Python calls `hash(k)`, uses the hash to find a slot, and stores the key, value and hash. Collisions are resolved with open addressing (probing other slots). Since 3.6 CPython uses a compact layout: a sparse index array points into a dense array of entries, which saves memory and preserves insertion order (guaranteed from 3.7).\n\nPerformance: get/set/delete are **O(1) average**, O(n) worst case under pathological collisions. The table resizes when it gets about two-thirds full, so inserts are amortised O(1).\n\nRequirements: keys must be hashable and their hash must not change - that is why lists can't be keys but tuples of immutables can. If you define `__eq__` on a class you must also define a consistent `__hash__`.\n\nPractical example: replacing `if order_id in seen_list` with a set or dict turns an O(n^2) dedupe loop into O(n):\n```python\nseen = set()\nunique = [r for r in rows if not (r[\"id\"] in seen or seen.add(r[\"id\"]))]\n```"
+    },
+    {
+      "question": "When would you choose a tuple over a list?",
+      "difficulty": "easy",
+      "answer_md": "Use a **tuple** when the data is a fixed-size record or must not change; use a **list** for a homogeneous, growing collection.\n\nReasons to pick a tuple:\n- **Immutability** communicates intent and prevents accidental mutation of shared constants (e.g. a module-level registry of handlers).\n- **Hashability**: a tuple of hashables can be a dict key or set member, e.g. `(order_id, org_id)` as a composite key.\n- Slightly lower memory and faster creation; the compiler can constant-fold literal tuples.\n- Returning multiple values from a function (`return total, count`) is tuple packing.\n\nIf you want field names, use `typing.NamedTuple` or a `@dataclass(frozen=True)`. Remember immutability is shallow: `([1, 2],)` can't be reassigned but the inner list can still be mutated, and such a tuple is not hashable."
+    },
+    {
+      "question": "Explain the difference between shallow and deep copies and where it bites in practice.",
+      "difficulty": "medium",
+      "answer_md": "Assignment never copies - it binds another name to the same object. A **shallow copy** (`lst.copy()`, `dict(d)`, `lst[:]`, `copy.copy`) creates a new outer container but reuses references to the inner objects. A **deep copy** (`copy.deepcopy`) recursively copies nested objects (handling cycles via a memo dict).\n\nWhere it bites:\n```python\nTEMPLATE = {\"headers\": {\"Accept\": \"application/json\"}}\nreq = TEMPLATE.copy()\nreq[\"headers\"][\"Authorization\"] = \"Bearer x\"   # mutates TEMPLATE too!\n```\nFixes: `copy.deepcopy(TEMPLATE)`, or build fresh dicts with a factory function, or keep templates immutable (`types.MappingProxyType`, frozen dataclasses).\n\nDeep copies are slower and can copy things you didn't mean to (large DataFrames, connections), so the better design is often to avoid shared mutable state rather than deep-copying everywhere. In pandas, `df.copy()` is deep by default for the data, which is a separate concept."
+    }
+  ]
+}

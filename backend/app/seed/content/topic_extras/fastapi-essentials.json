@@ -1,0 +1,58 @@
+{
+  "slug": "fastapi-essentials",
+  "why_md": "FastAPI is the default framework for new Python APIs and for serving AI models and LLM features: typed endpoints, automatic validation and OpenAPI docs, native async and streaming. Most AI-engineer job descriptions list it, and interviews probe dependency injection, sync vs async endpoints, and lifespan-managed resources.",
+  "revision_notes_md": "- Path/query params from function signature; body from a Pydantic model.\n- Invalid input -> automatic 422 with field-level errors.\n- `def` endpoints run in a threadpool; `async def` run on the event loop - never block inside `async def`.\n- `Depends()` for DB connections, auth, settings; `yield` dependencies give teardown.\n- `lifespan` context manager for startup/shutdown (pools, `httpx.AsyncClient`).\n- `response_model=` filters/validates output; `status_code=201` on create.\n- `HTTPException(status_code, detail)` + custom exception handlers.\n- `BackgroundTasks` for small post-response work; real queues for durable jobs.",
+  "exercises_md": "1. Build a small FastAPI app with `POST /uploads` (Pydantic body, returns 202), `GET /uploads/{id}` and a `Depends(get_conn)` dependency that yields a psycopg2 connection from a pool and returns it after the request.\n2. Add a `lifespan` that creates the pool and a shared `httpx.AsyncClient`, and write two tests with `TestClient` including a 422 case.",
+  "my_context_md": "FastAPI is listed as not used anywhere in the work repo; the closest existing API service is the Flask backend of the LLM chat product (`GetLlmData` / `ECSLlmQueryProcess`). Re-implementing one of its endpoints (e.g. storing a user vote) in FastAPI with a Pydantic model and a pooled-connection dependency is a concrete way to close the gap.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "In FastAPI, shared resources like a DB pool or httpx.AsyncClient should be created in the app's ____ handler.",
+      "answers": [
+        "lifespan"
+      ],
+      "explanation": "lifespan replaces on_event startup/shutdown."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To inject a dependency such as a DB connection into an endpoint you declare a parameter with = ____(get_conn).",
+      "answers": [
+        "Depends"
+      ],
+      "explanation": "Depends wires dependency injection."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An endpoint must call a blocking psycopg2 query. Which definition is safest without other changes?",
+      "options": [
+        "async def + call the query directly",
+        "def endpoint (FastAPI runs it in a threadpool)",
+        "async def + time.sleep to yield",
+        "Either; FastAPI makes psycopg2 async"
+      ],
+      "answer_index": 1,
+      "explanation": "Sync def endpoints run in a worker thread, so they don't block the event loop."
+    },
+    {
+      "type": "debug",
+      "prompt": "Under load, all requests slow down when one report is processed. Why?",
+      "code": "@app.post(\"/uploads/{upload_id}/process\")\nasync def process(upload_id: int):\n    df = pd.read_csv(download_from_s3(upload_id))   # blocking I/O + CPU\n    write_rows(df)                                   # psycopg2\n    return {\"status\": \"Completed\"}",
+      "answer": "`async def` runs on the event loop; blocking S3/pandas/psycopg2 calls freeze the whole server for the duration. Also, heavy processing shouldn't be inline in a request.\n\n```python\n@app.post(\"/uploads/{upload_id}/process\", status_code=202)\ndef process(upload_id: int, tasks: BackgroundTasks):   # or enqueue a durable job\n    tasks.add_task(run_processing, upload_id)\n    return {\"status\": \"Processing\"}\n```\nAt minimum: make it a sync `def` or wrap the work in `await asyncio.to_thread(...)`.",
+      "rubric": [
+        "Blocking work inside async def blocks the event loop",
+        "Use def / to_thread for blocking calls",
+        "Long work should return 202 and run in background/queue"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how FastAPI's dependency injection works and why it helps testing.",
+      "answer": "Endpoint parameters declared with `Depends(fn)` are resolved per request: FastAPI calls `fn` (recursively resolving its own dependencies), caches the result within the request, and passes it in. Dependencies with `yield` run teardown after the response (return the DB connection, close sessions). For tests, `app.dependency_overrides[get_conn] = fake_conn` swaps the implementation without patching, so endpoints are tested against fakes or a test DB.",
+      "rubric": [
+        "Depends resolves a dependency graph per request",
+        "yield dependencies provide setup/teardown",
+        "dependency_overrides makes swapping in fakes easy"
+      ]
+    }
+  ]
+}

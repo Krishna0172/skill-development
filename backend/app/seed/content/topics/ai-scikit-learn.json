@@ -1,0 +1,149 @@
+{
+  "slug": "ai-scikit-learn",
+  "title": "scikit-learn in practice: pipelines, tuning, serving",
+  "skill": "ml-fundamentals",
+  "extra_skills": [
+    "fastapi"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "scikit-learn",
+    "pipeline",
+    "columntransformer",
+    "gridsearchcv",
+    "joblib",
+    "model-serving"
+  ],
+  "summary": "The scikit-learn estimator API (fit / predict / transform), composing preprocessing and models with Pipeline and ColumnTransformer, evaluating with cross_val_score, tuning with GridSearchCV, persisting with joblib, and serving predictions behind a FastAPI endpoint.",
+  "why_md": "- scikit-learn is the standard toolkit for classic ML in Python; most tabular ML jobs expect fluency with it.\n- Its consistent API means one pattern covers dozens of models.\n- Pipelines remove the two biggest production risks: leakage and train/serve skew.\n- Serving a model behind an API is where your backend skills become an AI-engineering advantage.",
+  "details_md": "### The estimator API\nEvery object follows the same contract:\n- `fit(X, y)` learns from data and returns `self`; learned attributes end with an underscore (`coef_`, `classes_`, `mean_`).\n- Predictors add `predict(X)` and often `predict_proba(X)`.\n- Transformers add `transform(X)` and `fit_transform(X)`.\n- Hyperparameters are constructor arguments, readable/settable via `get_params()` / `set_params()`.\nThat uniformity is what lets pipelines and grid search compose anything.\n\n### Pipeline and ColumnTransformer\n`ColumnTransformer` routes column groups to different transformers (impute+scale numerics, impute+one-hot categoricals, TF-IDF a text column) and concatenates the outputs. `Pipeline` chains steps; all but the last must be transformers. Calling `fit` on the pipeline fits each step on the training data and passes transformed data along. Parameters of nested steps are addressed with double underscores: `clf__C`, `pre__num__impute__strategy`. Use `set_output(transform=\"pandas\")` to keep DataFrame column names when debugging.\n\n### Cross-validation and tuning\n`cross_val_score(pipe, X, y, cv=5, scoring=\"roc_auc\")` refits the whole pipeline per fold — no leakage. `GridSearchCV` / `RandomizedSearchCV` wrap a pipeline plus a parameter grid; after fitting, `best_estimator_` is refit on all training data (`refit=True`) and ready to use.\n\n### Persisting models\n`joblib.dump(pipe, \"model.joblib\")` pickles the fitted pipeline. Pickles are **version-sensitive**: load with the same scikit-learn version (pin it in requirements) and **never load untrusted files** — unpickling can execute code. Store alongside: training data date range, metrics, feature list, library versions (e.g. a JSON metadata file or a Postgres row). `skops` offers a safer format if you need to load models from less-trusted sources.\n\n### Serving predictions\nLoad the model **once** at startup (not per request), validate input with a Pydantic model, build a one-row DataFrame with exactly the training columns, and return `predict_proba`. scikit-learn prediction is CPU-bound and synchronous, so define the FastAPI route with plain `def` (it runs in a threadpool) or batch requests. For large nightly volumes, prefer batch scoring jobs that write predictions to Postgres.",
+  "code_md": "```python\n# train.py — build, tune and persist a pipeline\nimport joblib, json, sklearn\nfrom sklearn.compose import ColumnTransformer\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.impute import SimpleImputer\nfrom sklearn.preprocessing import OneHotEncoder, StandardScaler\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import GridSearchCV, StratifiedKFold\n\nNUM = [\"price\", \"qty\", \"customer_past_returns\"]\nCAT = [\"marketplace\", \"category\"]\npre = ColumnTransformer([\n    (\"num\", Pipeline([(\"impute\", SimpleImputer(strategy=\"median\")),\n                      (\"scale\", StandardScaler())]), NUM),\n    (\"cat\", OneHotEncoder(handle_unknown=\"ignore\", min_frequency=20), CAT),\n])\npipe = Pipeline([(\"pre\", pre), (\"clf\", LogisticRegression(max_iter=2000))])\n\nsearch = GridSearchCV(pipe, {\"clf__C\": [0.01, 0.1, 1, 10]},\n                      cv=StratifiedKFold(5, shuffle=True, random_state=42),\n                      scoring=\"average_precision\", n_jobs=-1)\nsearch.fit(X_train[NUM + CAT], y_train)\n\njoblib.dump(search.best_estimator_, \"return_model.joblib\")\njson.dump({\"features\": NUM + CAT, \"sklearn\": sklearn.__version__,\n           \"cv_ap\": search.best_score_, \"params\": search.best_params_},\n          open(\"return_model.meta.json\", \"w\"))\n```\n\n```python\n# serve.py — FastAPI endpoint\nimport joblib, pandas as pd\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel, Field\n\nmodel = joblib.load(\"return_model.joblib\")      # once, at startup (trusted file)\napp = FastAPI()\n\nclass Order(BaseModel):\n    price: float = Field(gt=0)\n    qty: int = Field(ge=1)\n    customer_past_returns: int = 0\n    marketplace: str\n    category: str\n\n@app.post(\"/predict/return-risk\")\ndef predict(order: Order):                        # sync def: CPU-bound work in threadpool\n    row = pd.DataFrame([order.model_dump()])\n    return {\"return_probability\": float(model.predict_proba(row)[0, 1])}\n```",
+  "use_cases_md": "- Return-risk API called when an order is dispatched.\n- Nightly batch job scoring all active SKUs and `INSERT … ON CONFLICT` upserting predictions into Postgres.\n- Text classifier (TF-IDF + LogisticRegression pipeline) routing marketplace support emails.\n- GridSearchCV over preprocessing + model options for a demand model.\n- Shipping one `.joblib` artefact in a Docker image for ECS.",
+  "mistakes_md": "- **Preprocessing outside the pipeline** — leakage in CV and skew in serving.\n- **Loading the model inside the request handler** — seconds of latency per call.\n- **Different scikit-learn versions** between training and serving — warnings, errors or silently different behaviour. Pin versions.\n- **Unpickling untrusted joblib files** — arbitrary code execution.\n- **Column order/name mismatch** at serving — always build the frame from the stored feature list.\n- **`async def` route doing heavy CPU prediction** — blocks the event loop.\n- **Using `best_score_` as the final metric** — it's a CV score used for selection; still evaluate on test.",
+  "best_practices_md": "- Everything learned from data lives in one Pipeline.\n- Persist the pipeline + metadata JSON (features, versions, metrics, data window).\n- Pin `scikit-learn` exactly in the serving image.\n- Validate inputs with Pydantic; return probabilities, let callers apply thresholds (or version the threshold with the model).\n- Write a test: load model, predict on fixture rows, assert output shape/range.\n- Prefer batch scoring for bulk; API for real-time decisions.",
+  "my_context_md": "His services are Flask (`ECSLlmQueryProcess`) and ECS containers; scikit-learn and FastAPI aren't used yet. The serving pattern maps directly onto what he knows: load a resource once at startup (like his `ThreadedConnectionPool` with double-checked locking in `AmazonVendorBankRecon/db.py`), and write batch predictions back with `execute_values` / `INSERT … ON CONFLICT DO UPDATE` as he already does for marketplace data.",
+  "revision_notes_md": "- `fit` returns self; learned attrs end in `_`.\n- Transformers: `transform`; predictors: `predict`/`predict_proba`.\n- ColumnTransformer = per-column-group preprocessing.\n- Pipeline params: `step__param` (`clf__C`).\n- `cross_val_score` refits whole pipeline per fold.\n- GridSearchCV → `best_estimator_` (refit), `best_params_`, `best_score_`.\n- joblib.dump/load; pin sklearn; never load untrusted pickles.\n- Serve: load once, Pydantic input, DataFrame with training columns, sync def.",
+  "exercises_md": "1. Build a ColumnTransformer + LogisticRegression pipeline on an orders dataset, tune `C` and the imputer strategy with GridSearchCV.\n2. Persist the best pipeline plus a metadata JSON; write a pytest test that loads it and predicts on 3 fixture rows.\n3. Expose it with FastAPI and measure latency for single vs batched (list of orders) requests.\n4. Write a batch scorer that reads active orders from Postgres, predicts, and upserts results with `execute_values` + `ON CONFLICT`.",
+  "related": [
+    "ai-data-preprocessing",
+    "ai-model-training",
+    "ai-model-evaluation",
+    "fastapi-essentials",
+    "ai-serving-fastapi"
+  ],
+  "flashcards": [
+    {
+      "front": "How do you set a hyperparameter of a step inside a Pipeline in GridSearchCV?",
+      "back": "Use `<step name>__<param>`, e.g. `clf__C` or `pre__num__impute__strategy`."
+    },
+    {
+      "front": "What does a trailing underscore mean on a scikit-learn attribute?",
+      "back": "It was learned during fit (e.g. coef_, classes_, best_estimator_)."
+    },
+    {
+      "front": "Two risks of joblib/pickle model files?",
+      "back": "Version incompatibility across scikit-learn releases, and arbitrary code execution when loading untrusted files."
+    },
+    {
+      "front": "Why define a FastAPI prediction route with plain `def`?",
+      "back": "Prediction is CPU-bound and blocking; sync routes run in a threadpool instead of blocking the event loop."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "In a Pipeline named steps 'pre' and 'clf', how do you reference LogisticRegression's C in a GridSearchCV param grid?",
+      "options": [
+        "clf.C",
+        "clf__C",
+        "C",
+        "pre__clf__C"
+      ],
+      "answer_index": 1,
+      "explanation": "Nested parameters use double underscores: step name + '__' + parameter."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why is `cross_val_score(pipeline, X, y)` leak-free while scaling X first and then calling `cross_val_score(model, X_scaled, y)` is not?",
+      "options": [
+        "The pipeline uses a different scaler",
+        "Pipelines skip scaling during CV",
+        "The pipeline refits the scaler on each fold's training part only",
+        "cross_val_score shuffles pipelines differently"
+      ],
+      "answer_index": 2,
+      "explanation": "Pre-scaling uses statistics from all rows, including each fold's validation rows."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "After fitting GridSearchCV with refit=True, the model retrained on all training data with the best parameters is available as ____.",
+      "answers": [
+        "best_estimator_",
+        "search.best_estimator_"
+      ],
+      "explanation": "best_params_ holds the params; best_estimator_ is the fitted model."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "OneHotEncoder(handle_unknown=\"____\") prevents errors when a category not seen in training arrives at prediction time.",
+      "answers": [
+        "ignore",
+        "infrequent_if_exist"
+      ],
+      "explanation": "Unknown categories become all-zero columns (or map to the infrequent bucket)."
+    },
+    {
+      "type": "output",
+      "prompt": "A tiny estimator following the scikit-learn API in plain Python. What does this print?",
+      "code": "class MeanScaler:\n    def fit(self, X):\n        self.mean_ = [sum(c) / len(c) for c in zip(*X)]\n        return self\n    def transform(self, X):\n        return [[v - m for v, m in zip(r, self.mean_)] for r in X]\n\ntrain = [[10, 1], [20, 3]]\ntest = [[40, 2]]\nscaler = MeanScaler().fit(train)\nprint(scaler.mean_, scaler.transform(test))",
+      "answers": [
+        "[15.0, 2.0] [[25.0, 0.0]]"
+      ],
+      "explanation": "fit learns per-column means from train only (trailing underscore = learned); transform applies them to new data, even values outside the training range."
+    },
+    {
+      "type": "output",
+      "prompt": "How many models does this grid search train (including the final refit)? What does this print?",
+      "code": "from itertools import product\ngrid = {\"clf__C\": [0.1, 1, 10], \"pre__num__impute__strategy\": [\"mean\", \"median\"]}\ncombos = list(product(*grid.values()))\nfolds = 5\nprint(len(combos), len(combos) * folds + 1)",
+      "answers": [
+        "6 31"
+      ],
+      "explanation": "3 × 2 = 6 combinations × 5 folds = 30 fits, plus 1 refit of the best on all training data."
+    },
+    {
+      "type": "debug",
+      "prompt": "This prediction endpoint takes ~2 seconds per request and occasionally returns nonsense. What's wrong?",
+      "code": "@app.post(\"/predict\")\nasync def predict(payload: dict):\n    model = joblib.load(\"return_model.joblib\")\n    row = pd.DataFrame([payload])\n    return {\"p\": model.predict_proba(row)[0, 1]}",
+      "answer": "1. The model is **loaded on every request** — move `joblib.load` to startup.\n2. `async def` runs CPU-bound prediction on the event loop, blocking other requests — use `def`.\n3. `payload: dict` has no validation; missing/extra keys or wrong types produce bad rows or columns in the wrong order. Validate with Pydantic and build the row from the training feature list.\n4. Returning a numpy float — cast with `float()`.\n\n```python\nmodel = joblib.load(\"return_model.joblib\")\nFEATURES = json.load(open(\"return_model.meta.json\"))[\"features\"]\n\n@app.post(\"/predict\")\ndef predict(order: Order):\n    row = pd.DataFrame([order.model_dump()])[FEATURES]\n    return {\"p\": float(model.predict_proba(row)[0, 1])}\n```",
+      "rubric": [
+        "Load the model once at startup, not per request",
+        "Avoid blocking CPU work in async def (use def / threadpool)",
+        "Validate input (Pydantic) and enforce training column order"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd take a scikit-learn model from a notebook to production in a backend team.",
+      "answer": "1. Move training into a script/module: load data via SQL, build one Pipeline (ColumnTransformer + model), tune with CV, evaluate once on a held-out (time-based) test set against a baseline.\n2. Persist the fitted pipeline with joblib plus metadata (features, metrics, data window, library versions, git commit); store artefacts in S3 and register the version in a Postgres table.\n3. Serving: a FastAPI service (or a batch job) in Docker with the **same pinned** scikit-learn version; load the model once at startup; Pydantic input validation; build the row from the stored feature list; return probability + model version.\n4. Tests: a smoke test that loads and predicts on fixtures; contract tests for the API.\n5. Monitoring: log inputs/predictions, watch drift and latency, compare against delayed labels; scheduled retraining with the same script.",
+      "rubric": [
+        "Single Pipeline, proper evaluation before shipping",
+        "Versioned artefact + metadata, pinned library versions",
+        "Serving: load once, validated input, consistent features",
+        "Monitoring and retraining plan"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Describe scikit-learn's estimator API and why it matters.",
+      "difficulty": "easy",
+      "answer_md": "Every scikit-learn object follows a small contract:\n- **Hyperparameters** in `__init__`, no data there.\n- `fit(X, y=None)` learns from data, stores learned state in attributes ending with `_`, and returns `self` (so `Model().fit(X, y).predict(X2)` chains).\n- **Transformers** implement `transform` (and `fit_transform`); **predictors** implement `predict`, classifiers usually `predict_proba`.\n- `get_params` / `set_params` expose hyperparameters, enabling `clone()`.\n\nBecause of this uniformity, generic tools work with any estimator: `Pipeline` chains them, `GridSearchCV` clones and re-fits them with different params, `cross_val_score` evaluates them. You can write your own transformer by subclassing `BaseEstimator, TransformerMixin` and it plugs into all of that."
+    },
+    {
+      "question": "How do you make sure the features at serving time match training?",
+      "difficulty": "medium",
+      "answer_md": "- Put **all learned preprocessing** in the Pipeline and persist the whole thing; never re-implement scaling or encoding in the API.\n- Store the **feature list** (names and order) in model metadata and build the inference DataFrame from it; fail loudly on missing columns.\n- Share the **feature computation code** (e.g. SQL that builds aggregates) between training and serving, or use a feature table both read from.\n- Make aggregates **point-in-time correct**: training must use values as they were at prediction time.\n- Pin library versions and test: a CI test loads the artefact and predicts on fixture rows whose expected outputs were saved at training time.\n- Monitor live feature distributions against training to catch skew and drift."
+    }
+  ]
+}

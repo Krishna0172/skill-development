@@ -1,0 +1,79 @@
+{
+  "slug": "pg-dedupe-latest-per-org-order",
+  "title": "Delete duplicates, keep the latest row per (org_id, order_id)",
+  "category": "postgresql",
+  "language": "sql",
+  "difficulty": "medium",
+  "skill": "sql-window-functions",
+  "concepts": [
+    "ROW_NUMBER",
+    "PARTITION BY composite key",
+    "DELETE with subquery",
+    "deterministic tie-break"
+  ],
+  "related_topics": [
+    "sql-window-functions",
+    "postgres-upsert",
+    "sql-subqueries"
+  ],
+  "problem_md": "A re-run of the marketplace order sync appended duplicate rows to the staging table instead of upserting. Clean it up **in place** before adding a unique constraint.\n\n```sql\nCREATE TABLE raw_orders (\n  row_id      INTEGER PRIMARY KEY,\n  org_id      INTEGER NOT NULL,\n  order_id    TEXT    NOT NULL,\n  status      TEXT    NOT NULL,\n  amount      REAL    NOT NULL,\n  ingested_at TEXT    NOT NULL     -- 'YYYY-MM-DD HH:MM:SS'\n);\n```\n\n**Task.** Write a single `DELETE` statement that removes every row except the **latest** one per `(org_id, order_id)`: greatest `ingested_at`, ties broken by greatest `row_id`. Order ids are only unique within an org (org 1 and org 2 both have `A-100`).\n\nThe checker runs your statement, then `SELECT row_id, org_id, order_id, status FROM raw_orders ORDER BY row_id`.",
+  "examples": [
+    {
+      "input": "(1, A-100) has rows 1, 2, 6 ingested 05-01 09:00, 05-02 09:00, 05-01 23:00",
+      "output": "only row 2 (SHIPPED) survives",
+      "explanation": "Latest by ingested_at, not by row_id."
+    }
+  ],
+  "hints": [
+    "Number rows with `ROW_NUMBER() OVER (PARTITION BY org_id, order_id ORDER BY ingested_at DESC, row_id DESC)` in a subquery; rows with `rn > 1` are the duplicates.",
+    "`DELETE FROM raw_orders WHERE row_id IN (SELECT row_id FROM (...) WHERE rn > 1);` - window functions can't appear directly in `WHERE`."
+  ],
+  "starter_code": "-- Write a single DELETE statement\nDELETE FROM raw_orders\nWHERE 1 = 0;\n",
+  "solution_code": "DELETE FROM raw_orders\nWHERE row_id IN (\n  SELECT row_id\n  FROM (\n    SELECT row_id,\n           ROW_NUMBER() OVER (PARTITION BY org_id, order_id\n                              ORDER BY ingested_at DESC, row_id DESC) AS rn\n    FROM raw_orders\n  ) ranked\n  WHERE rn > 1\n);",
+  "solution_md": "`ROW_NUMBER` over the **composite** key ranks each group newest-first; everything with `rn > 1` is a duplicate. Partitioning by `order_id` alone would wrongly merge org 1's and org 2's `A-100` - a cross-tenant data-loss bug. `row_id DESC` breaks exact ties (rows 4/5 and 7/8) deterministically.\n\nPostgreSQL alternatives: `DELETE ... USING` a CTE, or `DELETE FROM raw_orders a USING raw_orders b WHERE a.org_id = b.org_id AND a.order_id = b.order_id AND (a.ingested_at, a.row_id) < (b.ingested_at, b.row_id)` (row-value comparison). On big tables delete in batches to limit lock time and WAL.\n\nThen prevent recurrence: `ALTER TABLE ... ADD UNIQUE (org_id, order_id)` and load with `INSERT ... ON CONFLICT (org_id, order_id) DO UPDATE SET ... WHERE EXCLUDED.ingested_at >= raw_orders.ingested_at`.",
+  "tests": {
+    "schema_sql": "CREATE TABLE raw_orders (\n  row_id      INTEGER PRIMARY KEY,\n  org_id      INTEGER NOT NULL,\n  order_id    TEXT    NOT NULL,\n  status      TEXT    NOT NULL,\n  amount      REAL    NOT NULL,\n  ingested_at TEXT    NOT NULL     -- 'YYYY-MM-DD HH:MM:SS'\n);\n\nINSERT INTO raw_orders VALUES\n (1, 1, 'A-100', 'PLACED',    499.00, '2024-05-01 09:00:00'),\n (2, 1, 'A-100', 'SHIPPED',   499.00, '2024-05-02 09:00:00'),\n (3, 2, 'A-100', 'PLACED',    120.00, '2024-05-01 10:00:00'),\n (4, 1, 'A-101', 'PLACED',    250.00, '2024-05-03 08:00:00'),\n (5, 1, 'A-101', 'CANCELLED', 250.00, '2024-05-03 08:00:00'),\n (6, 1, 'A-100', 'DELIVERED', 499.00, '2024-05-01 23:00:00'),\n (7, 2, 'B-200', 'PLACED',     80.00, '2024-05-04 12:00:00'),\n (8, 2, 'B-200', 'PLACED',     80.00, '2024-05-04 12:00:00'),\n (9, 3, 'C-300', 'SHIPPED',   999.00, '2024-05-05 07:30:00');",
+    "ordered": true,
+    "check_sql": "SELECT row_id, org_id, order_id, status FROM raw_orders ORDER BY row_id",
+    "expected": {
+      "columns": [
+        "row_id",
+        "org_id",
+        "order_id",
+        "status"
+      ],
+      "rows": [
+        [
+          2,
+          1,
+          "A-100",
+          "SHIPPED"
+        ],
+        [
+          3,
+          2,
+          "A-100",
+          "PLACED"
+        ],
+        [
+          5,
+          1,
+          "A-101",
+          "CANCELLED"
+        ],
+        [
+          8,
+          2,
+          "B-200",
+          "PLACED"
+        ],
+        [
+          9,
+          3,
+          "C-300",
+          "SHIPPED"
+        ]
+      ]
+    }
+  }
+}

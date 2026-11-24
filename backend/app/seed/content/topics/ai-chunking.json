@@ -1,0 +1,153 @@
+{
+  "slug": "ai-chunking",
+  "title": "Chunking documents for RAG",
+  "skill": "rag",
+  "extra_skills": [
+    "etl-data-processing"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "chunking",
+    "overlap",
+    "recursive-splitting",
+    "metadata",
+    "pdf",
+    "tables"
+  ],
+  "summary": "Chunking splits documents into retrievable pieces before embedding. Chunks must be small enough to be specific and fit the context budget, but large enough to carry a complete idea. Fixed-size windows with overlap are the baseline; structure-aware splitting by headings, paragraphs and sentences usually retrieves better, and every chunk needs metadata for filtering and citations.",
+  "why_md": "- Retrieval can only return what chunking produced: bad boundaries mean the answer is never retrieved whole.\n- Chunk size directly sets token cost per RAG call.\n- PDFs and tables (invoices, rate cards, policy matrices) are where naive splitting breaks.\n- A common interview discussion: 'how did you choose chunk size and overlap?'",
+  "details_md": "### Why chunk at all\nEmbedding a whole 40-page policy gives one blurry vector that matches everything weakly. Embedding models also have input limits (beyond which text is truncated silently or rejected). Smaller chunks give sharper vectors and let you send only relevant text to the LLM.\n\n### Fixed-size with overlap\nSplit by tokens or characters into windows of size S, each starting S - O after the previous one (O = overlap). Overlap keeps a sentence that crosses a boundary intact in at least one chunk. Simple and predictable, but cuts mid-sentence and ignores structure. Number of chunks for length L is about ceil((L - O) / (S - O)).\n\n### Recursive / structure-aware\nSplit on the strongest separator first (sections/headings), then paragraphs, then sentences, then words, only descending when a piece is still too big; merge small neighbours up to the size limit. For Markdown/HTML split by headings; for code by functions/classes. Prepend the heading path ('Returns > Electronics > Opened items') to each chunk so it is self-describing - this often helps retrieval more than tuning size.\n\n### Size trade-offs\n- **Small chunks** (a few sentences): precise matching, but may lack context ('this applies within 30 days' - what does?), and more rows.\n- **Large chunks** (many paragraphs): more context, but diluted embeddings and more tokens per call.\nA common pattern is **small-to-big**: retrieve on small chunks, then send the parent section (or neighbouring chunks) to the LLM. There is no universal best size - evaluate a few settings on your query set.\n\n### Metadata\nStore with each chunk: `org_id`, `document_id`, source URL/filename, page number, section path, `chunk_index`, document version/updated_at, language, doc type. You need these for tenant filtering, citations ('Returns policy, p. 3'), freshness and deletes.\n\n### PDFs and tables\nPDF text extraction loses layout: multi-column order, headers/footers repeated on every page, hyphenation, tables flattened into number soup. Clean before chunking (strip repeated headers/footers, fix hyphenation), keep page numbers. Tables: keep each table whole if small, or serialise each row with its header ('Category: Electronics | Return window: 15 days | Restocking fee: 10%'), so a row is meaningful on its own. Scanned PDFs need OCR. Structured data (prices, stock) belongs in SQL tools, not chunks.\n",
+  "code_md": "```python\n# Fixed-size chunking with overlap over tokens (here: words, for simplicity)\ndef chunk_fixed(tokens: list[str], size: int, overlap: int) -> list[tuple[int, int]]:\n    if not 0 <= overlap < size:\n        raise ValueError(\"overlap must be in [0, size)\")\n    step, spans, start = size - overlap, [], 0\n    while True:\n        end = min(start + size, len(tokens))\n        spans.append((start, end))\n        if end == len(tokens):\n            return spans\n        start += step\n```\n\n```python\n# Structure-aware: split Markdown policy docs by headings, then paragraphs; keep heading path\nimport re\n\ndef chunk_markdown(doc_id: int, text: str, max_chars: int = 1500) -> list[dict]:\n    chunks, path = [], []\n    for block in re.split(r\"\\n(?=#{1,3} )\", text):          # split before headings\n        m = re.match(r\"(#{1,3}) (.+)\", block)\n        if m:\n            level = len(m.group(1))\n            path = path[: level - 1] + [m.group(2).strip()]\n        section, buf = \" > \".join(path), \"\"\n        for para in block.split(\"\\n\\n\"):\n            if buf and len(buf) + len(para) > max_chars:\n                chunks.append((section, buf))\n                buf = \"\"\n            buf += para + \"\\n\\n\"\n        if buf.strip():\n            chunks.append((section, buf))\n    # heading path stored as metadata AND prefixed to the embedded text\n    return [\n        {\"document_id\": doc_id, \"chunk_index\": i, \"section\": sec,\n         \"content\": f\"{sec}\\n{c.strip()}\"}\n        for i, (sec, c) in enumerate(chunks)\n    ]\n```",
+  "use_cases_md": "- Returns/shipping policy Markdown: split by heading, prefix section path.\n- Product manuals (PDF): page-aware chunks with page numbers for citations.\n- Marketplace fee/rate-card tables: one chunk per row serialised with headers.\n- Seller support ticket threads: chunk per message or per Q&A pair.",
+  "mistakes_md": "- **One vector per whole document** - vague matches, huge context.\n- **No overlap with fixed windows** - key sentences split in half.\n- **Dropping metadata** - no citations, no tenant filter, can't delete stale chunks.\n- **Flattening tables into text** - numbers lose their column meaning.\n- **Exceeding the embedding model's max input** - silent truncation.\n- **Picking chunk size by gut feeling** instead of evaluating retrieval.",
+  "best_practices_md": "- Start with structure-aware splitting, a few hundred tokens, ~10-20% overlap; then evaluate.\n- Prefix chunks with document title and section path.\n- Measure chunk sizes in tokens with the embedding model's tokenizer.\n- Store rich metadata; deterministic `(document_id, chunk_index)` keys for upserts.\n- Clean PDFs; serialise table rows with headers.\n- Consider small-to-big retrieval for context.",
+  "my_context_md": "`ECSMarketplaceDataUpload` already parses 150+ messy marketplace report formats with pandas - the same mindset applies to chunking: per-format parsers (Markdown, PDF, CSV/Excel tables) feeding a common chunk schema, dispatched through a registry like your processor registry. Its row-wise tables would be serialised row-by-row with headers rather than embedded as raw CSV.",
+  "revision_notes_md": "- Chunk to get sharp vectors and small, relevant context.\n- Fixed windows: step = size - overlap; chunks ~ ceil((L - O)/(S - O)).\n- Recursive: headings -> paragraphs -> sentences -> words, merge to size.\n- Prefix heading path / title to each chunk.\n- Small = precise but thin; large = context but diluted + costly.\n- Small-to-big: retrieve small, send parent.\n- Metadata: org_id, doc id, page, section, chunk_index, version.\n- PDFs: clean headers/footers; tables: row + headers.",
+  "exercises_md": "1. Implement `chunk_fixed` over tokens from a real tokenizer and test edge cases (empty doc, doc shorter than size, overlap = 0).\n2. Chunk a returns policy three ways (fixed 200, fixed 500, by heading) and compare recall@5 on 15 questions.\n3. Extract a PDF manual with page numbers, strip repeated headers/footers, and store chunks with page metadata.\n4. Serialise a fee table row-by-row and verify a question about one category retrieves the right row.",
+  "related": [
+    "ai-retrieval-pipelines",
+    "ai-embedding-models",
+    "ai-semantic-search",
+    "ai-rag-evaluation",
+    "py-file-handling"
+  ],
+  "flashcards": [
+    {
+      "front": "Why overlap fixed-size chunks?",
+      "back": "So content crossing a boundary appears whole in at least one chunk."
+    },
+    {
+      "front": "Step between fixed-size chunk starts?",
+      "back": "size - overlap."
+    },
+    {
+      "front": "Small-to-big retrieval?",
+      "back": "Embed/retrieve small chunks for precision, then pass the larger parent section or neighbours to the LLM."
+    },
+    {
+      "front": "How to chunk a table?",
+      "back": "Keep small tables whole, or serialise each row with its column headers so each chunk is self-contained."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is the main downside of very large chunks?",
+      "options": [
+        "The embedding blends many topics and each retrieved chunk costs more tokens",
+        "They can't store metadata",
+        "They require overlap of 0",
+        "They can't be stored in pgvector"
+      ],
+      "answer_index": 0,
+      "explanation": "Large chunks dilute the vector and inflate prompts."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your policy chunks lack context like which category a rule applies to. Cheapest improvement?",
+      "options": [
+        "Double the embedding dimension",
+        "Remove overlap",
+        "Use a higher LLM temperature",
+        "Prefix each chunk with the document title and heading path"
+      ],
+      "answer_index": 3,
+      "explanation": "Self-describing chunks retrieve better and give the LLM context."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "With chunk size 500 and overlap 100, each new chunk starts ____ tokens after the previous one.",
+      "answers": [
+        "400",
+        "four hundred"
+      ],
+      "explanation": "step = size - overlap."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Splitting on headings, then paragraphs, then sentences until pieces fit is called ____ chunking.",
+      "answers": [
+        "recursive",
+        "structure-aware",
+        "structure aware",
+        "hierarchical"
+      ],
+      "explanation": "Recursive / structure-aware splitting."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (fixed-size chunk boundaries with overlap)",
+      "code": "def chunk_spans(n, size, overlap):\n    step, spans, start = size - overlap, [], 0\n    while True:\n        end = min(start + size, n)\n        spans.append((start, end))\n        if end == n:\n            return spans\n        start += step\n\nprint(chunk_spans(10, 4, 1))\nprint(chunk_spans(1000, 300, 50))\nprint(len(chunk_spans(1200, 512, 0)))\nprint(chunk_spans(3, 4, 1))",
+      "answers": [
+        "[(0, 4), (3, 7), (6, 10)]\n[(0, 300), (250, 550), (500, 800), (750, 1000)]\n3\n[(0, 3)]"
+      ],
+      "explanation": "Step 3 over 10 tokens -> (0,4),(3,7),(6,10). Step 250 over 1000 -> starts 0,250,500,750; the last ends at 1000. 1200 with size 512 and no overlap needs 3 chunks. A doc shorter than the size yields one chunk (0,3)."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong with this chunker and how do you fix it?",
+      "code": "def chunk(text, size=500, overlap=600):\n    chunks = []\n    for start in range(0, len(text), size - overlap):\n        chunks.append(text[start:start + size])\n    return [{\"content\": c} for c in chunks]",
+      "answer": "- overlap >= size makes the step negative: `range(0, n, -100)` is empty, so no chunks are produced (step 0 would raise ValueError).\n- Chunks carry no metadata (document id, index, page, section), so no citations, tenant filtering or upserts.\n- Character-based sizes don't map to the embedding model's token limit.\n\n```python\ndef chunk(doc_id, org_id, tokens, size=400, overlap=60):\n    if not 0 <= overlap < size:\n        raise ValueError(\"overlap must be in [0, size)\")\n    out = []\n    for i, (s, e) in enumerate(chunk_fixed(tokens, size, overlap)):\n        out.append({\"org_id\": org_id, \"document_id\": doc_id, \"chunk_index\": i,\n                    \"content\": detokenize(tokens[s:e])})\n    return out\n```",
+      "rubric": [
+        "overlap >= size gives a non-positive step (no chunks / error)",
+        "Validate overlap < size",
+        "Add metadata (doc id, chunk index, org, page/section)",
+        "Size in tokens rather than characters"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you would choose chunk size and strategy for a returns-policy RAG bot.",
+      "answer": "Start from the document structure: policies are Markdown/HTML with headings, so split by section and paragraph, prefix each chunk with title + heading path, and cap at a few hundred tokens with modest overlap for long sections. Then make it empirical: build 30-50 real questions with the chunk(s) containing the answer, and compare 2-3 configurations (e.g. 200/400/800 tokens, heading-based vs fixed) on recall@5 and answer faithfulness, also noting token cost. If small chunks retrieve well but answers lack context, use small-to-big (send the parent section). Keep metadata for citations and re-chunk when documents change.",
+      "rubric": [
+        "Use document structure + heading path",
+        "Evaluate a few sizes on a labelled set (recall@k)",
+        "Consider cost and small-to-big",
+        "Keep metadata for citations/freshness"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What special handling do PDFs and tables need when chunking?",
+      "answer": "PDFs: extraction can scramble multi-column reading order, repeat headers/footers on each page and hyphenate words; clean those, keep page numbers as metadata, OCR scanned pages. Tables: flattened text loses the column meaning of numbers; keep small tables whole or serialise each row with its headers so a single row is meaningful. Highly structured numeric data is often better queried via SQL tools than embedded.",
+      "rubric": [
+        "Clean PDF artefacts, keep page numbers, OCR if scanned",
+        "Serialise table rows with headers / keep tables whole",
+        "Structured numbers may belong in SQL instead"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do chunk size and overlap affect a RAG system?",
+      "difficulty": "medium",
+      "answer_md": "**Size**: small chunks give focused embeddings and precise retrieval but may lack the surrounding context needed to answer (and multiply row count); large chunks carry context but blend topics into a diluted vector and increase prompt tokens per retrieved result, so you can fit fewer distinct sources.\n\n**Overlap**: prevents facts that straddle a boundary from being split; costs extra storage/embedding and causes near-duplicate results (dedupe adjacent chunks before prompting).\n\nI pick a starting point from document structure (sections/paragraphs, a few hundred tokens, 10-20% overlap for fixed windows), then evaluate variants on a labelled query set (recall@k, answer faithfulness, tokens per answer). If precision is good but answers lack context, I use small-to-big retrieval."
+    },
+    {
+      "question": "How would you ingest a 200-page PDF product manual for RAG?",
+      "difficulty": "hard",
+      "answer_md": "1. **Extract** text per page with a PDF library (OCR if scanned); keep page numbers.\n2. **Clean**: remove repeated headers/footers and page numbers, fix hyphenation, normalise whitespace; detect headings via font/size or a table of contents.\n3. **Tables**: extract separately; serialise rows with headers (spec tables: 'Model X | Power: 1200 W | Warranty: 2 years').\n4. **Chunk** structure-aware by section, a few hundred tokens, prefixed with 'Manual title > Section > Subsection'.\n5. **Metadata**: org_id, document_id, version, page range, section, chunk_index.\n6. **Embed and upsert** keyed by (document_id, chunk_index), delete chunks of the old version in the same transaction.\n7. **Evaluate** with sample questions; cite page numbers in answers."
+    }
+  ],
+  "category": "AI"
+}

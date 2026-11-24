@@ -1,0 +1,153 @@
+{
+  "slug": "ai-transformers",
+  "title": "Transformers and attention, intuitively",
+  "skill": "deep-learning",
+  "extra_skills": [
+    "llm-applications"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "transformers",
+    "attention",
+    "self-attention",
+    "encoder",
+    "decoder",
+    "llm-architecture"
+  ],
+  "summary": "The architecture behind every modern LLM and embedding model: attention as a learned, content-based lookup; self-attention over a sequence; encoder vs decoder stacks; how positional information is added; why transformers replaced RNNs; and what an LLM is architecturally.",
+  "why_md": "- Every LLM API you'll call and every embedding model you'll use is a transformer.\n- Architecture explains practical limits: context windows, quadratic cost in sequence length, KV caching, why output tokens are slower than input tokens.\n- Choosing between encoder models (embeddings, classification) and decoder models (generation) is a daily AI-engineering decision.\n- \"Explain attention\" is the most common deep-learning interview question for GenAI roles.",
+  "details_md": "### Attention: a soft dictionary lookup\nThink of a Python dict lookup, but fuzzy. Each token produces a **query** (what am I looking for?), a **key** (what do I contain?) and a **value** (what I'll pass on). For a given query, compute similarity (dot product) with every key, scale by `1/sqrt(d)`, apply **softmax** to get weights summing to 1, and return the weighted average of values:\n\n`Attention(Q, K, V) = softmax(Q Kᵀ / sqrt(d)) V`\n\nQ, K and V are learned linear projections of the token embeddings, so the model learns what to look for.\n\n### Self-attention\nIn self-attention, every token attends to every other token in the same sequence. In \"the charger stopped working after a week, return it\", the token \"it\" can attend strongly to \"charger\". **Multi-head** attention runs several attentions in parallel so different heads capture different relations (syntax, coreference, nearby words).\n\n### The transformer block\nEach block = multi-head self-attention + a feed-forward MLP, each wrapped with residual connections and layer normalisation. Models stack dozens of blocks; LLMs have billions of parameters, mostly in these weight matrices.\n\n### Positional information\nAttention itself is order-blind (a set operation). Position is injected via positional encodings — originally sinusoidal or learned absolute embeddings; most modern LLMs use **rotary position embeddings (RoPE)** applied to queries and keys. Context-length limits are tied to how positions were trained.\n\n### Encoder vs decoder\n- **Encoder-only** (BERT family, most sentence-embedding models): bidirectional attention — each token sees the whole input. Great for embeddings, classification, NER.\n- **Decoder-only** (GPT, Llama, Claude, Mistral): **causal mask** — each token sees only earlier tokens. Trained to predict the next token; generates text autoregressively.\n- **Encoder-decoder** (T5, original transformer): encoder reads input, decoder generates output attending to it; used for translation/summarisation.\n\n### Why transformers replaced RNNs\nRNNs process tokens one at a time, carrying a hidden state — slow to train (no parallelism across positions) and forgetful over long distances. Transformers process all positions in parallel during training (ideal for GPUs) and connect any two tokens directly through attention. Cost: attention is **O(n²)** in sequence length, which is why long contexts are expensive.\n\n### What an LLM is\nA decoder-only transformer: tokens → embeddings → N transformer blocks → a final linear layer giving logits over the vocabulary → softmax → sample the next token, append, repeat. During generation, keys/values of previous tokens are cached (**KV cache**) so each new token only computes its own attention. That's why prompt (input) tokens are processed in parallel and fast, while output tokens are generated one by one.",
+  "code_md": "```python\n# Scaled dot-product self-attention with numpy (single head)\nimport numpy as np\n\ndef softmax(x, axis=-1):\n    x = x - x.max(axis=axis, keepdims=True)       # numerical stability\n    e = np.exp(x)\n    return e / e.sum(axis=axis, keepdims=True)\n\nrng = np.random.default_rng(0)\nseq_len, d_model, d_k = 5, 16, 8\nX = rng.normal(size=(seq_len, d_model))           # token embeddings\nWq, Wk, Wv = (rng.normal(size=(d_model, d_k)) for _ in range(3))\nQ, K, V = X @ Wq, X @ Wk, X @ Wv                  # (5, 8) each\n\nscores = Q @ K.T / np.sqrt(d_k)                   # (5, 5) token-to-token\ncausal = np.triu(np.ones((seq_len, seq_len)), k=1).astype(bool)\nscores[causal] = -np.inf                          # decoder: no peeking ahead\nweights = softmax(scores)                         # each row sums to 1\nout = weights @ V                                 # (5, 8) contextualised tokens\nprint(weights.round(2))\n```\n\n```python\n# Encoder vs decoder in practice with Hugging Face transformers\nfrom transformers import AutoTokenizer, AutoModel, pipeline\n\n# Encoder: contextual embeddings for classification / similarity\ntok = AutoTokenizer.from_pretrained(\"sentence-transformers/all-MiniLM-L6-v2\")\nenc = AutoModel.from_pretrained(\"sentence-transformers/all-MiniLM-L6-v2\")\nbatch = tok([\"USB-C charger 65W\"], return_tensors=\"pt\")\nprint(enc(**batch).last_hidden_state.shape)       # (1, n_tokens, 384)\n\n# Decoder: autoregressive generation\ngen = pipeline(\"text-generation\", model=\"Qwen/Qwen2.5-0.5B-Instruct\")\nprint(gen(\"Summarise: customer says charger stopped working\", max_new_tokens=30))\n```",
+  "use_cases_md": "- **Encoder models**: sentence embeddings for product search, dedupe, ticket classification.\n- **Decoder LLMs**: text-to-SQL, review summarisation, generating listing descriptions, chat assistants.\n- **Cross-encoders** (encoder taking query+document together) for reranking search results in RAG.\n- **Encoder-decoder**: translation of listings, structured summarisation.\n- Understanding KV cache and O(n²) attention when estimating latency/cost of long prompts.",
+  "mistakes_md": "- **Using a decoder LLM for embeddings/classification at scale** when a small encoder is 100x cheaper and good enough.\n- **Assuming the model reads the whole context equally well** — long-context recall degrades, especially for the middle of very long prompts.\n- **Thinking attention = explanation** — attention weights are not reliable explanations of model decisions.\n- **Ignoring that cost grows with context length** — stuffing huge prompts is slow and expensive.\n- **Believing LLMs 'look up' facts** — they predict likely next tokens; facts must be supplied (RAG) when correctness matters.",
+  "best_practices_md": "- Pick encoder models for embeddings/classification, decoder LLMs for generation.\n- Keep prompts as short as the task allows; put key instructions and data clearly.\n- Know your model's context window and tokenizer.\n- For production, prefer smaller fine-tuned or distilled models where they meet quality.\n- Read model cards: architecture, context length, training data, licence.",
+  "my_context_md": "`GetLlmData` and `ECSLlmQueryProcess` store chat history and model-generated SQL for a text-to-SQL product — that model is a decoder-only transformer generating SQL token by token. Its message history is what fills the context window each turn, so the O(n²) attention and per-token cost explain why long chat sessions cost more (the per-org USD cost tracking he already stores reflects this).",
+  "revision_notes_md": "- Attention = softmax(QKᵀ/√d)·V — fuzzy key-value lookup.\n- Q, K, V = learned projections of token embeddings.\n- Self-attention: every token attends to others; multi-head = parallel relations.\n- Block = attention + MLP + residuals + layer norm.\n- Position via encodings (modern: RoPE); attention is order-blind otherwise.\n- Encoder (bidirectional): embeddings/classification. Decoder (causal): generation.\n- Transformers beat RNNs: parallel training, direct long-range links.\n- Cost O(n²) in sequence length; KV cache speeds generation.\n- LLM = decoder stack → logits over vocab → sample next token → repeat.",
+  "exercises_md": "1. Implement scaled dot-product attention in numpy with and without a causal mask; verify each row of weights sums to 1 and masked entries are 0.\n2. Load a small encoder (all-MiniLM-L6-v2) and a small decoder (e.g. Qwen2.5-0.5B-Instruct) locally; compare parameter counts and output shapes.\n3. Measure generation latency for 50 vs 500 output tokens and for 200 vs 4,000 input tokens; explain the difference using KV caching.\n4. Write a one-page explanation of how the text-to-SQL model in a chat backend turns a question + schema into SQL, step by step.",
+  "related": [
+    "ai-neural-networks",
+    "ai-tokenization",
+    "ai-embeddings",
+    "ai-llm-fundamentals",
+    "ai-model-inference"
+  ],
+  "flashcards": [
+    {
+      "front": "Attention formula?",
+      "back": "softmax(Q Kᵀ / sqrt(d_k)) V"
+    },
+    {
+      "front": "Encoder-only vs decoder-only?",
+      "back": "Encoder: bidirectional attention, used for embeddings/classification (BERT). Decoder: causal mask, next-token generation (GPT, Llama, Claude)."
+    },
+    {
+      "front": "Why did transformers replace RNNs?",
+      "back": "Parallel processing of all positions during training and direct attention between any two tokens, versus sequential, forgetful RNNs."
+    },
+    {
+      "front": "What is the KV cache?",
+      "back": "Stored keys/values of previous tokens during generation so each new token only computes its own attention, making autoregressive decoding much faster."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You need embeddings for 2 million product titles for similarity search. Which architecture is the natural fit?",
+      "options": [
+        "A large decoder-only chat LLM",
+        "An encoder-only sentence-embedding model",
+        "An RNN language model",
+        "An encoder-decoder translation model"
+      ],
+      "answer_index": 1,
+      "explanation": "Bidirectional encoder models produce good sentence embeddings cheaply and fast."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why does doubling the prompt length more than double the attention compute?",
+      "options": [
+        "Tokenization is quadratic",
+        "The vocabulary doubles",
+        "Positional encodings grow exponentially",
+        "Every token attends to every other token, so cost grows ~n²"
+      ],
+      "answer_index": 3,
+      "explanation": "The QKᵀ score matrix is n × n."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Decoder-only LLMs use a ____ mask so each token can only attend to earlier tokens.",
+      "answers": [
+        "causal",
+        "look-ahead",
+        "triangular",
+        "autoregressive"
+      ],
+      "explanation": "Prevents seeing future tokens during next-token prediction."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In attention, scores are divided by the square root of the key ____ to keep softmax from saturating.",
+      "answers": [
+        "dimension",
+        "dim",
+        "size",
+        "d_k"
+      ],
+      "explanation": "Scaling by sqrt(d_k) keeps dot products in a reasonable range."
+    },
+    {
+      "type": "output",
+      "prompt": "Attention weights for one query over three keys. What does this print?",
+      "code": "import math\nq = [1.0, 0.0]\nkeys = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]\nvalues = [10.0, 20.0, 30.0]\nd = len(q)\nscores = [sum(a * b for a, b in zip(q, k)) / math.sqrt(d) for k in keys]\nexps = [math.exp(s) for s in scores]\nw = [e / sum(exps) for e in exps]\nout = sum(wi * v for wi, v in zip(w, values))\nprint([round(s, 3) for s in scores])\nprint([round(x, 3) for x in w], round(out, 2))",
+      "answers": [
+        "[0.707, 0.0, 0.707]\n[0.401, 0.198, 0.401] 20.0"
+      ],
+      "explanation": "Keys 1 and 3 match the query equally (score 1/√2); key 2 is orthogonal. Softmax gives weights ≈ 0.40/0.20/0.40. The output is the weighted average of values; the equal weights on 10 and 30 balance around 20, so it is exactly 20.0."
+    },
+    {
+      "type": "output",
+      "prompt": "A causal mask: which positions can each token see? What does this print?",
+      "code": "tokens = [\"return\", \"the\", \"charger\"]\nfor i, t in enumerate(tokens):\n    visible = [tokens[j] for j in range(len(tokens)) if j <= i]\n    print(t, \"->\", visible)",
+      "answers": [
+        "return -> ['return']\nthe -> ['return', 'the']\ncharger -> ['return', 'the', 'charger']"
+      ],
+      "explanation": "In a decoder, token i attends to positions 0..i only — it cannot see future tokens."
+    },
+    {
+      "type": "debug",
+      "prompt": "This toy attention implementation produces rows of weights that don't sum to 1 and a decoder that 'cheats'. Find the bugs.",
+      "code": "import numpy as np\nscores = Q @ K.T\nmask = np.tril(np.ones((n, n)), k=-1).astype(bool)\nscores[mask] = -np.inf\nweights = np.exp(scores) / np.exp(scores).sum(axis=0)\nout = weights @ V",
+      "answer": "1. The mask is wrong: `np.tril(..., k=-1)` masks the **past**; a causal mask must block the future (upper triangle): `np.triu(np.ones((n, n)), k=1)`.\n2. Softmax normalises over `axis=0` (columns) — each query's row must sum to 1: use `axis=-1` with `keepdims=True`.\n3. Missing the `1/sqrt(d_k)` scaling and the max-subtraction for numerical stability.\n\n```python\nscores = Q @ K.T / np.sqrt(d_k)\nmask = np.triu(np.ones((n, n)), k=1).astype(bool)\nscores[mask] = -np.inf\nscores -= scores.max(axis=-1, keepdims=True)\nweights = np.exp(scores)\nweights /= weights.sum(axis=-1, keepdims=True)\nout = weights @ V\n```",
+      "rubric": [
+        "Causal mask must hide future (upper triangle), not past",
+        "Softmax over the last axis per query row",
+        "Scale by sqrt(d_k) / stabilise by subtracting max"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain self-attention to a backend developer without equations first, then relate it to the formula.",
+      "answer": "Imagine every word in a sentence asking the others \"who is relevant to me?\". Each word broadcasts a **key** describing what it offers, and carries a **value** with its information. A word forms a **query** for what it needs, compares it to all keys, and takes a weighted blend of the values — more weight to better matches. In \"the charger stopped working, return it\", \"it\" finds \"charger\" most relevant and absorbs its meaning. All words do this simultaneously, and multiple heads look for different kinds of relationships. Formally: Q, K, V are learned linear projections of the token embeddings; `softmax(QKᵀ/√d)` gives the match weights (rows sum to 1); multiplying by V gives the blended output. It's a differentiable, fuzzy dictionary lookup.",
+      "rubric": [
+        "Query/key/value roles explained intuitively",
+        "Weighted average via softmax of similarity scores",
+        "Every token attends to others in parallel; multi-head",
+        "Connects to softmax(QKᵀ/√d)V"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between encoder-only, decoder-only and encoder-decoder transformers? When would you use each?",
+      "difficulty": "medium",
+      "answer_md": "- **Encoder-only** (BERT, RoBERTa, most sentence-transformers): bidirectional self-attention — each token sees the full input. Produces contextual representations. Use for **embeddings**, classification, NER, rerankers (cross-encoders). Small and fast.\n- **Decoder-only** (GPT, Llama, Mistral, Claude): causal self-attention; trained on next-token prediction; generates text autoregressively. Use for **generation**: chat, summarisation, text-to-SQL, extraction via prompting. The dominant LLM design because one objective scales well and handles many tasks.\n- **Encoder-decoder** (T5, BART): encoder reads the input bidirectionally, decoder generates attending to it via cross-attention. Natural for input→output transformations like translation or summarisation.\n\nRule of thumb for an AI engineer: embeddings and high-volume classification → small encoder; anything needing generated language or reasoning → decoder LLM."
+    },
+    {
+      "question": "Why are output tokens slower and often pricier than input tokens in LLM APIs?",
+      "difficulty": "hard",
+      "answer_md": "Input (prompt) tokens are processed in one **parallel** forward pass (\"prefill\"): the GPU computes attention for all prompt positions at once, which is compute-efficient.\n\nOutput tokens are produced **autoregressively**: one forward pass per generated token, each depending on the previous one. Even with the **KV cache** (keys/values of previous tokens are stored so they're not recomputed), each step must read the model weights and the growing cache from GPU memory — decoding is memory-bandwidth-bound and can't be parallelised across the sequence. So each output token costs far more GPU time than an input token, which providers reflect in pricing and you see as tokens/second limits.\n\nPractical implications: constrain output length (`max_tokens`, concise formats like JSON), stream responses for perceived latency, and put large static context in the prompt (possibly with prompt caching) rather than asking the model to generate it."
+    }
+  ]
+}

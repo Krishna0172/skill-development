@@ -1,0 +1,124 @@
+{
+  "slug": "sqlalchemy-essentials",
+  "title": "SQLAlchemy 2.0 Essentials: Engine, Session, ORM Models and Alembic",
+  "skill": "sqlalchemy",
+  "extra_skills": [
+    "python",
+    "postgresql",
+    "database-design"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "sqlalchemy",
+    "orm",
+    "python",
+    "alembic",
+    "migrations",
+    "session"
+  ],
+  "summary": "SQLAlchemy is Python's main database toolkit. Its Core layer builds SQL with Python expressions; its ORM maps classes to tables so you work with objects. In 2.0 style you declare models with Mapped[] type hints, build queries with select(), and run them through a Session that tracks changes and commits them in one transaction. Alembic, its companion tool, manages schema migrations.",
+  "details_md": "### Layers\n- **Engine**: `create_engine(\"postgresql+psycopg://user:pw@host/db\")` holds a **connection pool** and dialect. Create one per process, at startup.\n- **Core**: `Table`, `select()`, `insert()`, `text()`: SQL expressed in Python, with dialect-aware compilation and bound parameters.\n- **ORM**: mapped classes, `Session`, relationships, the unit of work.\n\n### Declaring models (2.0 style)\n```python\nclass Base(DeclarativeBase): pass\nclass Order(Base):\n    __tablename__ = \"orders\"\n    id: Mapped[int] = mapped_column(primary_key=True)\n    status: Mapped[str]                       # NOT NULL inferred from the non-Optional type\n    awb: Mapped[str | None]                   # nullable\n```\n`Mapped[...]` annotations drive types and nullability and give type checkers real information.\n\n### The Session and the unit of work\n- The Session is a workspace: objects you `add()` or load are tracked in an **identity map** (one object per primary key per session).\n- On `flush()` (automatic before queries, and at commit) it emits INSERT/UPDATE/DELETE for pending changes in dependency order; `commit()` flushes and commits the transaction.\n- `with Session(engine) as session, session.begin():` gives a transaction that commits on success and rolls back on error.\n- After commit, objects are **expired** by default (`expire_on_commit=True`) and reload on next access, which can surprise you in APIs that return objects after commit.\n- A Session is **not thread-safe**: use one per request or per task (`sessionmaker` as a factory).\n\n### Querying\n`session.scalars(select(Order).where(Order.status == \"RTO\")).all()` returns ORM objects; `session.execute(select(Order.id, Order.total))` returns `Row` tuples. The legacy `session.query()` still works but is not the 2.0 style.\n\n### Relationships and the N+1 problem\n`relationship()` defines navigation (`order.items`). Lazy loading by default means looping over 100 orders and touching `.items` fires 100 extra queries (**N+1**). Fix with eager loading: `selectinload(Order.items)` (one extra `IN` query, the usual best choice for collections) or `joinedload` (a JOIN, good for many-to-one). In async code, use `lazy=\"raise\"` to catch accidental lazy loads.\n\n### Bulk operations and upserts\nThe ORM unit of work is convenient but not the fastest for 100k rows. For bulk work use Core: `session.execute(insert(Order), list_of_dicts)` (an executemany using efficient batched \"insertmanyvalues\"), or the PostgreSQL dialect's `insert(...).on_conflict_do_update(index_elements=[...], set_={...})` with `excluded`.\n\n### Raw SQL is still allowed\n`session.execute(text(\"SELECT ... WHERE id = :id\"), {\"id\": 5})`: bound parameters, no injection. Mixing ORM for CRUD and hand-written SQL for complex reports is common and fine.\n\n### Pooling settings\n`pool_size` (5 by default), `max_overflow` (10), `pool_pre_ping=True` (checks connections before use, handling dropped connections), `pool_recycle` (seconds before reconnecting). For Lambda-like environments or behind PgBouncer, `poolclass=NullPool` is common.\n\n### Async\n`create_async_engine(\"postgresql+asyncpg://...\")` with `AsyncSession` and `await session.execute(...)`, typically used with FastAPI.\n\n### Alembic migrations\n`alembic init`, `alembic revision --autogenerate -m \"add awb\"` (diffs models against the database), review the generated script, then `alembic upgrade head`. Each migration has `upgrade()`/`downgrade()` and is version-controlled, so every environment can reach the same schema reproducibly. Autogenerate misses some things (renames look like drop + add; some server defaults and constraints), so **always read the script**.",
+  "code_md": "```python\n# 1) Models (2.0 style) and engine\nfrom datetime import datetime\nfrom decimal import Decimal\nfrom sqlalchemy import ForeignKey, Numeric, String, create_engine, func\nfrom sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship\n\nclass Base(DeclarativeBase):\n    pass\n\nclass Customer(Base):\n    __tablename__ = \"customers\"\n    id: Mapped[int] = mapped_column(primary_key=True)\n    name: Mapped[str] = mapped_column(String(200))\n    orders: Mapped[list[\"Order\"]] = relationship(back_populates=\"customer\")\n\nclass Order(Base):\n    __tablename__ = \"orders\"\n    id: Mapped[int] = mapped_column(primary_key=True)\n    customer_id: Mapped[int] = mapped_column(ForeignKey(\"customers.id\"), index=True)\n    status: Mapped[str] = mapped_column(String(20), default=\"PENDING\")\n    total: Mapped[Decimal] = mapped_column(Numeric(12, 2))\n    awb: Mapped[str | None]                                   # nullable column\n    created_at: Mapped[datetime] = mapped_column(server_default=func.now())  # DB-side default\n    customer: Mapped[Customer] = relationship(back_populates=\"orders\")\n\nengine = create_engine(\"postgresql+psycopg://app:pw@localhost/shop\",\n                       pool_size=5, max_overflow=10, pool_pre_ping=True)\n```\n\n```python\n# 2) Session: create, query, update in one transaction\nfrom sqlalchemy import select, func\nfrom sqlalchemy.orm import Session, selectinload\n\nwith Session(engine) as session, session.begin():           # commit or rollback automatically\n    c = Customer(name=\"Asha\")\n    c.orders.append(Order(total=Decimal(\"1499.00\")))\n    session.add(c)                                           # INSERTs emitted at flush/commit\n\nwith Session(engine) as session:\n    stmt = (select(Customer)\n            .options(selectinload(Customer.orders))          # avoids N+1\n            .where(Customer.name.ilike(\"a%\")))\n    for cust in session.scalars(stmt):\n        print(cust.name, [o.total for o in cust.orders])\n\n    # Aggregate query returning rows, not objects\n    rows = session.execute(\n        select(Order.status, func.count()).group_by(Order.status)\n    ).all()\n\n    order = session.get(Order, 1)                            # by primary key\n    order.status = \"SHIPPED\"                                 # tracked change\n    session.commit()                                         # UPDATE emitted here\n```\n\n```python\n# 3) Bulk upsert with the PostgreSQL dialect (Core)\nfrom sqlalchemy.dialects.postgresql import insert\n\nrows = [{\"id\": 1, \"customer_id\": 1, \"status\": \"DELIVERED\", \"total\": Decimal(\"10\")},\n        {\"id\": 2, \"customer_id\": 1, \"status\": \"RTO\", \"total\": Decimal(\"20\")}]\n\nstmt = insert(Order).values(rows)\nstmt = stmt.on_conflict_do_update(\n    index_elements=[Order.id],\n    set_={\"status\": func.coalesce(stmt.excluded.status, Order.status)},\n)\nwith Session(engine) as session, session.begin():\n    session.execute(stmt)\n\n# Raw SQL when you want it, still parameterised\nfrom sqlalchemy import text\nwith engine.connect() as conn:\n    n = conn.execute(text(\"SELECT count(*) FROM orders WHERE status = :s\"), {\"s\": \"RTO\"}).scalar_one()\n```\n\n```bash\n# 4) Alembic migration workflow\nalembic init migrations                         # creates alembic.ini + env.py\n# in env.py: target_metadata = Base.metadata\nalembic revision --autogenerate -m \"add awb to orders\"\n# REVIEW the generated file in migrations/versions/ before applying\nalembic upgrade head                            # apply all pending migrations\nalembic downgrade -1                            # roll back the last one\nalembic current                                 # show the DB's current revision\n```",
+  "use_cases_md": "- CRUD-heavy web APIs (FastAPI) where models, validation and relationships save boilerplate.\n- Version-controlled schema changes with Alembic across dev/staging/prod.\n- Database-agnostic code and unit tests against SQLite or a test PostgreSQL.\n- Composable query building (dynamic filters) without string concatenation.\n- Mixing ORM for simple access with `text()` or Core for complex analytical SQL.",
+  "mistakes_md": "- **N+1 queries from lazy loading** in loops: hundreds of hidden queries. Use `selectinload`/`joinedload`, and check SQL with `echo=True`.\n- **Creating an engine per request**: no pooling, exhausted connections. Create it once per process.\n- **Sharing a Session across threads or requests**: corrupted state. One Session per unit of work.\n- **Accessing attributes after commit outside the session**: `DetachedInstanceError` because of `expire_on_commit`. Load what you need before commit or set `expire_on_commit=False`.\n- **Using the ORM unit of work for huge bulk loads**: slow and memory-hungry. Use Core `insert()` with lists of dicts or COPY.\n- **Blindly applying autogenerated migrations**: renames become drop + add (data loss). Review and edit every script.\n- **Mixing 1.x `session.query` with 2.0 `select` arbitrarily**: inconsistent code. Standardise on 2.0 style.",
+  "best_practices_md": "- Use 2.0 style throughout: `DeclarativeBase`, `Mapped[]`, `mapped_column`, `select()`, `session.scalars()`.\n- Manage transactions with `with Session(engine) as s, s.begin():` or a request-scoped dependency in FastAPI.\n- Turn on `echo=True` (or SQL logging) in development to see the queries the ORM generates.\n- Set `pool_pre_ping=True` for long-lived services.\n- Keep complex reporting SQL as `text()` or Core; don't contort the ORM.\n- Every schema change goes through an Alembic revision, reviewed in code review.",
+  "my_context_md": "You have worked with raw SQL through psycopg2 (the `DatabaseManager` class in helper.py) and have never used SQLAlchemy or migrations; both are listed gaps. Your raw-SQL background is an advantage here: you already know what SQL the ORM should generate, so `echo=True` will make sense to you immediately. A good bridge is to recreate your inventory/orders upserts with `sqlalchemy.dialects.postgresql.insert(...).on_conflict_do_update(...)` and compare the emitted SQL with your hand-written `ON CONFLICT ... COALESCE(EXCLUDED.col, table.col)`. Learning Alembic covers the migration gap at the same time.",
+  "related": [
+    "psycopg2-essentials",
+    "database-normalization",
+    "postgres-upsert",
+    "fastapi-essentials",
+    "python-typing",
+    "python-context-managers"
+  ],
+  "flashcards": [
+    {
+      "front": "2.0-style way to fetch ORM objects?",
+      "back": "`session.scalars(select(Order).where(Order.status == 'RTO')).all()`"
+    },
+    {
+      "front": "What is the N+1 problem and the usual fix?",
+      "back": "1 query for parents + 1 per parent for lazy-loaded children. Fix: `options(selectinload(Parent.children))`."
+    },
+    {
+      "front": "How is nullability declared with Mapped[]?",
+      "back": "`Mapped[str]` is NOT NULL; `Mapped[str | None]` (Optional) is nullable."
+    },
+    {
+      "front": "What does `with Session(engine) as s, s.begin():` do?",
+      "back": "Opens a session and a transaction that commits on success and rolls back on exception, then closes the session."
+    },
+    {
+      "front": "How to upsert with SQLAlchemy on PostgreSQL?",
+      "back": "`from sqlalchemy.dialects.postgresql import insert`; `insert(T).values(rows).on_conflict_do_update(index_elements=[...], set_={...})` using `stmt.excluded`."
+    },
+    {
+      "front": "Alembic command to create a migration from model changes?",
+      "back": "`alembic revision --autogenerate -m \"msg\"`, then review it and run `alembic upgrade head`."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which object owns the connection pool in SQLAlchemy?",
+      "options": [
+        "Session",
+        "Engine",
+        "MetaData",
+        "DeclarativeBase"
+      ],
+      "answer_index": 1,
+      "explanation": "The Engine holds the pool; Sessions borrow connections from it."
+    },
+    {
+      "question": "Looping over 200 customers and printing len(c.orders) emits 201 queries. Best fix?",
+      "options": [
+        "session.flush()",
+        "Add an index on orders.customer_id",
+        "expire_on_commit=False",
+        "options(selectinload(Customer.orders))"
+      ],
+      "answer_index": 3,
+      "explanation": "Eager loading fetches all orders in one extra query."
+    },
+    {
+      "question": "After session.commit(), accessing order.status triggers...",
+      "options": [
+        "A refresh SELECT, because objects are expired on commit",
+        "Nothing; values are cached forever",
+        "An UPDATE",
+        "An error always"
+      ],
+      "answer_index": 0,
+      "explanation": "expire_on_commit=True (the default) reloads attributes on next access; outside a session this raises DetachedInstanceError."
+    },
+    {
+      "question": "What is a known limitation of Alembic autogenerate?",
+      "options": [
+        "It can't add columns",
+        "It only works on SQLite",
+        "It detects column renames as drop + add",
+        "It applies migrations automatically"
+      ],
+      "answer_index": 2,
+      "explanation": "Renames must be written manually (op.alter_column(new_column_name=...)) to avoid data loss."
+    }
+  ],
+  "interview": [
+    {
+      "question": "ORM vs raw SQL: when would you use each?",
+      "difficulty": "medium",
+      "answer_md": "**ORM strengths:** less boilerplate for CRUD, relationships and identity map, type-checked models, database portability, composable dynamic queries, and integration with migrations (Alembic) and frameworks (FastAPI). Great for application logic dealing with individual entities.\n\n**Raw SQL / Core strengths:** full control over complex analytical queries (CTEs, window functions, `ON CONFLICT` variations, `LATERAL`), predictable performance, easy `EXPLAIN` tuning, and the fastest bulk paths (COPY, multi-row VALUES). Great for ETL and reporting.\n\nReal systems mix them:\n```python\n# ORM for entity logic\norder = session.get(Order, oid); order.status = \"SHIPPED\"\n# text() for a tuned report\nsession.execute(text(\"WITH ... SELECT ...\"), params)\n```\nRisks with the ORM: hidden N+1 queries, inefficient bulk operations through the unit of work, and lazy loads after the session closes. Risks with raw SQL: SQL scattered as strings, manual mapping, injection if someone concatenates strings, and no schema-as-code unless you add a migration tool. The deciding questions: how complex the queries are, how much bulk data you move, and whether you need models and migrations as the source of truth."
+    },
+    {
+      "question": "Explain the SQLAlchemy Session lifecycle and the unit-of-work pattern.",
+      "difficulty": "hard",
+      "answer_md": "A `Session` represents a **unit of work** inside one transaction:\n\n1. **Begin**: a connection is checked out from the engine's pool lazily, on first use, and a transaction starts.\n2. **Track**: objects loaded or added go into the **identity map** (one Python object per primary key). Changes to attributes mark objects *dirty*; `add()` marks them *pending*; `delete()` marks them *deleted*.\n3. **Flush**: before queries (autoflush) or at commit, the Session computes the needed INSERT/UPDATE/DELETE statements, orders them by dependency (parents before children), batches them, and sends them. Generated keys are populated back onto objects.\n4. **Commit**: flush, then `COMMIT`. Objects are **expired** so the next access reloads fresh state.\n5. **Rollback**: on error, the transaction is rolled back and pending changes are discarded; the Session can be reused afterwards.\n6. **Close**: the connection is returned to the pool.\n\n```python\nSessionLocal = sessionmaker(engine)\nwith SessionLocal() as s, s.begin():\n    o = s.get(Order, 1)\n    o.status = \"RTO\"           # dirty\n    s.add(Refund(order=o))     # pending\n# commit: UPDATE orders ...; INSERT INTO refunds ...\n```\nSessions are not thread-safe; use one per request or task."
+    },
+    {
+      "question": "How do database migrations work and why are they important?",
+      "difficulty": "easy",
+      "answer_md": "A migration is a versioned, ordered script that changes the schema (and sometimes data) from one version to the next. Tools such as **Alembic** store the current version in a table (`alembic_version`) and apply any pending scripts in order.\n\n```python\ndef upgrade():\n    op.add_column(\"orders\", sa.Column(\"awb\", sa.String(50), nullable=True))\n    op.create_index(\"ix_orders_awb\", \"orders\", [\"awb\"])\n\ndef downgrade():\n    op.drop_index(\"ix_orders_awb\", table_name=\"orders\")\n    op.drop_column(\"orders\", \"awb\")\n```\n\nWhy it matters:\n- **Reproducibility**: every environment (local, CI, staging, prod) reaches the same schema by running `alembic upgrade head`.\n- **Review**: schema changes go through code review like any other code.\n- **Ordering and history**: you know exactly what changed and when, and can roll back.\n- **Deployment automation**: migrations run as a step in CI/CD before the new code starts.\n\nGood practices: keep migrations small and backward compatible (add nullable column, deploy code, backfill, then add NOT NULL), use `CREATE INDEX CONCURRENTLY` for big tables (in Alembic: `postgresql_concurrently=True` in an autocommit block), and never edit a migration that has already run in production."
+    }
+  ]
+}

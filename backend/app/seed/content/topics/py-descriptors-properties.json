@@ -1,0 +1,191 @@
+{
+  "slug": "py-descriptors-properties",
+  "title": "Descriptors and properties (attribute lookup internals)",
+  "skill": "python-advanced",
+  "extra_skills": [
+    "python-oop",
+    "python-internals"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "descriptor",
+    "property",
+    "__get__",
+    "__set__",
+    "__set_name__",
+    "attribute lookup",
+    "slots"
+  ],
+  "summary": "Descriptors are objects with __get__, __set__ or __delete__ that customise attribute access when stored on a class. Properties, methods, classmethods, staticmethods, __slots__ and cached_property are all descriptors. Knowing the lookup order explains much of Python's behaviour.",
+  "why_md": "- Descriptors are the machinery behind `property`, bound methods, `@classmethod`, `__slots__`, `functools.cached_property` and ORM/validation fields.\n- Understanding data vs non-data descriptor precedence lets you predict (and debug) attribute access.\n- This is a classic senior-level interview topic and the foundation for writing reusable validated fields.",
+  "details_md": "### What is a descriptor?\nAn object whose class defines any of `__get__(self, obj, objtype=None)`, `__set__(self, obj, value)`, `__delete__(self, obj)`, **and** which lives as a *class attribute* of another class. When you access `obj.attr`, Python notices the class attribute is a descriptor and calls its method instead of returning it plainly. (A descriptor stored on an instance, or in a local variable, does nothing special.)\n\n### Data vs non-data descriptors\n- **Data descriptor**: defines `__set__` and/or `__delete__` (usually with `__get__`). `property` is one.\n- **Non-data descriptor**: defines only `__get__`. Plain functions (hence methods), `classmethod`, `staticmethod` and `cached_property` are non-data.\n\n### The lookup order (`object.__getattribute__`)\nFor `obj.name`:\n1. Look up `name` along `type(obj).__mro__`. If it is a **data descriptor**, call its `__get__` and return. This wins even over the instance dict.\n2. Otherwise check `obj.__dict__[name]`; if present return it.\n3. Otherwise if step 1 found a **non-data descriptor**, call its `__get__`; if it found a plain class attribute return it.\n4. Otherwise call `__getattr__` if defined, else `AttributeError`.\n\nAssignment `obj.name = v` checks for a data descriptor with `__set__` on the type first; otherwise writes to `obj.__dict__`.\n\n### Functions are descriptors\n`def f(self)` in a class creates a function object whose `__get__` returns a **bound method**: `A.__dict__['f'].__get__(a, A)` equals `a.f`. That is where `self` binding comes from. Accessing through the class (`A.f`) gives the plain function.\n\n### property\n`property(fget, fset, fdel, doc)` is a data descriptor. The decorator form is the everyday usage:\n\n```python\nclass Product:\n    @property\n    def price(self): return self._price\n    @price.setter\n    def price(self, v): ...\n```\nA property with no setter raises `AttributeError` on assignment (because it is still a data descriptor).\n\n### Writing your own: `__set_name__`\nSince 3.6, `__set_name__(self, owner, name)` is called when the owning class is created, so a descriptor learns the attribute name it was assigned to. Store per-instance values either in `obj.__dict__[self.name]` or a private name, **never in the descriptor itself** (it is shared by all instances, so that would leak state between instances).\n\n### cached_property and slots\n`functools.cached_property` is a non-data descriptor: it computes once, stores the result in `obj.__dict__[name]`, and thereafter the instance dict shadows the descriptor (step 2 precedes step 3). `__slots__` creates *member descriptors* on the class and removes the per-instance `__dict__`, saving memory (and blocking arbitrary attributes).\n\n### When to use what\nSimple computed or validated attribute: `property`. Same validation reused on many attributes/classes: a descriptor. Lazy expensive value: `cached_property`.",
+  "code_md": "```python\n# 1. reusable validated field using __set_name__\nclass Positive:\n    def __set_name__(self, owner, name):\n        self.public = name\n        self.private = \"_\" + name\n    def __get__(self, obj, objtype=None):\n        if obj is None:\n            return self                      # class access returns descriptor\n        return getattr(obj, self.private)\n    def __set__(self, obj, value):\n        if value <= 0:\n            raise ValueError(f\"{self.public} must be positive\")\n        setattr(obj, self.private, value)\n\nclass Item:\n    qty = Positive()\n    price = Positive()\n    def __init__(self, qty, price):\n        self.qty, self.price = qty, price\n\nprint(Item(2, 10).qty)\n```\n\n```python\n# 2. property with validation and a computed attribute\nclass Order:\n    def __init__(self, subtotal):\n        self._subtotal = subtotal\n    @property\n    def total(self):                         # read-only computed\n        return round(self._subtotal * 1.18, 2)\n    @property\n    def subtotal(self):\n        return self._subtotal\n    @subtotal.setter\n    def subtotal(self, v):\n        if v < 0:\n            raise ValueError(\"negative\")\n        self._subtotal = v\n\no = Order(100)\no.subtotal = 200\nprint(o.total)\n```\n\n```python\n# 3. cached_property (non-data descriptor) and bound methods\nfrom functools import cached_property\nclass Report:\n    @cached_property\n    def rows(self):\n        print(\"computing\")\n        return [1, 2, 3]\nr = Report()\nr.rows; r.rows                               # prints once\nprint(\"rows\" in r.__dict__, Report.__dict__[\"rows\"].__class__.__name__)\n```\n\n```python\n# 4. how methods bind\nclass A:\n    def f(self): return \"hi\"\na = A()\nprint(A.__dict__[\"f\"].__get__(a, A)() == a.f())\n```",
+  "use_cases_md": "- A reusable `Validated` / `Positive` / `NonEmpty` field for domain classes without a validation library.\n- Read-only computed attributes (`order.total`) with `@property` that stay in sync with their inputs.\n- `cached_property` for expensive lazy values like a parsed report or a compiled regex per instance.\n- ORMs and validation frameworks (SQLAlchemy columns, Django fields, Pydantic internals) use descriptors/`__set_name__` to bind fields to names.\n- `__slots__` for millions of small objects (memory-bound ingestion pipelines).",
+  "mistakes_md": "- **Storing per-instance data on the descriptor** (`self.value = v`): shared by all instances. Store on `obj` (or a `WeakKeyDictionary`).\n- **Forgetting `if obj is None: return self`** in `__get__`, which breaks class-level access (`Class.field`, introspection, docs).\n- **Infinite recursion in a property**: `self.price = v` inside the `price` setter calls itself; assign to `self._price`.\n- **Expecting an instance attribute to override a data descriptor**: it will not.\n- **`cached_property` with `__slots__`** (no instance `__dict__` to store it) fails.\n- **Heavy work in a property** that looks like a cheap attribute access.",
+  "best_practices_md": "- Start with plain attributes; add `@property` only when you need validation or computation (it is a drop-in, API-compatible upgrade).\n- Make descriptors reusable with `__set_name__`; keep state on the instance.\n- Return `self` from `__get__` when `obj is None`.\n- Keep properties cheap, side-effect free and idempotent.\n- Use `cached_property` for expensive lazy values and invalidate by `del obj.attr`.\n- Prefer dataclasses/Pydantic for standard validation needs.",
+  "my_context_md": "",
+  "revision_notes_md": "- Descriptor = class attribute whose type defines `__get__` / `__set__` / `__delete__`.\n- Data descriptor (has `__set__`/`__delete__`) beats instance `__dict__`; non-data (only `__get__`) loses to it.\n- Lookup order: data descriptor, instance dict, non-data descriptor / class attr, `__getattr__`.\n- Functions are non-data descriptors: `__get__` returns a bound method.\n- `property` is a data descriptor (read-only without a setter).\n- `__set_name__(owner, name)` tells the descriptor its attribute name.\n- Never keep per-instance state on the descriptor itself.\n- `cached_property`: non-data; caches into `obj.__dict__`.\n- `__slots__` creates member descriptors, removes `__dict__`.",
+  "exercises_md": "1. Write a descriptor `NonEmptyStr` and use it on two fields of an `Order`-like class; verify errors and that two instances do not share values.\n2. Prove the precedence rule: put the same name in the instance `__dict__` for a data and a non-data descriptor and print what is returned.\n3. Re-implement a minimal `cached_property` as a non-data descriptor and test it with a call counter.\n4. Compare `sys.getsizeof` and `tracemalloc` memory for 100,000 instances with and without `__slots__`.",
+  "related": [
+    "py-dunder-methods-protocols",
+    "py-metaclasses-class-creation",
+    "python-oop-dataclasses",
+    "py-internals-memory"
+  ],
+  "flashcards": [
+    {
+      "front": "What makes an object a descriptor?",
+      "back": "Its type defines `__get__`, `__set__` or `__delete__`, and it is stored as a class attribute."
+    },
+    {
+      "front": "Data vs non-data descriptor?",
+      "back": "Data defines `__set__`/`__delete__` and overrides instance `__dict__`; non-data has only `__get__` and is overridden by it."
+    },
+    {
+      "front": "Why are methods bound?",
+      "back": "Functions are non-data descriptors; `__get__` returns a bound method carrying the instance."
+    },
+    {
+      "front": "What is `__set_name__` for?",
+      "back": "Called at class creation with (owner, name) so a descriptor knows its attribute name."
+    },
+    {
+      "front": "Where should per-instance values live?",
+      "back": "On the instance (`obj.__dict__` or a private attribute), never on the shared descriptor."
+    },
+    {
+      "front": "Why does `cached_property` work?",
+      "back": "It is a non-data descriptor that stores the value in `obj.__dict__`, which then shadows it."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which defines a *data* descriptor?",
+      "options": [
+        "Only `__get__`",
+        "`__get__` and `__set__`",
+        "`__call__`",
+        "`__getattr__`"
+      ],
+      "answer_index": 1,
+      "explanation": "Defining `__set__` (or `__delete__`) makes it a data descriptor."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An instance dict has key 'x' and the class has a data descriptor 'x'. `obj.x` returns...",
+      "options": [
+        "The instance dict value",
+        "The descriptor's `__get__` result",
+        "AttributeError",
+        "The class object itself"
+      ],
+      "answer_index": 1,
+      "explanation": "Data descriptors take precedence over the instance `__dict__`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What should a descriptor's `__get__` do when `obj is None`?",
+      "options": [
+        "Raise AttributeError",
+        "Return None",
+        "Return the descriptor itself",
+        "Return the owner class"
+      ],
+      "answer_index": 2,
+      "explanation": "Class-level access (`Class.attr`) passes obj=None; returning `self` keeps introspection working."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "`functools.cached_property` is a ____-data descriptor, so the instance dict can shadow it after first use.",
+      "answers": [
+        "non",
+        "non-data",
+        "nondata"
+      ],
+      "explanation": "It only defines `__get__`; the blank completes 'non-data'."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The descriptor hook ____(self, owner, name) is called when the owning class is created, telling the descriptor its attribute name.",
+      "answers": [
+        "__set_name__",
+        "set_name"
+      ],
+      "explanation": "`__set_name__` was added in Python 3.6."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class NonData:\n    def __get__(self, obj, objtype=None):\n        return \"descriptor\"\n\nclass Data(NonData):\n    def __set__(self, obj, value):\n        pass\n\nclass A:\n    nd = NonData()\n    d = Data()\n\na = A()\na.__dict__[\"nd\"] = \"instance\"\na.__dict__[\"d\"] = \"instance\"\nprint(a.nd, a.d)\n",
+      "answers": [
+        "instance descriptor"
+      ],
+      "explanation": "The non-data descriptor loses to the instance dict, the data descriptor wins."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class Positive:\n    def __set_name__(self, owner, name):\n        self.private = \"_\" + name\n    def __get__(self, obj, objtype=None):\n        return self if obj is None else getattr(obj, self.private)\n    def __set__(self, obj, value):\n        if value <= 0:\n            raise ValueError(\"must be positive\")\n        setattr(obj, self.private, value)\nclass Item:\n    qty = Positive()\n    def __init__(self, qty):\n        self.qty = qty\na, b = Item(2), Item(5)\nprint(a.qty, b.qty, sorted(vars(a)))\ntry:\n    Item(0)\nexcept ValueError as e:\n    print(e)\nprint(type(Item.qty).__name__)\n",
+      "answers": [
+        "2 5 ['_qty']\nmust be positive\nPositive"
+      ],
+      "explanation": "State is stored per instance under `_qty`; the ValueError comes from `__set__`; class access returns the descriptor itself."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "class Item:\n    def __init__(self, price):\n        self.price = price\n    @property\n    def price(self):\n        return self.price\n    @price.setter\n    def price(self, v):\n        if v < 0:\n            raise ValueError(\"negative\")\n        self.price = v\n\nItem(5)\n",
+      "answer": "The property `price` and the attribute it reads/writes share the same name, so the getter and setter call themselves forever (RecursionError). Store the value in a differently named backing attribute: `self._price = v` in the setter and `return self._price` in the getter. `__init__` should keep `self.price = price` so validation runs.",
+      "rubric": [
+        "Identifies self-recursion through the property",
+        "Uses a backing attribute like _price",
+        "Keeps validation by assigning via the property in __init__"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain Python's attribute lookup order and where descriptors fit.",
+      "answer": "`obj.attr` goes through `type(obj).__getattribute__`. It first searches the class MRO; if it finds a data descriptor (has `__set__`/`__delete__`), it calls that descriptor's `__get__` immediately. Otherwise it checks the instance `__dict__`. If not found there, a non-data descriptor found earlier is used via `__get__`, or a plain class attribute is returned. If everything fails, `__getattr__` is tried, then AttributeError. Setting an attribute similarly consults data descriptors on the type before writing into the instance dict. This ordering explains why properties cannot be overridden per instance and why cached_property can.",
+      "rubric": [
+        "Class MRO lookup first for data descriptors",
+        "Instance dict next",
+        "Non-data descriptor / class attr after",
+        "__getattr__ as fallback"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When would you write a custom descriptor instead of a property?",
+      "answer": "When the same access logic applies to several attributes or classes, e.g. validated fields (`Positive`, `NonEmpty`, bounded numbers). A property is written per attribute, so repeating it causes duplication, while a descriptor is defined once and uses `__set_name__` to learn each field's name. Use a property for one-off computed or validated attributes.",
+      "rubric": [
+        "Reuse across attributes/classes",
+        "__set_name__ gives field name",
+        "Property for one-off"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How does `property` work under the hood?",
+      "difficulty": "medium",
+      "answer_md": "`property` is a built-in data descriptor class holding `fget`, `fset`, `fdel`. Defined in the class body, it is a class attribute. When you access `obj.price`, the lookup finds the property on the type, sees it is a data descriptor and calls `property.__get__(obj, type)` which runs `fget(obj)`. Assignment calls `__set__`, which runs `fset` or raises `AttributeError` if none was given. `@x.setter` returns a *new* property object copying the getter and adding the setter."
+    },
+    {
+      "question": "Why does `a.method` create a new bound method each time, and how does it relate to descriptors?",
+      "difficulty": "medium",
+      "answer_md": "Functions implement `__get__`. Accessing `a.method` calls `function.__get__(a, type(a))`, which builds a bound method object holding `__self__` and `__func__`. Calling it passes `a` as the first argument. A new bound method object is created per access (`a.f is a.f` is False, `a.f == a.f` is True). `classmethod.__get__` binds the class instead and `staticmethod.__get__` returns the plain function."
+    },
+    {
+      "question": "What is the difference between `__getattr__` and descriptors for dynamic attributes?",
+      "difficulty": "hard",
+      "answer_md": "`__getattr__` is a per-class fallback invoked only when normal lookup fails; it is one function handling any missing name, useful for proxies and delegation. Descriptors are per-attribute and participate in normal lookup, can intercept set and delete, and work for existing attributes. Descriptors give explicit, introspectable fields (`Class.field`), while `__getattr__` is dynamic but harder to type-check and can hide typos. Use descriptors for fields and `__getattr__` for delegation."
+    },
+    {
+      "question": "How would you implement a lazily computed attribute that is computed once per instance?",
+      "difficulty": "medium",
+      "answer_md": "Use `functools.cached_property`. It is a non-data descriptor: on first access it calls the function, stores the result in `instance.__dict__[name]`, and later accesses find it in the instance dict before reaching the descriptor. Invalidate with `del obj.attr`. It requires a writable instance `__dict__` (so not with `__slots__` lacking `__dict__`) and should only wrap deterministic, thread-aware work, because two threads may compute it concurrently."
+    }
+  ]
+}

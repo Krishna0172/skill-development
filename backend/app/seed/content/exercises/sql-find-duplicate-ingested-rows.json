@@ -1,0 +1,75 @@
+{
+  "slug": "sql-find-duplicate-ingested-rows",
+  "title": "Find duplicate rows from re-uploaded reports",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "medium",
+  "skill": "sql-window-functions",
+  "concepts": [
+    "deduplication",
+    "ROW_NUMBER",
+    "PARTITION BY natural key",
+    "GROUP BY MIN alternative",
+    "DELETE dedupe"
+  ],
+  "related_topics": [
+    "sql-window-functions",
+    "postgres-upsert",
+    "postgres-indexes"
+  ],
+  "problem_md": "A seller uploaded the same Myntra and Nykaa order reports more than once, and the staging table\n`raw_order_lines` had no unique constraint, so duplicate lines were inserted. A line's natural key is\n**(channel, order_ref, sku)**. For every set of duplicates you want to **keep the earliest row (lowest\n`line_id`)** and delete the rest.\n\n```sql\nCREATE TABLE raw_order_lines (\n  line_id   INTEGER PRIMARY KEY,\n  upload_id INTEGER NOT NULL,     -- references fs_upload\n  channel   TEXT NOT NULL,\n  order_ref TEXT NOT NULL,\n  sku       TEXT NOT NULL,\n  quantity  INTEGER NOT NULL\n);\n```\n\n**Task.** Return the rows that should be **deleted**: `line_id`, `channel`, `order_ref`, `sku`. Order by `line_id`.\nNote: the same `order_ref` + `sku` on a *different channel* is a different line, not a duplicate.",
+  "examples": [
+    {
+      "input": "lines 3, 7, 8 are all (Nykaa, NYK-5001, LIPSTICK-RED); line 6 is the same order_ref + sku but on Blinkit",
+      "output": "line_id | channel | order_ref | sku\n... \n7       | Nykaa   | NYK-5001  | LIPSTICK-RED\n8       | Nykaa   | NYK-5001  | LIPSTICK-RED",
+      "explanation": "Line 3 is kept (lowest id); lines 7 and 8 are deleted. Line 6 is unique because channel is part of the key."
+    }
+  ],
+  "hints": [
+    "Number the rows within each natural-key group, oldest first. Every row numbered 2 or more is a duplicate.",
+    "`ROW_NUMBER() OVER (PARTITION BY channel, order_ref, sku ORDER BY line_id)`.",
+    "Alternative: keep `MIN(line_id)` per key with `GROUP BY` and return lines whose id is not in that keep-set."
+  ],
+  "starter_code": "-- Write your query here\nSELECT line_id, channel, order_ref, sku\nFROM raw_order_lines\n",
+  "solution_code": "WITH numbered AS (\n  SELECT line_id, channel, order_ref, sku,\n         ROW_NUMBER() OVER (PARTITION BY channel, order_ref, sku\n                            ORDER BY line_id) AS rn\n  FROM raw_order_lines\n)\nSELECT line_id, channel, order_ref, sku\nFROM numbered\nWHERE rn > 1\nORDER BY line_id;",
+  "solution_md": "**Dedupe by natural key.** `PARTITION BY channel, order_ref, sku` groups duplicates together; ordering by\n`line_id` makes the first-loaded row `rn = 1`. Everything with `rn > 1` is a duplicate to delete.\n\n**GROUP BY alternative:**\n\n```sql\nSELECT line_id, channel, order_ref, sku\nFROM raw_order_lines r\nWHERE line_id NOT IN (SELECT MIN(line_id) FROM raw_order_lines\n                      GROUP BY channel, order_ref, sku)\nORDER BY line_id;\n```\n\n(`NOT IN` is safe here because `MIN(line_id)` of a non-null PK is never NULL.)\n\n**Actually deleting** (PostgreSQL; also works in SQLite):\n\n```sql\nDELETE FROM raw_order_lines\nWHERE line_id IN (\n  SELECT line_id FROM (\n    SELECT line_id, ROW_NUMBER() OVER (PARTITION BY channel, order_ref, sku ORDER BY line_id) AS rn\n    FROM raw_order_lines) t\n  WHERE rn > 1);\n```\n\nRun it inside a transaction and check the affected row count before `COMMIT`.\n\n**Prevent it instead of cleaning it.** Add the natural key as a constraint and make the loader idempotent:\n\n```sql\nALTER TABLE raw_order_lines ADD CONSTRAINT uq_line UNIQUE (channel, order_ref, sku);\nINSERT INTO raw_order_lines (...) VALUES (...)\nON CONFLICT (channel, order_ref, sku) DO NOTHING;\n```\n\nAdding the constraint will fail until existing duplicates are removed - dedupe first. The unique index also\nspeeds up this exact `PARTITION BY` (it provides the sort order). Choose the key carefully: if a report can\nlegitimately contain two lines with the same SKU in one order (e.g. two sizes mapped to one SKU), you need a line\nnumber from the source in the key.",
+  "tests": {
+    "schema_sql": "CREATE TABLE raw_order_lines (\n  line_id   INTEGER PRIMARY KEY,\n  upload_id INTEGER NOT NULL,     -- references fs_upload\n  channel   TEXT NOT NULL,\n  order_ref TEXT NOT NULL,\n  sku       TEXT NOT NULL,\n  quantity  INTEGER NOT NULL\n);\n\nINSERT INTO raw_order_lines VALUES\n (1,1,'Myntra', 'MYN-1001','TSHIRT-BLK-M',2),\n (2,1,'Myntra', 'MYN-1001','SOCKS-3PK',   1),\n (3,2,'Nykaa',  'NYK-5001','LIPSTICK-RED',3),\n (4,3,'Myntra', 'MYN-1001','TSHIRT-BLK-M',2),\n (5,3,'Myntra', 'MYN-1001','SOCKS-3PK',   1),\n (6,4,'Blinkit','MYN-1001','TSHIRT-BLK-M',2),\n (7,5,'Nykaa',  'NYK-5001','LIPSTICK-RED',3),\n (8,6,'Nykaa',  'NYK-5001','LIPSTICK-RED',3),\n (9,6,'Nykaa',  'NYK-5002','LIPSTICK-RED',1);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "line_id",
+        "channel",
+        "order_ref",
+        "sku"
+      ],
+      "rows": [
+        [
+          4,
+          "Myntra",
+          "MYN-1001",
+          "TSHIRT-BLK-M"
+        ],
+        [
+          5,
+          "Myntra",
+          "MYN-1001",
+          "SOCKS-3PK"
+        ],
+        [
+          7,
+          "Nykaa",
+          "NYK-5001",
+          "LIPSTICK-RED"
+        ],
+        [
+          8,
+          "Nykaa",
+          "NYK-5001",
+          "LIPSTICK-RED"
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

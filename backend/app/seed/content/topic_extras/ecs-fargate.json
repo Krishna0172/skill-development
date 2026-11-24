@@ -1,0 +1,74 @@
+{
+  "slug": "ecs-fargate",
+  "why_md": "- ECS Fargate runs containerized workers and batch jobs without managing servers — the natural home for long data-processing jobs.\n- Knowing task vs execution roles, networking and exit codes is what makes jobs debuggable in production.\n- AI services (model gateways, ingestion workers) are commonly deployed as Fargate services.\n- 'How would you run and monitor a batch job on AWS?' is a common interview question.",
+  "revision_notes_md": "- Task definition = image, CPU/memory, env/secrets, log config, roles; services keep N tasks running; `run_task` starts one-off tasks.\n- Task role = permissions for your code (S3, DynamoDB); execution role = ECS agent pulls image from ECR, writes logs, fetches secrets.\n- `run_task` reports placement failures in the `failures` list, not as exceptions — always check it.\n- Inject secrets via `secrets` (Secrets Manager/SSM) in the task definition, not plain env vars.\n- Exit code 137 = SIGKILL, usually OOM (or stop timeout); handle SIGTERM for graceful shutdown (default 30 s stopTimeout).\n- awsvpc networking: each task gets an ENI; private subnets need NAT or VPC endpoints for AWS APIs/ECR.\n- Fargate Spot is ~70% cheaper but can be interrupted (2-minute warning) — good for retryable batch work.\n- Use container overrides (command/env) to pass job parameters per run.",
+  "exercises_md": "1. Write a Python function that starts an ECS Fargate task with `run_task` (with container overrides for the job parameters), checks `failures`, then polls `describe_tasks` until STOPPED and reports the container exit code and stop reason.\n2. Add a SIGTERM handler to a long-running worker that finishes the current batch and exits cleanly; verify it with `docker stop` locally.",
+  "my_context_md": "Many of your services are ECS jobs (the `ECS...` prefix — e.g. `ECSMarketplaceDataUpload`, `ECSInventoryPriceTracking`, `ECSLlmQueryProcess`), and boto3's `ecs` client is used in `python-postgres`. Knowing the task-role vs execution-role split and checking `run_task` failures/exit codes is directly applicable to debugging those jobs.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "The IAM role your application code uses inside a Fargate container (e.g. to read S3) is the task ____.",
+      "answers": [
+        "role",
+        "task role",
+        "iam role"
+      ],
+      "explanation": "The task role grants permissions to the containers; the execution role is for the ECS agent."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A Fargate task stopped with exit code ____ usually means the container was SIGKILLed, most often for exceeding its memory limit.",
+      "answers": [
+        "137"
+      ],
+      "explanation": "137 = 128 + 9 (SIGKILL); check for OutOfMemory in the stop reason."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A Fargate task in a private subnet fails with 'CannotPullContainerError: ... i/o timeout'. Most likely cause?",
+      "options": [
+        "The task role lacks s3:GetObject",
+        "The image tag is 'latest'",
+        "The subnet has no route to ECR (no NAT gateway or VPC endpoints)",
+        "The container's CMD is wrong"
+      ],
+      "answer_index": 2,
+      "explanation": "Image pulls need network access to ECR (and S3 for layers). Private subnets need a NAT gateway or ECR/S3 VPC endpoints."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which value belongs in the task definition's `secrets` section rather than `environment`?",
+      "options": [
+        "LOG_LEVEL=INFO",
+        "The database password, referenced by a Secrets Manager ARN",
+        "AWS_REGION=ap-south-1",
+        "The container port"
+      ],
+      "answer_index": 1,
+      "explanation": "`secrets` injects values from Secrets Manager/SSM at start-up, so they aren't stored in plain text in the task definition."
+    },
+    {
+      "type": "debug",
+      "prompt": "This code is supposed to start a report job, but sometimes nothing runs and nobody notices. What's wrong?",
+      "code": "def start_report_job(org_id):\n    ecs.run_task(\n        cluster=\"jobs\",\n        launchType=\"FARGATE\",\n        taskDefinition=\"report-job\",\n        networkConfiguration={...},\n        overrides={\"containerOverrides\": [\n            {\"name\": \"app\", \"environment\": [{\"name\": \"ORG_ID\", \"value\": org_id}]}]},\n    )\n    return \"started\" ",
+      "answer": "`run_task` does not raise on placement/capacity problems (e.g. no capacity, bad subnet, ENI limits); they come back in `response[\"failures\"]` with an empty `tasks` list. The code ignores the response. Also `value` must be a string (an int org_id fails validation).\n\n```python\nresp = ecs.run_task(..., overrides={\"containerOverrides\": [\n    {\"name\": \"app\", \"environment\": [{\"name\": \"ORG_ID\", \"value\": str(org_id)}]}]})\nif resp[\"failures\"] or not resp[\"tasks\"]:\n    raise RuntimeError(f\"run_task failed: {resp['failures']}\")\ntask_arn = resp[\"tasks\"][0][\"taskArn\"]\nsave_job_status(org_id, task_arn, \"started\")   # track and later poll describe_tasks\nreturn task_arn\n```\nThen monitor with `describe_tasks` (lastStatus, exit code, stoppedReason) or EventBridge task state-change events.",
+      "rubric": [
+        "run_task returns failures instead of raising",
+        "Check failures/tasks and record the task ARN",
+        "Environment values must be strings",
+        "Monitor exit code/stop reason via describe_tasks or events"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between an ECS task definition, a task and a service, and the two IAM roles involved.",
+      "answer": "- **Task definition**: a versioned template (family:revision) — container image(s), CPU/memory, port mappings, environment, secrets, log configuration, task role, execution role, network mode (`awsvpc` on Fargate).\n- **Task**: a running instance of a task definition. Started one-off with `run_task` (batch jobs) — it runs until the process exits.\n- **Service**: keeps a desired number of tasks running, replaces failed ones, integrates with load balancers and rolling deployments — for APIs and long-lived workers.\n\nRoles:\n- **Execution role**: used by the ECS agent to pull the image from ECR, send logs to CloudWatch and fetch secrets for injection.\n- **Task role**: assumed by your application code for AWS API calls (S3, DynamoDB, SES).\nMixing them up is the usual cause of AccessDenied errors.",
+      "rubric": [
+        "Task definition = versioned template",
+        "Task = running instance (run_task for batch)",
+        "Service keeps N tasks running / deployments",
+        "Execution role vs task role"
+      ]
+    }
+  ]
+}

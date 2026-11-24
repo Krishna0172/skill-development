@@ -1,0 +1,65 @@
+{
+  "slug": "sql-revenue-by-channel",
+  "title": "Revenue and order count by channel",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "easy",
+  "skill": "sql-aggregations",
+  "concepts": [
+    "INNER JOIN",
+    "GROUP BY",
+    "COUNT",
+    "SUM",
+    "WHERE vs HAVING",
+    "ORDER BY with tie-breaker"
+  ],
+  "related_topics": [
+    "sql-group-by",
+    "sql-joins"
+  ],
+  "problem_md": "Your ingestion jobs load marketplace order reports into an `orders` table. The business team wants a quick\n**revenue-by-channel** summary that ignores cancelled orders.\n\n```sql\nCREATE TABLE channels (\n  channel_id INTEGER PRIMARY KEY,\n  name       TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  channel_id   INTEGER NOT NULL REFERENCES channels(channel_id),\n  order_ref    TEXT NOT NULL,\n  order_date   TEXT NOT NULL,\n  status       TEXT NOT NULL,   -- PLACED | SHIPPED | DELIVERED | CANCELLED | RETURNED\n  total_amount REAL NOT NULL\n);\n```\n\n> Money columns are `REAL` in this sandbox (they would be `NUMERIC(12,2)` in production PostgreSQL). Dates are ISO `'YYYY-MM-DD'` text.\n\n**Task.** For every channel that has **at least one non-cancelled order**, return:\n\n| column | meaning |\n|---|---|\n| `channel_name` | `channels.name` |\n| `order_count` | number of orders whose `status` is not `'CANCELLED'` |\n| `total_revenue` | sum of `total_amount` for those orders |\n\nOrder by `total_revenue` descending, then `channel_name` ascending.\nChannels with no orders, or with only cancelled orders, must not appear.",
+  "examples": [
+    {
+      "input": "Myntra has orders 1499 (DELIVERED), 899 (CANCELLED), 2199 (SHIPPED). Zepto has a single CANCELLED order. Swiggy Instamart has no orders.",
+      "output": "channel_name | order_count | total_revenue\nNykaa        | 3           | 3700\nMyntra       | 2           | 3698\nBlinkit      | 2           | 574.5",
+      "explanation": "The cancelled Myntra order is filtered out before grouping. Zepto ends up with zero qualifying rows so no group is produced for it."
+    }
+  ],
+  "hints": [
+    "You need columns from two tables: join `orders` to `channels` on `channel_id`.",
+    "Filter out cancelled orders in `WHERE` (row-level, before grouping) rather than `HAVING`.",
+    "`SELECT c.name, COUNT(*), SUM(o.total_amount) ... WHERE o.status <> 'CANCELLED' GROUP BY c.name ORDER BY 3 DESC, 1`."
+  ],
+  "starter_code": "-- Write your query here\nSELECT c.name AS channel_name\nFROM channels c\n",
+  "solution_code": "SELECT c.name              AS channel_name,\n       COUNT(*)            AS order_count,\n       SUM(o.total_amount) AS total_revenue\nFROM orders o\nJOIN channels c ON c.channel_id = o.channel_id\nWHERE o.status <> 'CANCELLED'\nGROUP BY c.channel_id, c.name\nORDER BY total_revenue DESC, channel_name;",
+  "solution_md": "**Approach.** Join each order to its channel, drop cancelled rows with `WHERE`, then aggregate per channel.\n\n- `WHERE` runs **before** grouping, so cancelled orders never enter the groups. A channel whose orders are *all*\n  cancelled (Zepto) produces no group at all, which is exactly what the task asks for.\n- An **inner** join naturally excludes channels with no orders (Swiggy Instamart). If the business later wants\n  every channel listed with zeros, switch to `channels LEFT JOIN orders ... ` and move the status filter into the\n  `ON` clause (otherwise the `WHERE` turns the left join back into an inner join), then use\n  `COALESCE(SUM(...), 0)`.\n- Grouping by `c.channel_id, c.name` (not just the name) is a good habit: two channels could share a display name.\n- The secondary sort key (`channel_name`) makes the output deterministic when two channels tie on revenue.\n\n**Performance.** On a large `orders` table this is a full scan + hash aggregate, which is fine for a report.\nIf it runs often for a date range, an index on `orders (order_date)` or `(channel_id, order_date)` lets\nPostgreSQL skip irrelevant rows.",
+  "tests": {
+    "schema_sql": "CREATE TABLE channels (\n  channel_id INTEGER PRIMARY KEY,\n  name       TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  order_id     INTEGER PRIMARY KEY,\n  channel_id   INTEGER NOT NULL REFERENCES channels(channel_id),\n  order_ref    TEXT NOT NULL,\n  order_date   TEXT NOT NULL,\n  status       TEXT NOT NULL,   -- PLACED | SHIPPED | DELIVERED | CANCELLED | RETURNED\n  total_amount REAL NOT NULL\n);\n\nINSERT INTO channels VALUES (1,'Myntra'),(2,'Nykaa'),(3,'Blinkit'),(4,'Zepto'),(5,'Swiggy Instamart');\n\nINSERT INTO orders VALUES\n (1,1,'MYN-1001','2024-03-01','DELIVERED',1499.00),\n (2,1,'MYN-1002','2024-03-01','CANCELLED', 899.00),\n (3,1,'MYN-1003','2024-03-02','SHIPPED',  2199.00),\n (4,2,'NYK-5001','2024-03-01','DELIVERED', 650.00),\n (5,2,'NYK-5002','2024-03-03','RETURNED', 1200.00),\n (6,2,'NYK-5003','2024-03-03','DELIVERED',1850.00),\n (7,3,'BLK-77',  '2024-03-02','DELIVERED', 349.00),\n (8,3,'BLK-78',  '2024-03-02','DELIVERED', 225.50),\n (9,4,'ZEP-9001','2024-03-04','CANCELLED', 540.00);",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "channel_name",
+        "order_count",
+        "total_revenue"
+      ],
+      "rows": [
+        [
+          "Nykaa",
+          3,
+          3700
+        ],
+        [
+          "Myntra",
+          2,
+          3698
+        ],
+        [
+          "Blinkit",
+          2,
+          574.5
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "slug": "parse-currency-amount",
+  "title": "Parse currency strings like \"1,200.50\"",
+  "category": "python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "etl-data-processing",
+  "concepts": [
+    "string cleaning",
+    "regular expressions",
+    "validation",
+    "accounting negatives"
+  ],
+  "related_topics": [
+    "pandas-cleaning-performance",
+    "python-exceptions"
+  ],
+  "problem_md": "Settlement and payout reports store amounts as text: `\"1,200.50\"`, `\"INR 3,000\"`, `\"(250.00)\"`, `\"-$1,050.75\"`. Before you can reconcile payouts against orders you need real numbers.\n\nImplement:\n\n```python\ndef parse_amount(text: str) -> float:\n```\n\nRules:\n1. Strip surrounding whitespace.\n2. If the text is wrapped in parentheses, e.g. `\"(250.00)\"`, the amount is **negative** (accounting style). Remove the parentheses.\n3. Remove any of these currency markers wherever they appear: `₹ $ € £ INR USD EUR GBP Rs.`\n4. Remove all commas (thousands separators) and spaces.\n5. A single leading `-` means negative. It is **not** allowed together with parentheses (→ `ValueError`).\n6. What remains must be digits with an optional decimal part (`123`, `123.45`). Anything else — empty strings, `\"1.2.3\"`, `\"abc\"` — raises `ValueError`.\n\nReturn a `float`.",
+  "examples": [
+    {
+      "input": "text = '1,200.50'",
+      "output": "1200.5"
+    },
+    {
+      "input": "text = '(250.00)'",
+      "output": "-250.0"
+    },
+    {
+      "input": "text = '-$1,050.75'",
+      "output": "-1050.75"
+    },
+    {
+      "input": "text = '1.2.3'",
+      "output": "raises ValueError"
+    }
+  ],
+  "hints": [
+    "Work through the rules in order, transforming a working string `s` step by step and tracking a `negative` flag.",
+    "`str.replace` in a loop over the currency markers handles rule 3; `s.replace(',', '').replace(' ', '')` handles rule 4.",
+    "Finish with `re.fullmatch(r'\\d+(\\.\\d+)?', s)`; if it's `None`, raise `ValueError`, otherwise `amount = float(s)` and negate if needed."
+  ],
+  "starter_code": "import re\n\nCURRENCY_MARKERS = [\"₹\", \"$\", \"€\", \"£\", \"INR\", \"USD\", \"EUR\", \"GBP\", \"Rs.\"]\n\n\ndef parse_amount(text: str) -> float:\n    # your code here\n    ...\n",
+  "solution_code": "import re\n\nCURRENCY_MARKERS = [\"₹\", \"$\", \"€\", \"£\", \"INR\", \"USD\", \"EUR\", \"GBP\", \"Rs.\"]\nNUMBER_RE = re.compile(r\"\\d+(\\.\\d+)?\")\n\n\ndef parse_amount(text: str) -> float:\n    s = text.strip()\n    negative = False\n    if len(s) >= 2 and s.startswith(\"(\") and s.endswith(\")\"):\n        negative = True\n        s = s[1:-1]\n    for marker in CURRENCY_MARKERS:\n        s = s.replace(marker, \"\")\n    s = s.replace(\",\", \"\").replace(\" \", \"\")\n    if s.startswith(\"-\"):\n        if negative:\n            raise ValueError(f\"both parentheses and minus sign in {text!r}\")\n        negative = True\n        s = s[1:]\n    if not NUMBER_RE.fullmatch(s):\n        raise ValueError(f\"not a valid amount: {text!r}\")\n    amount = float(s)\n    return -amount if negative else amount\n",
+  "solution_md": "A small, ordered cleaning pipeline with a `negative` flag, finished by a strict `fullmatch` so that nothing unexpected slips into `float()`.\n\nWhy not just `float(s.replace(',', ''))`? Because `float()` happily accepts things you don't want in financial data: `\"1e5\"`, `\"nan\"`, `\"inf\"`, `\" 12 \"`. The regex is the gatekeeper.\n\n- **Time:** O(len(text))\n- **Space:** O(len(text))\n\n**Float vs Decimal:** for reconciliation you'd normally use `decimal.Decimal(s)` (or integer cents) so that `0.1 + 0.2` problems never bite you when summing thousands of lines. This exercise returns `float` only to keep the tests simple.\n\n**In pandas** the vectorised version is roughly:\n\n```python\ns = df[\"amount\"].str.strip()\nneg = s.str.match(r\"^\\(.*\\)$\")\nnum = s.str.replace(r\"[^0-9.\\-]\", \"\", regex=True).astype(float)\ndf[\"amount\"] = num.where(~neg, -num)\n```\n\n— though you'd still want to flag rows that fail validation rather than silently coerce them.",
+  "tests": {
+    "function": "parse_amount",
+    "cases": [
+      {
+        "args": [
+          "1,200.50"
+        ],
+        "kwargs": {},
+        "expected": 1200.5
+      },
+      {
+        "args": [
+          "INR 3,000"
+        ],
+        "kwargs": {},
+        "expected": 3000.0
+      },
+      {
+        "args": [
+          "(250.00)"
+        ],
+        "kwargs": {},
+        "expected": -250.0
+      },
+      {
+        "args": [
+          "-$1,050.75"
+        ],
+        "kwargs": {},
+        "expected": -1050.75
+      },
+      {
+        "args": [
+          "  €99.99 "
+        ],
+        "kwargs": {},
+        "expected": 99.99
+      },
+      {
+        "args": [
+          "1.2.3"
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      },
+      {
+        "args": [
+          ""
+        ],
+        "kwargs": {},
+        "raises": "ValueError"
+      }
+    ]
+  }
+}

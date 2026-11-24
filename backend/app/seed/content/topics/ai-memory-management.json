@@ -1,0 +1,154 @@
+{
+  "slug": "ai-memory-management",
+  "title": "Conversation memory: windows, summaries, long-term storage",
+  "skill": "ai-agents",
+  "extra_skills": [
+    "postgresql",
+    "llm-applications"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "memory",
+    "chat-history",
+    "summarization",
+    "context-window",
+    "multi-tenant",
+    "postgres"
+  ],
+  "summary": "LLMs are stateless: 'memory' is whatever your backend puts back into the prompt. Short-term memory is recent chat turns (windowed or token-trimmed), medium-term is a running summary, and long-term is facts or past messages stored in a database and retrieved when relevant — always isolated per user and org.",
+  "why_md": "- Every chat product must decide what history to send; it drives cost, latency and answer quality.\n- Memory is a storage + retrieval design problem — squarely a backend skill.\n- Leaking one user's history into another's prompt is a serious privacy bug; isolation is an interview favourite.",
+  "details_md": "### The model remembers nothing\nEach API call receives the full message list. 'Memory' = the policy for building that list from stored history within a token budget.\n\n### Short-term: the window\n- **Last N turns** (sliding window): simple, predictable; loses older context.\n- **Token-budget trimming**: keep the system prompt, then add messages newest-first until the budget is spent. Count tokens with the provider's tokenizer, not characters.\n- Never drop the system prompt; keep tool-call/result pairs together.\n\n### Medium-term: summarisation\nWhen history exceeds the budget, summarise older turns into a compact 'conversation so far' message (a cheap model call), store the summary with the index of the last summarised message, and send `system + summary + recent turns`. Re-summarise incrementally (`old summary + newly evicted turns -> new summary`). Summaries lose detail, so keep exact values (IDs, dates, filters) explicitly if they matter.\n\n### Long-term memory\n- **Message store**: every message in Postgres (`chat_session`, `chat_message`), which you need anyway for history UI, votes and cost.\n- **Facts/preferences**: extracted key facts (`prefers results in INR`, `default marketplace = Amazon.in`) stored as rows, injected into the system prompt.\n- **Semantic recall**: embed past messages or summaries and retrieve the most similar ones for a new question (needs a vector index such as pgvector).\n\n### Isolation and lifecycle\n- Every memory query filters by `session_id` **and** `user_id`/`org_id` derived from the authenticated request — never from the client body or the model.\n- Retention/deletion: users may request deletion; summaries and embeddings derived from messages must be deleted too.\n- Don't store secrets or unnecessary PII in memory; redact before persisting if needed.\n\n### Cost angle\nHistory tokens are re-sent on every turn, so an unbounded history grows the cost per message linearly with conversation length. Windowing and summaries cap that.",
+  "code_md": "```python\n# Build the prompt: system + optional summary + newest messages within a token budget.\ndef count_tokens(text: str) -> int:\n    return max(1, len(text) // 4)        # placeholder; use the provider's tokenizer in real code\n\ndef build_context(system: str, summary: str | None, history: list[dict], budget: int) -> list[dict]:\n    msgs = [{\"role\": \"system\", \"content\": system}]\n    if summary:\n        msgs.append({\"role\": \"system\", \"content\": f\"Conversation so far: {summary}\"})\n    used = sum(count_tokens(m[\"content\"]) for m in msgs)\n    recent = []\n    for m in reversed(history):           # newest first\n        cost = count_tokens(m[\"content\"])\n        if used + cost > budget:\n            break\n        recent.append(m)\n        used += cost\n    return msgs + list(reversed(recent))  # restore chronological order\n```\n\n```sql\n-- Long-term store with isolation baked into every query.\nCREATE TABLE chat_message (\n    id          bigserial PRIMARY KEY,\n    session_id  bigint NOT NULL REFERENCES chat_session(id) ON DELETE CASCADE,\n    org_id      bigint NOT NULL,\n    user_id     bigint NOT NULL,\n    role        text   NOT NULL CHECK (role IN ('user','assistant','tool')),\n    content     text   NOT NULL,\n    tokens      int,\n    created_at  timestamptz NOT NULL DEFAULT now()\n);\nCREATE INDEX ON chat_message (session_id, id DESC);\n\n-- Load recent history: org/user come from the auth token, not the request body.\nSELECT role, content FROM chat_message\nWHERE session_id = %(session_id)s AND org_id = %(org_id)s AND user_id = %(user_id)s\nORDER BY id DESC LIMIT 30;\n```",
+  "use_cases_md": "- **Analytics chat follow-ups**: 'now only for last month' needs the previous turn's query context.\n- **Running summary** for long support conversations to keep cost per message flat.\n- **User preferences** (currency, default marketplace, report format) stored as facts and injected every session.\n- **Semantic recall** of earlier sessions: 'use the same filter as last week's returns report'.",
+  "mistakes_md": "- **Sending the entire history every turn** – cost and latency grow without bound, and eventually you hit the context limit.\n- **Trimming by characters or dropping the system prompt** – breaks behaviour; trim by tokens and pin the system prompt.\n- **Splitting tool-call/result pairs** – some APIs reject a tool result without its call.\n- **Loading history by session_id alone from client input** – lets one user read another's session (IDOR). Also filter by authenticated user/org.\n- **Forgetting derived data on deletion** – summaries and embeddings still contain the deleted content.",
+  "best_practices_md": "- Store all messages; decide per request what to send.\n- Token-budgeted window + incremental summary is a strong default.\n- Keep exact critical state (filters, IDs) as structured data, not only in summaries.\n- Scope every read/write by authenticated user and org; consider RLS.\n- Record tokens per message to analyse cost growth.\n- Define retention and deletion that covers summaries and embeddings.",
+  "my_context_md": "`GetLlmData` already has the long-term layer: chat sessions, message history, user votes and per-org USD cost. The memory questions are about the *read path* — how many of those history rows go back into the next prompt, whether older turns get summarised, and whether the history query is filtered by the authenticated org/user and not only by a session id from the request. Per-org cost tracking will show the effect directly: unbounded history makes cost per message climb with conversation length.",
+  "revision_notes_md": "- LLMs are stateless; memory = what you put into the prompt.\n- Short-term: last N turns or token-budget trimming (newest first, keep system prompt).\n- Medium-term: incremental running summary + recent turns.\n- Long-term: messages in Postgres, extracted facts, semantic recall via embeddings.\n- Keep tool call + result together.\n- Isolation: filter by session AND user/org from auth; consider RLS.\n- Deletion must cover summaries + embeddings.\n- Unbounded history -> cost per turn grows linearly.",
+  "exercises_md": "1. Implement `build_context` with a real tokenizer library and test that the system prompt is never dropped and order is preserved.\n2. Add an incremental summariser: when trimmed messages exist, call a fake summariser and store `(session_id, summary, last_message_id)`.\n3. Write the Postgres history query and add a Row-Level Security policy on `org_id`; prove a different org setting returns zero rows.\n4. Simulate a 50-turn conversation and plot (or print) prompt tokens per turn with no trimming vs a 2,000-token budget.",
+  "related": [
+    "ai-context-tokens-cost",
+    "ai-agents-tool-calling",
+    "ai-security",
+    "ai-latency-cost-optimization",
+    "be-authn-authz",
+    "ai-vector-databases"
+  ],
+  "flashcards": [
+    {
+      "front": "Where does LLM 'memory' actually live?",
+      "back": "In your backend: stored messages/facts that you choose to re-insert into each prompt. The model itself is stateless."
+    },
+    {
+      "front": "Token-budget trimming algorithm?",
+      "back": "Pin system (+summary), then add messages newest-first until the budget is reached, then restore chronological order."
+    },
+    {
+      "front": "Why use a running summary?",
+      "back": "Keeps older context in a few tokens so cost per turn stays roughly flat; update it incrementally."
+    },
+    {
+      "front": "Isolation rule for chat history?",
+      "back": "Filter every read by session AND the authenticated user/org (never trust client-sent ids alone); optionally enforce with RLS."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A chat app sends the full history every turn. What happens as conversations grow?",
+      "options": [
+        "Cost and latency per turn grow and eventually the context limit is exceeded",
+        "The model caches history so cost stays constant",
+        "Nothing changes",
+        "Answers always improve"
+      ],
+      "answer_index": 0,
+      "explanation": "All history tokens are re-sent and billed each turn."
+    },
+    {
+      "type": "mcq",
+      "prompt": "When trimming history to fit a budget, which message must never be dropped?",
+      "options": [
+        "The oldest user message",
+        "The system prompt",
+        "The longest assistant reply",
+        "Any tool result"
+      ],
+      "answer_index": 1,
+      "explanation": "The system prompt defines behaviour and constraints; pin it and trim the rest."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Compressing older turns into a short 'conversation so far' message is called conversation ____.",
+      "answers": [
+        "summarization",
+        "summarisation",
+        "summary",
+        "summarizing"
+      ],
+      "explanation": "Running summaries keep long-range context cheaply."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Postgres ____ (RLS) can enforce that queries only see chat rows for the current org.",
+      "answers": [
+        "row-level security",
+        "row level security"
+      ],
+      "explanation": "RLS policies filter rows based on session settings or roles."
+    },
+    {
+      "type": "output",
+      "prompt": "A sliding-window memory keeps the system prompt plus the last 3 messages. What does this print?",
+      "code": "from collections import deque\n\nsystem = \"S\"\nwindow = deque(maxlen=3)\nfor i in range(1, 6):\n    window.append(f\"u{i}\")\n    if i % 2 == 0:\n        window.append(f\"a{i}\")\n    print(i, [system, *window])\n",
+      "answers": [
+        "1 ['S', 'u1']\n2 ['S', 'u1', 'u2', 'a2']\n3 ['S', 'u2', 'a2', 'u3']\n4 ['S', 'u3', 'u4', 'a4']\n5 ['S', 'u4', 'a4', 'u5']"
+      ],
+      "explanation": "deque(maxlen=3) evicts the oldest item on each append; the system prompt is kept outside the window."
+    },
+    {
+      "type": "output",
+      "prompt": "Token-budget trimming (1 token per word, budget 8). What does this print?",
+      "code": "history = [\"show sales for march\", \"sales were 120\", \"only amazon\", \"amazon sales were 80\", \"and april\"]\nsystem = \"you are helpful\"\nbudget = 8\nused = len(system.split())\nkept = []\nfor msg in reversed(history):\n    cost = len(msg.split())\n    if used + cost > budget:\n        break\n    kept.append(msg)\n    used += cost\nprint([system] + kept[::-1])\nprint(used)\n",
+      "answers": [
+        "['you are helpful', 'and april']\n5"
+      ],
+      "explanation": "System uses 3; 'and april' (2) -> 5; 'amazon sales were 80' (4) would make 9 > 8, so the loop stops."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong with this history endpoint and how do you fix it?",
+      "code": "@app.get(\"/sessions/{session_id}/messages\")\ndef messages(session_id: int):\n    cur.execute(f\"SELECT role, content FROM chat_message WHERE session_id = {session_id}\")\n    return cur.fetchall()\n",
+      "answer": "1. **IDOR / tenant leak**: anyone can read any session by changing the id; there's no check against the authenticated user/org.\n2. SQL built with an f-string (use parameters).\n3. No ordering/limit.\n\n```python\n@app.get(\"/sessions/{session_id}/messages\")\ndef messages(session_id: int, user: User = Depends(current_user)):\n    cur.execute(\n        \"\"\"SELECT role, content FROM chat_message\n           WHERE session_id = %s AND user_id = %s AND org_id = %s\n           ORDER BY id DESC LIMIT 50\"\"\",\n        (session_id, user.id, user.org_id),\n    )\n    return cur.fetchall()[::-1]\n```",
+      "rubric": [
+        "Missing ownership/org check (IDOR)",
+        "Filter by authenticated user and org",
+        "Parameterised query instead of f-string",
+        "Bounded, ordered result"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd design memory for a long-running analytics chat assistant.",
+      "answer": "Store every message (role, content, tokens, org/user, session) in Postgres. On each request build context: system prompt + user preference facts + running summary + newest turns within a token budget, keeping tool call/result pairs intact. When turns fall out of the window, update the summary incrementally with a cheap model and store it with the last summarised message id. Keep structured state (current filters, date range) separately so it's never lost in a summary. Optionally embed summaries for semantic recall across sessions. All reads filtered by authenticated org/user; deletion cascades to summaries and embeddings.",
+      "rubric": [
+        "Persist all messages, decide what to send per request",
+        "Window + incremental summary within token budget",
+        "Structured state / facts kept exactly",
+        "Isolation and deletion"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you keep cost per message from growing in a long chat?",
+      "difficulty": "medium",
+      "answer_md": "Because every turn re-sends history, cost grows with conversation length. Controls: (1) token-budgeted window — pin the system prompt, add newest messages until the budget; (2) incremental summarisation of evicted turns with a cheap model; (3) store structured state (current filters, selected marketplace) instead of relying on old turns; (4) trim large tool outputs before storing them in history (keep a short digest); (5) prompt caching for the static prefix where the provider supports it. Measure with per-message token counts (prompt vs completion) stored next to each message and chart cost per turn index — the curve should flatten."
+    },
+    {
+      "question": "Short-term vs long-term memory for LLM apps?",
+      "difficulty": "easy",
+      "answer_md": "**Short-term** is what's in the current context window: recent turns (sliding window or token-trimmed) and maybe a running summary of this session. **Long-term** is persisted outside the model and selectively recalled: the full message log in a database, extracted facts/preferences ('reports in INR'), and embeddings of past messages or summaries for semantic retrieval across sessions. Long-term memory needs retrieval logic (what to inject and when), isolation per user/org, and retention/deletion policies — including for derived summaries and embeddings."
+    }
+  ]
+}

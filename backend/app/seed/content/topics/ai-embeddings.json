@@ -1,0 +1,149 @@
+{
+  "slug": "ai-embeddings",
+  "title": "Embeddings: meaning as vectors",
+  "skill": "rag",
+  "extra_skills": [
+    "deep-learning",
+    "ml-math-stats"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "embeddings",
+    "sentence-embeddings",
+    "cosine-similarity",
+    "normalization",
+    "dimensionality",
+    "semantic-search",
+    "deduplication"
+  ],
+  "summary": "Embeddings map text (or images) to fixed-length vectors where geometric closeness reflects semantic similarity. This topic covers how sentence embeddings are produced, similarity metrics and normalisation, dimensionality trade-offs, and practical uses: semantic search, clustering and deduplicating product titles.",
+  "why_md": "- Embeddings are the foundation of RAG, semantic search, recommendations and dedupe — core AI-engineering work.\n- They turn fuzzy text matching (which SQL `ILIKE` can't do) into fast vector math.\n- Choices like model, dimension and normalisation directly affect quality, storage cost and latency.\n- Interview staple: \"how does semantic search work?\", \"cosine vs dot product?\", \"how would you dedupe product listings?\"",
+  "details_md": "### What an embedding is\nA function `f(text) → vector of d floats` (e.g. d = 384, 768, 1024) learned so that similar meanings land near each other: \"USB-C fast charger 65W\" and \"65 watt type-c power adapter\" end up close even with few shared words. Word embeddings (word2vec) gave one vector per word; modern **sentence embeddings** produce one vector per sentence/passage from a transformer encoder.\n\n### How sentence embeddings are made\nAn encoder transformer outputs one contextual vector per token; **pooling** (mean of token vectors, or a special CLS token) gives one vector for the text. Models are fine-tuned with **contrastive learning** on pairs (query ↔ relevant passage, duplicate questions) so that matching pairs score high and non-matching pairs low. Some models expect prefixes (`\"query: \"`, `\"passage: \"`) — read the model card.\n\n### Similarity metrics\n- **Cosine similarity**: angle between vectors; the default.\n- **Dot product**: equals cosine when vectors are L2-normalised; fastest.\n- **Euclidean distance**: on normalised vectors gives the same ranking as cosine.\nNormalise once at write time and use inner product in your vector index. Similarity values are only comparable **within one model** — thresholds don't transfer between models.\n\n### Dimensionality\nMore dimensions can capture more nuance but cost storage, memory and search time: 1M vectors × 768 dims × 4 bytes ≈ 3 GB in float32. Options: smaller models (384-d), models trained for truncation (Matryoshka embeddings let you keep the first 256 dims), float16/int8 quantisation, or PCA. Measure retrieval quality on your own data before and after.\n\n### Uses\n- **Semantic search**: embed queries and documents, return nearest neighbours (pgvector, FAISS, a vector DB).\n- **Clustering**: k-means/HDBSCAN on embeddings to discover topics in reviews or support tickets.\n- **Deduplication**: product titles with cosine above a tuned threshold are candidate duplicates.\n- **Classification**: embeddings as features for logistic regression — strong with little labelled data.\n- **RAG**: retrieve relevant chunks to ground an LLM's answer.\n\n### Limits\nEmbeddings are fuzzy: they may treat \"iPhone 14\" and \"iPhone 15\" as near-identical, and handle exact codes, SKUs, numbers and negation poorly. Combine with keyword search (hybrid search) and exact filters (SQL `WHERE marketplace = …`) when precision matters.",
+  "code_md": "```python\n# Embed product titles locally and find near-duplicates\nimport numpy as np\nfrom sentence_transformers import SentenceTransformer\n\nmodel = SentenceTransformer(\"sentence-transformers/all-MiniLM-L6-v2\")   # 384-d, runs on CPU\ntitles = [\n    \"Boat Airdopes 141 Bluetooth Earbuds Black\",\n    \"boAt Airdopes 141 TWS earbuds (Black)\",\n    \"Mi 65W USB-C Fast Charger\",\n    \"Steel water bottle 1 litre\",\n]\nemb = model.encode(titles, normalize_embeddings=True, batch_size=64)   # (4, 384), unit length\nsim = emb @ emb.T                                                        # cosine matrix\nnp.fill_diagonal(sim, -1)\ni, j = np.unravel_index(sim.argmax(), sim.shape)\nprint(titles[i], \"<->\", titles[j], round(float(sim[i, j]), 3))\n```\n\n```sql\n-- Store and search embeddings in PostgreSQL with pgvector\nCREATE EXTENSION IF NOT EXISTS vector;\nCREATE TABLE product_embeddings (\n    sku        text PRIMARY KEY,\n    title      text NOT NULL,\n    model      text NOT NULL,              -- which model produced the vector\n    embedding  vector(384) NOT NULL\n);\nCREATE INDEX ON product_embeddings USING hnsw (embedding vector_cosine_ops);\n\n-- 10 nearest titles to a query vector (%s = normalised query embedding)\nSELECT sku, title, 1 - (embedding <=> %s::vector) AS cosine_sim\nFROM product_embeddings\nORDER BY embedding <=> %s::vector\nLIMIT 10;\n```",
+  "use_cases_md": "- **Duplicate listing detection** across marketplaces (same product, different titles).\n- **Semantic product search** (\"phone charger fast\" finds \"65W USB-C adapter\").\n- **Mapping marketplace categories** to an internal taxonomy by nearest category description.\n- **Clustering reviews** to find recurring complaints.\n- **Retrieving similar past questions/SQL** for a text-to-SQL assistant (few-shot examples).",
+  "mistakes_md": "- **Mixing vectors from different models** (or versions) in one index — meaningless similarities. Store the model name with each vector.\n- **Forgetting to normalise** then using inner-product search.\n- **Reusing a similarity threshold** across models — recalibrate on labelled pairs.\n- **Relying on embeddings for exact identifiers** (SKU codes, model numbers) — use exact/keyword matching too.\n- **Ignoring model prefixes** (`query:`/`passage:`) that some models require.\n- **Embedding very long documents whole** — meaning gets diluted; chunk first.\n- **Re-embedding everything on every run** — cache by content hash.",
+  "best_practices_md": "- Pick a model by benchmarking on your own labelled pairs, not leaderboards alone.\n- Normalise at write time; store `model` and a `content_hash` with each vector.\n- Batch encoding (64-256) and use float32 (or float16/int8 if quality holds).\n- Tune similarity thresholds on labelled examples; review borderline cases.\n- Combine with filters and keyword search for precision.\n- Re-embed the corpus whenever you change models; version the index.",
+  "my_context_md": "His repo uses no embeddings or vector DBs yet. Two natural first projects from his own services: (1) marketplace data from `ECSMarketplaceDataUpload` contains product titles across 150+ report formats — embedding titles and matching across marketplaces is a classic dedupe/mapping task; (2) `GetLlmData` stores past user questions and the model-generated SQL — embedding past questions to retrieve similar solved examples is a standard way to improve text-to-SQL. pgvector would let him keep this inside the PostgreSQL he already uses heavily.",
+  "revision_notes_md": "- Embedding = text → fixed-length vector; close = similar meaning.\n- Sentence embeddings: encoder + pooling, contrastive fine-tuning.\n- Cosine default; normalise → dot product = cosine.\n- Similarities comparable only within one model.\n- Storage ≈ n × d × 4 bytes (float32).\n- Reduce: smaller model, Matryoshka truncation, float16/int8, PCA.\n- Uses: search, clustering, dedupe, classification features, RAG.\n- Weak on exact codes/numbers/negation → hybrid search + filters.\n- Store model name + content hash; re-embed on model change.",
+  "exercises_md": "1. Embed 5,000 product titles with all-MiniLM-L6-v2, find candidate duplicates above several thresholds, and label 50 pairs to pick the threshold.\n2. Set up pgvector locally, load the embeddings, and compare HNSW query results with brute-force numpy results.\n3. Compute storage for 2M vectors at 384 vs 1024 dims in float32 and int8.\n4. Train logistic regression on review embeddings vs TF-IDF features for negative-review detection; compare F1.",
+  "related": [
+    "ai-math-linear-algebra",
+    "ai-transformers",
+    "ai-vector-databases",
+    "ai-semantic-search",
+    "ai-embedding-models"
+  ],
+  "flashcards": [
+    {
+      "front": "When does dot product equal cosine similarity?",
+      "back": "When both vectors are L2-normalised to length 1."
+    },
+    {
+      "front": "How are sentence embeddings typically trained?",
+      "back": "Contrastive learning on pairs: pull matching pairs (query/passage, duplicates) together and push non-matching apart, with pooling over encoder token outputs."
+    },
+    {
+      "front": "Storage for 1M float32 embeddings of 768 dims?",
+      "back": "1,000,000 × 768 × 4 bytes ≈ 3.07 GB (before index overhead)."
+    },
+    {
+      "front": "Why store the model name with every vector?",
+      "back": "Vectors from different models live in different spaces; mixing them silently breaks search. You must re-embed when changing models."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A search for 'iPhone 15 case' returns 'iPhone 14 case' as the top hit. What's the best mitigation?",
+      "options": [
+        "Use a larger embedding dimension only",
+        "Combine embedding search with keyword/exact matching or filters on model number",
+        "Remove normalisation",
+        "Switch from cosine to Euclidean distance"
+      ],
+      "answer_index": 1,
+      "explanation": "Embeddings are fuzzy on exact tokens like model numbers; hybrid search or structured filters restore precision."
+    },
+    {
+      "type": "mcq",
+      "prompt": "You upgraded the embedding model for new products but kept old vectors in the index. What happens?",
+      "options": [
+        "Quality improves gradually",
+        "Nothing — all embeddings are compatible",
+        "Old and new vectors are in different spaces, so cross-similarities are meaningless",
+        "Only the dimension needs to match"
+      ],
+      "answer_index": 2,
+      "explanation": "Each model defines its own vector space; re-embed the whole corpus when switching."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In sentence-transformers, passing ____=True to model.encode returns unit-length vectors so dot product equals cosine similarity.",
+      "answers": [
+        "normalize_embeddings"
+      ],
+      "explanation": "Normalising at encode time simplifies indexing with inner product."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In pgvector, the operator <=> computes cosine ____ (1 − cosine similarity).",
+      "answers": [
+        "distance"
+      ],
+      "explanation": "Order by `embedding <=> query` ascending to get the most similar rows."
+    },
+    {
+      "type": "output",
+      "prompt": "Ranking documents by cosine similarity, standard library only. What does this print?",
+      "code": "import math\ndef normalize(v):\n    n = math.sqrt(sum(x * x for x in v))\n    return [x / n for x in v]\nquery = normalize([1.0, 1.0, 0.0])\ndocs = {\"charger\": [2.0, 2.0, 0.1], \"bottle\": [0.0, 0.2, 3.0], \"cable\": [1.0, 0.5, 0.0]}\nscores = {k: round(sum(a * b for a, b in zip(query, normalize(v))), 3) for k, v in docs.items()}\nprint(sorted(scores.items(), key=lambda kv: -kv[1]))",
+      "answers": [
+        "[('charger', 0.999), ('cable', 0.949), ('bottle', 0.047)]"
+      ],
+      "explanation": "After normalisation, dot product = cosine. 'charger' points almost exactly like the query regardless of its larger magnitude; 'bottle' is nearly orthogonal."
+    },
+    {
+      "type": "output",
+      "prompt": "Storage estimate for an embedding index. What does this print?",
+      "code": "n_vectors = 2_000_000\nfor dims, bytes_per in [(384, 4), (1024, 4), (1024, 1)]:\n    gb = n_vectors * dims * bytes_per / 1024**3\n    print(dims, bytes_per, round(gb, 2))",
+      "answers": [
+        "384 4 2.86\n1024 4 7.63\n1024 1 1.91"
+      ],
+      "explanation": "n × d × bytes. float32 = 4 bytes; int8 quantisation = 1 byte, a 4x saving (index overhead not included)."
+    },
+    {
+      "type": "debug",
+      "prompt": "The dedupe job flags almost every pair of product titles as duplicates. What's wrong?",
+      "code": "from sentence_transformers import SentenceTransformer\nimport numpy as np\nmodel = SentenceTransformer(\"sentence-transformers/all-MiniLM-L6-v2\")\nemb = model.encode(titles)                 # (n, 384)\nsim = emb @ emb.T\npairs = np.argwhere(sim > 0.9)\nprint(len(pairs))",
+      "answer": "1. Embeddings aren't normalised, so `emb @ emb.T` is a raw dot product, not cosine — values aren't bounded to [−1, 1] and the 0.9 threshold is meaningless.\n2. The diagonal (each title with itself) and both (i, j) and (j, i) are counted.\n3. The threshold was never calibrated for this model on labelled pairs.\n\n```python\nemb = model.encode(titles, normalize_embeddings=True)\nsim = emb @ emb.T\niu = np.triu_indices(len(titles), k=1)          # upper triangle, no diagonal\nmask = sim[iu] > THRESHOLD                       # tuned on labelled pairs\npairs = list(zip(iu[0][mask], iu[1][mask]))\n```\nFor large n, block the matmul or use an ANN index instead of a full n×n matrix.",
+      "rubric": [
+        "Missing normalisation: dot product isn't cosine",
+        "Exclude diagonal / duplicate symmetric pairs",
+        "Calibrate threshold on labelled pairs (and scale via blocking/ANN)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how semantic search with embeddings works end to end, as you would in an interview.",
+      "answer": "**Indexing**: split documents (or take product titles) into chunks, embed each with a sentence-embedding model, L2-normalise, and store vectors with metadata (id, text, model, filters like marketplace) in a vector index — pgvector with HNSW, FAISS or a vector DB. **Querying**: embed the user query with the same model (with any required query prefix), normalise, and retrieve the top-k nearest vectors by cosine/inner product, usually with an approximate nearest-neighbour index for speed, plus metadata filters. **Ranking**: optionally rerank top candidates with a cross-encoder and/or merge with keyword (BM25) results for exact terms. **Evaluation**: measure recall@k / MRR on labelled query–document pairs. Key caveats: same model for queries and documents, re-embed when the model changes, and handle exact identifiers with keyword search.",
+      "rubric": [
+        "Embed + normalise + store documents with metadata",
+        "Embed query with same model; nearest neighbours via ANN index",
+        "Hybrid/rerank for precision on exact terms",
+        "Evaluate with recall@k or similar"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you detect duplicate product listings across marketplaces?",
+      "difficulty": "medium",
+      "answer_md": "1. **Normalise text**: lowercase, strip marketplace boilerplate, standardise units (`65 W` → `65w`).\n2. **Exact/blocking keys first**: identical GTIN/EAN/ASIN or brand + model number → certain duplicates; also use brand/category as blocking to limit comparisons.\n3. **Embeddings**: encode titles (+ key attributes) with a sentence-embedding model, normalise, and find nearest neighbours within each block via matrix multiply in batches or an ANN index (pgvector HNSW / FAISS).\n4. **Threshold + rules**: candidate if cosine > t (tuned on ~200 labelled pairs), but reject if numeric attributes conflict (64GB vs 128GB, 14 vs 15) — embeddings blur those.\n5. **Review**: send borderline pairs to a human or an LLM judge with both listings side by side.\n6. **Output** clusters with connected components; store with model version.\n\nMeasure precision/recall on the labelled set and monitor over time."
+    },
+    {
+      "question": "Cosine similarity, dot product or Euclidean distance for embeddings?",
+      "difficulty": "easy",
+      "answer_md": "For most text-embedding models the meaning is in the **direction**, so **cosine similarity** is the standard. If you L2-normalise all vectors:\n- dot product = cosine similarity,\n- squared Euclidean distance = 2 − 2·cosine,\nso all three give the **same ranking**. In practice: normalise at write time and use **inner product** (fastest) in the index.\n\nExceptions: some models are trained for dot product on **un-normalised** vectors where magnitude carries information (e.g. confidence/popularity) — follow the model card. Never compare similarity values across different models; each has its own score distribution, so thresholds must be recalibrated."
+    }
+  ]
+}

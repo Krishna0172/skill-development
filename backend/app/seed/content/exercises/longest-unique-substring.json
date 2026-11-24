@@ -1,0 +1,95 @@
+{
+  "slug": "longest-unique-substring",
+  "title": "Longest substring without repeating characters",
+  "category": "problem-solving",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "dsa",
+  "concepts": [
+    "sliding window",
+    "hash map",
+    "two pointers"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "Implement:\n\n```python\ndef length_of_longest_substring(s: str) -> int:\n```\n\nReturn the length of the longest **contiguous** substring of `s` that contains no repeated characters. Characters are case-sensitive and spaces count as characters. An empty string returns `0`.",
+  "examples": [
+    {
+      "input": "s = 'abcabcbb'",
+      "output": "3",
+      "explanation": "'abc'"
+    },
+    {
+      "input": "s = 'bbbbb'",
+      "output": "1"
+    },
+    {
+      "input": "s = 'pwwkew'",
+      "output": "3",
+      "explanation": "'wke' — 'pwke' is not contiguous."
+    }
+  ],
+  "hints": [
+    "Checking every substring is O(n³) or O(n²). Try a window `[left, right]` that you only ever move forward.",
+    "Track the last index where each character was seen. When `s[right]` was seen inside the current window, move `left` just past that position.",
+    "`left = max(left, last_seen[ch] + 1)` — the `max` matters for inputs like `'abba'`, where an old occurrence lies *before* the window."
+  ],
+  "starter_code": "def length_of_longest_substring(s: str) -> int:\n    # your code here\n    ...\n",
+  "solution_code": "def length_of_longest_substring(s: str) -> int:\n    last_seen = {}\n    left = 0\n    best = 0\n    for right, ch in enumerate(s):\n        if ch in last_seen:\n            left = max(left, last_seen[ch] + 1)\n        last_seen[ch] = right\n        best = max(best, right - left + 1)\n    return best\n",
+  "solution_md": "Sliding window with a \"last seen index\" map. The window `s[left:right+1]` always contains unique characters. When the new character was last seen at index `p >= left`, jump `left` to `p + 1`.\n\nThe `max(left, ...)` is the classic trap: in `\"abba\"`, when the second `a` arrives, its previous index (0) is *outside* the current window (`left` is already 2). Without `max`, `left` would jump backwards to 1 and the answer would be 3 instead of 2.\n\n- **Time:** O(n) — each index is visited once\n- **Space:** O(min(n, alphabet size))\n\n**Alternative:** a set-based window that shrinks `left` one step at a time while `s[right]` is in the set — also O(n) amortised, slightly simpler to reason about.",
+  "tests": {
+    "function": "length_of_longest_substring",
+    "cases": [
+      {
+        "args": [
+          "abcabcbb"
+        ],
+        "kwargs": {},
+        "expected": 3
+      },
+      {
+        "args": [
+          "bbbbb"
+        ],
+        "kwargs": {},
+        "expected": 1
+      },
+      {
+        "args": [
+          "pwwkew"
+        ],
+        "kwargs": {},
+        "expected": 3
+      },
+      {
+        "args": [
+          ""
+        ],
+        "kwargs": {},
+        "expected": 0
+      },
+      {
+        "args": [
+          "abba"
+        ],
+        "kwargs": {},
+        "expected": 2
+      },
+      {
+        "args": [
+          "dvdf"
+        ],
+        "kwargs": {},
+        "expected": 3
+      },
+      {
+        "args": [
+          "Aa a"
+        ],
+        "kwargs": {},
+        "expected": 3
+      }
+    ]
+  }
+}

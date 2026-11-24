@@ -1,0 +1,74 @@
+{
+  "slug": "docker-essentials",
+  "why_md": "- Every ECS job and most modern Python services ship as Docker images; image size and build speed affect deploy time and cost.\n- Reproducible environments remove 'works on my machine' problems for pandas/Selenium/ML dependencies.\n- Correct signal handling and non-root users matter for reliable, secure containers.\n- AI services (model servers, RAG APIs) are deployed as containers; Docker questions are standard in backend interviews.",
+  "revision_notes_md": "- Image = read-only layers; each Dockerfile instruction adds a layer; container = image + writable layer.\n- Order for caching: base → system deps → `COPY requirements.txt` → `pip install` → `COPY . .`.\n- Use slim base images, multi-stage builds, `--no-cache-dir`, and a `.dockerignore`.\n- Exec form `CMD [\"python\", \"-m\", \"app\"]` so Python is PID 1 and receives SIGTERM.\n- Never bake secrets into images (`ENV`/`COPY` of .env persist in layers); inject at runtime.\n- Run as a non-root `USER`; pin base image versions (or digests).\n- Container filesystem is ephemeral — use volumes or S3/DB for data.\n- Compose: services reach each other by service name on the default network (e.g. host `db`).",
+  "exercises_md": "1. Take one ECS job's Dockerfile (or write one for a pandas-based processor), reorder it for layer caching, switch to a slim/multi-stage build, add a non-root user, and compare image size and rebuild time after a code-only change.\n2. Write a `docker-compose.yml` with PostgreSQL + your worker, with a healthcheck on the DB and `depends_on: condition: service_healthy`, and run your pytest suite against it.",
+  "my_context_md": "Your `ECS...` services (e.g. `ECSMarketplaceDataUpload`, `ECSInventoryPriceTracking`) run as containers on ECS, so their Dockerfiles determine build time and image size; the Selenium + 2Captcha scraping services in particular tend to produce heavy images worth optimizing with multi-stage builds.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "In a Dockerfile, copy `requirements.txt` and run `pip install` ____ copying the rest of the source code, so code changes don't invalidate the dependency layer.",
+      "answers": [
+        "before"
+      ],
+      "explanation": "Layers are cached in order; a changed file invalidates its layer and everything after it."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Use the ____ form `CMD [\"python\", \"-m\", \"worker\"]` so Python runs as PID 1 and receives SIGTERM directly.",
+      "answers": [
+        "exec",
+        "json",
+        "exec form"
+      ],
+      "explanation": "Shell form wraps the command in /bin/sh -c, which doesn't forward signals."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which change most reduces the final size of an image that needs gcc only to build a Python wheel?",
+      "options": [
+        "Add `RUN apt-get clean` at the end",
+        "Use a multi-stage build: compile wheels in a builder stage, copy only the wheels/venv into a slim runtime stage",
+        "Use `ADD` instead of `COPY`",
+        "Combine all RUN lines into a single CMD"
+      ],
+      "answer_index": 1,
+      "explanation": "Multi-stage builds leave compilers and build caches behind in the builder stage."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A container running `CMD python worker.py` takes 10 seconds to stop and loses in-flight work. What's happening?",
+      "options": [
+        "Docker always waits 10 seconds before stopping any container",
+        "The image is too large",
+        "The worker writes logs to stdout",
+        "Shell form makes /bin/sh PID 1; it doesn't forward SIGTERM, so Docker SIGKILLs after the grace period"
+      ],
+      "answer_index": 3,
+      "explanation": "Use exec form (and handle SIGTERM in Python) so the process can shut down gracefully."
+    },
+    {
+      "type": "debug",
+      "prompt": "This Dockerfile builds slowly on every code change, is large, and has a security problem. Fix it.",
+      "code": "FROM python:3.12\nCOPY . /app\nWORKDIR /app\nENV DB_PASSWORD=prod-secret-123\nRUN pip install -r requirements.txt\nCMD python main.py",
+      "answer": "- `COPY . /app` before `pip install` → any code change invalidates the dependency layer, so every build reinstalls everything.\n- Full `python:3.12` image is large; no `.dockerignore` means .git, venvs and data get copied.\n- `ENV DB_PASSWORD=...` bakes a secret into the image layers/metadata.\n- Shell-form CMD → no SIGTERM forwarding; runs as root.\n\n```dockerfile\nFROM python:3.12-slim\nWORKDIR /app\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nRUN useradd -m app\nUSER app\nCMD [\"python\", \"main.py\"]\n```\nInject `DB_PASSWORD` at runtime (ECS `secrets` from Secrets Manager).",
+      "rubric": [
+        "Copy requirements and install before copying code (layer cache)",
+        "Secret baked into image via ENV",
+        "Slim base / .dockerignore / no-cache-dir",
+        "Exec-form CMD and non-root user"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the difference between an image, a container and a layer, and how build caching works.",
+      "answer": "- **Image**: an immutable, ordered stack of read-only filesystem **layers** plus metadata (CMD, ENV, user). Built from a Dockerfile, stored in a registry like ECR, identified by a digest.\n- **Layer**: the filesystem diff produced by one instruction (RUN, COPY, ADD). Layers are content-addressed and shared between images.\n- **Container**: a running instance of an image — the image layers plus a thin writable layer, isolated with namespaces and cgroups. Removing the container discards its writable layer.\n\n**Caching**: when building, Docker reuses a cached layer if the instruction and its inputs (for COPY, file checksums) are unchanged *and* every previous layer was reused. Once one layer changes, all later layers rebuild. So put rarely changing steps (OS packages, dependency install from requirements.txt) first and frequently changing source code last. In CI, use BuildKit cache export/import to reuse layers between runs.",
+      "rubric": [
+        "Image = immutable stack of layers + metadata",
+        "Container = image + writable layer; ephemeral",
+        "Cache reused until first changed instruction; later layers rebuild",
+        "Order Dockerfile from least to most frequently changing"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "slug": "pytest-essentials",
+  "why_md": "Tests are what let you refactor a 100-line function or swap a dependency without fear, and CI without tests is just a build. Every senior backend interview asks how you test code that touches databases and external APIs; for AI work, the same tooling runs evaluation suites and regression tests for prompts.",
+  "revision_notes_md": "- Tests are plain functions `test_*` with bare `assert` (pytest rewrites for rich diffs).\n- Fixtures provide setup/teardown via `yield`; scopes: function (default), module, session.\n- `conftest.py` shares fixtures without imports.\n- `@pytest.mark.parametrize(\"raw,expected\", [...])` for table-driven tests.\n- `pytest.raises(ValueError, match=\"...\")` for errors.\n- `monkeypatch` / `unittest.mock.patch`: patch where the name is LOOKED UP.\n- `tmp_path` for files; moto for boto3; a real test PostgreSQL (container) for SQL.\n- `-x`, `-k expr`, `--lf`, `-q` for fast feedback.",
+  "exercises_md": "1. Write parametrised tests for a function that parses marketplace amount strings (at least 8 cases including bad input with `pytest.raises`).\n2. Test a function that calls an HTTP API by injecting a fake client (or `monkeypatch`), covering success, a 429 with retry, and a permanent 400.",
+  "my_context_md": "`ForcesightJobSchedulerAndRunner` already has tests for job locking and next-run calculation, and `ECSInventoryPriceTracking/app/fetchers/spapi.py` has pytest tests - good templates to copy from. ECSMarketplaceDataUpload's registry is an easy next target: a parametrised test that every registered report type imports and resolves to a callable.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "To run one test function against many inputs, decorate it with @pytest.mark.____.",
+      "answers": [
+        "parametrize"
+      ],
+      "explanation": "Note the spelling: parametrize."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A fixture that needs teardown uses ____ instead of return; code after it runs as cleanup.",
+      "answers": [
+        "yield"
+      ],
+      "explanation": "pytest resumes the fixture after the test."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from unittest.mock import Mock\n\nclient = Mock()\nclient.get.side_effect = [TimeoutError(\"t\"), {\"price\": 9}]\n\ndef fetch(c):\n    for _ in range(3):\n        try:\n            return c.get(\"/price\")\n        except TimeoutError:\n            continue\n\nprint(fetch(client))\nprint(client.get.call_count)",
+      "answers": [
+        "{'price': 9}\n2"
+      ],
+      "explanation": "side_effect as a list yields one result per call - first raises, second returns the dict."
+    },
+    {
+      "type": "debug",
+      "prompt": "The test still hits the real API. Why?",
+      "code": "# app/prices.py\nfrom requests import get\ndef price(sku): return get(f\"https://api/x/{sku}\").json()[\"price\"]\n\n# tests/test_prices.py\nfrom unittest.mock import patch\nfrom app.prices import price\n\n@patch(\"requests.get\")\ndef test_price(mock_get):\n    mock_get.return_value.json.return_value = {\"price\": 5}\n    assert price(\"A\") == 5",
+      "answer": "`app.prices` did `from requests import get`, so it holds its own reference `app.prices.get`. Patching `requests.get` doesn't change that name. Patch where it is looked up:\n\n```python\n@patch(\"app.prices.get\")\ndef test_price(mock_get): ...\n```\n(Or inject the client as a parameter to avoid patching.)",
+      "rubric": [
+        "from-import creates a separate name in the module",
+        "Patch the name where it's used: app.prices.get",
+        "Dependency injection avoids patching"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how you'd test code that writes to PostgreSQL.",
+      "answer": "Split it: keep pure transformation logic (parsing, mapping rows) in functions you unit-test without a database. For the SQL itself, mocks prove little - run against a real PostgreSQL (Docker/testcontainers or a CI service) with a session-scoped fixture that creates the schema and a function-scoped fixture that wraps each test in a transaction and rolls it back. Test behaviour like upsert conflict handling and `FOR UPDATE SKIP LOCKED` claiming, not just that execute was called.",
+      "rubric": [
+        "Separate pure logic from DB access",
+        "Real test database rather than mocking SQL",
+        "Per-test transaction rollback / isolated fixtures"
+      ]
+    }
+  ]
+}

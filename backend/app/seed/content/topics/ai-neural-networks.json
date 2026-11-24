@@ -1,0 +1,147 @@
+{
+  "slug": "ai-neural-networks",
+  "title": "Neural networks and a minimal PyTorch training loop",
+  "skill": "deep-learning",
+  "extra_skills": [
+    "ml-math-stats"
+  ],
+  "category": "AI",
+  "difficulty": "intermediate",
+  "tags": [
+    "neural-networks",
+    "activations",
+    "forward-pass",
+    "backpropagation",
+    "pytorch",
+    "training-loop"
+  ],
+  "summary": "How neural networks work at the level an AI engineer needs: neurons as weighted sums plus non-linear activations, layers as matrix multiplies, the forward pass, backpropagation as automatic chain-rule gradients, and a minimal PyTorch training loop you can read and write confidently.",
+  "why_md": "- Transformers and LLMs are neural networks; understanding layers, activations and training demystifies them.\n- Fine-tuning, embeddings and inference optimisation all assume you can read PyTorch code.\n- Debugging training (NaN loss, no learning, overfitting) needs the forward/backward mental model.\n- Interviews commonly ask: \"why do we need non-linear activations?\", \"what does backprop do?\", \"walk me through a training loop\".",
+  "details_md": "### A neuron\n`output = activation(w · x + b)` — a dot product of inputs and weights plus a bias, passed through a non-linear function. Without the activation, it's just linear regression.\n\n### Layers and the forward pass\nA layer is many neurons sharing the same inputs: `h = activation(X @ W + b)` with `X` of shape `(batch, in_features)` and `W` of shape `(in_features, out_features)`. Stacking layers lets the network build increasingly abstract features. The **forward pass** runs input through every layer to produce outputs (logits), then a **loss** compares them to labels.\n\n### Activations\n- **ReLU** `max(0, x)`: default for hidden layers; cheap, avoids vanishing gradients.\n- **GELU / SiLU**: smooth ReLU variants used in transformers.\n- **Sigmoid**: squashes to (0, 1); output layer for binary probabilities.\n- **Softmax**: turns a vector of logits into probabilities that sum to 1; output layer for multi-class (and inside attention).\nWhy non-linear? A stack of linear layers collapses into one linear layer — no extra power.\n\n### Backpropagation\nThe loss is a composition of functions of the weights. Backprop applies the **chain rule** from the loss back through each layer to compute `∂loss/∂w` for every weight, reusing intermediate results — so it costs about as much as one more forward pass. PyTorch's **autograd** records operations during the forward pass and computes all gradients when you call `loss.backward()`. An optimiser (SGD, Adam/AdamW) then updates weights.\n\n### The training loop\nFor each epoch, for each mini-batch: forward → loss → `optimizer.zero_grad()` → `loss.backward()` → `optimizer.step()`. Then evaluate on validation data under `model.eval()` and `torch.no_grad()`. Gradients **accumulate** by default, which is why `zero_grad()` is essential.\n\n### Practical notes\n- Use `nn.CrossEntropyLoss` on raw logits (it applies log-softmax internally) and `nn.BCEWithLogitsLoss` for binary — don't apply softmax/sigmoid first.\n- `model.train()` / `model.eval()` toggle dropout and batch norm behaviour.\n- Scale inputs; neural nets are sensitive to feature scale.\n- For tabular data, gradient boosting usually beats an MLP; neural nets shine on text, images, audio, and as the backbone of LLMs.",
+  "code_md": "```python\n# Forward pass of a 2-layer network in plain Python (no libraries)\nimport math\n\ndef relu(v): return [max(0.0, x) for x in v]\ndef linear(x, W, b): return [sum(xi * wij for xi, wij in zip(x, col)) + bj for col, bj in zip(W, b)]\n\nx = [1.0, 2.0]\nW1, b1 = [[0.5, -1.0], [1.0, 0.5]], [0.0, 0.1]   # 2 hidden units (one weight list per unit)\nW2, b2 = [[1.0, -2.0]], [0.2]                   # 1 output unit\nh = relu(linear(x, W1, b1))\nlogit = linear(h, W2, b2)[0]\nprint(h, round(1 / (1 + math.exp(-logit)), 3))   # hidden activations, sigmoid prob\n```\n\n```python\n# Minimal PyTorch training loop: MLP classifier for return risk\nimport torch\nfrom torch import nn\nfrom torch.utils.data import DataLoader, TensorDataset\n\ntorch.manual_seed(42)\nX_tr = torch.tensor(X_train_scaled, dtype=torch.float32)\ny_tr = torch.tensor(y_train, dtype=torch.float32)\nloader = DataLoader(TensorDataset(X_tr, y_tr), batch_size=256, shuffle=True)\n\nmodel = nn.Sequential(\n    nn.Linear(X_tr.shape[1], 64), nn.ReLU(), nn.Dropout(0.2),\n    nn.Linear(64, 1),                      # raw logit\n)\nloss_fn = nn.BCEWithLogitsLoss()           # applies sigmoid internally\nopt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)\n\nfor epoch in range(20):\n    model.train()\n    for xb, yb in loader:\n        logits = model(xb).squeeze(1)      # forward\n        loss = loss_fn(logits, yb)\n        opt.zero_grad()                    # clear old gradients\n        loss.backward()                    # backprop: compute gradients\n        opt.step()                         # update weights\n    model.eval()\n    with torch.no_grad():\n        val_p = torch.sigmoid(model(X_val_t).squeeze(1))\n```",
+  "use_cases_md": "- Text classifiers on top of transformer embeddings (ticket routing, review sentiment).\n- Fine-tuning small transformer models for domain classification.\n- Learning embeddings for SKUs/customers for recommendations.\n- Reading and modifying open-source model code (Hugging Face) for inference.\n- Image models for product photo classification or quality checks.",
+  "mistakes_md": "- **Forgetting `optimizer.zero_grad()`** — gradients accumulate across batches; training goes haywire.\n- **Applying softmax/sigmoid before CrossEntropyLoss/BCEWithLogitsLoss** — double activation, poor training.\n- **Not calling `model.eval()`** at validation — dropout stays on, metrics are noisy/low.\n- **Missing `torch.no_grad()`** in evaluation/inference — wastes memory building graphs.\n- **Unscaled inputs** — slow or unstable training.\n- **Shape mismatches** like `(batch, 1)` vs `(batch,)` targets — broadcasting gives wrong loss.\n- **Using an MLP for small tabular data** when gradient boosting is simpler and better.",
+  "best_practices_md": "- Write the loop in the canonical order: forward, loss, zero_grad, backward, step.\n- Use AdamW with a sensible lr (1e-3 for small MLPs, ~1e-5 to 5e-5 for fine-tuning transformers).\n- Track train and validation loss each epoch; add early stopping.\n- Seed everything for reproducibility.\n- Overfit a tiny batch first as a sanity check — if the model can't, there's a bug.\n- Move to GPU with `.to(device)` for both model and batches.",
+  "my_context_md": "There is no neural-network training code in his repo. The connection is indirect: `GetLlmData` / `ECSLlmQueryProcess` back a chat product whose answers come from an LLM — a very large neural network. Understanding the forward pass and softmax here is the foundation for the transformer, tokenization and inference topics that explain what that model is doing per request.",
+  "revision_notes_md": "- Neuron: activation(w·x + b); layer: activation(X @ W + b).\n- Non-linearity required; stacked linear = linear.\n- ReLU hidden; sigmoid binary output; softmax multi-class.\n- Forward → loss → zero_grad → backward → step.\n- Backprop = chain rule via autograd; gradients accumulate.\n- CrossEntropyLoss/BCEWithLogitsLoss take raw logits.\n- `model.eval()` + `torch.no_grad()` for validation/inference.\n- Sanity check: overfit one batch.\n- Tabular → boosting; text/images → neural nets.",
+  "exercises_md": "1. Implement the forward pass of a 2-layer network in pure Python, then the same with `torch.nn.Linear` and copied weights; check outputs match.\n2. Train the PyTorch MLP on a return-prediction dataset and compare ROC-AUC with HistGradientBoosting.\n3. Deliberately remove `zero_grad()` and plot the loss; then put it back.\n4. Overfit a batch of 32 rows to near-zero loss as a pipeline sanity check.",
+  "related": [
+    "ai-math-linear-algebra",
+    "ai-model-training",
+    "ai-transformers",
+    "ai-model-inference",
+    "ai-embeddings"
+  ],
+  "flashcards": [
+    {
+      "front": "Canonical PyTorch training step order?",
+      "back": "logits = model(x); loss = loss_fn(logits, y); opt.zero_grad(); loss.backward(); opt.step()"
+    },
+    {
+      "front": "Why do neural nets need non-linear activations?",
+      "back": "A composition of linear layers is itself linear; non-linearity lets the network model complex functions."
+    },
+    {
+      "front": "What does softmax do?",
+      "back": "Exponentiates logits and normalises them so they're positive and sum to 1 — a probability distribution over classes."
+    },
+    {
+      "front": "What does `loss.backward()` compute?",
+      "back": "Gradients of the loss with respect to every parameter (via autograd / chain rule), stored in each parameter's .grad."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What happens if you stack three nn.Linear layers with no activation functions between them?",
+      "options": [
+        "The model becomes much more expressive",
+        "Training is impossible",
+        "It is equivalent to a single linear layer",
+        "It becomes a convolutional network"
+      ],
+      "answer_index": 2,
+      "explanation": "Composition of linear maps is linear; you gain parameters but no expressive power."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is correct usage of nn.CrossEntropyLoss for a 5-class classifier?",
+      "options": [
+        "Pass raw logits of shape (batch, 5) and integer class labels",
+        "Apply softmax to the logits first, then pass them",
+        "Pass one-hot labels and sigmoid outputs",
+        "Pass argmax predictions and labels"
+      ],
+      "answer_index": 0,
+      "explanation": "CrossEntropyLoss applies log-softmax internally and expects raw logits with class indices."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In PyTorch, calling optimizer.____() before loss.backward() clears gradients left over from the previous batch.",
+      "answers": [
+        "zero_grad"
+      ],
+      "explanation": "Gradients accumulate by default."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The ____ activation, max(0, x), is the default choice for hidden layers in simple feed-forward networks.",
+      "answers": [
+        "relu",
+        "rectified linear unit"
+      ],
+      "explanation": "Cheap and avoids vanishing gradients for positive inputs."
+    },
+    {
+      "type": "output",
+      "prompt": "Softmax over logits, standard library only. What does this print?",
+      "code": "import math\nlogits = [2.0, 1.0, 0.0]\nexps = [math.exp(z) for z in logits]\ntotal = sum(exps)\nprobs = [round(e / total, 3) for e in exps]\nprint(probs, round(sum(probs), 2))",
+      "answers": [
+        "[0.665, 0.245, 0.09] 1.0"
+      ],
+      "explanation": "e^2 ≈ 7.389, e^1 ≈ 2.718, e^0 = 1; total ≈ 11.107. Probabilities ≈ 0.665, 0.245, 0.090 and sum to 1."
+    },
+    {
+      "type": "output",
+      "prompt": "One neuron forward pass plus one gradient-descent step on squared error. What does this print?",
+      "code": "x, y = [1.0, 2.0], 1.0\nw, b, lr = [0.5, -0.25], 0.0, 0.1\nz = sum(wi * xi for wi, xi in zip(w, x)) + b\npred = max(0.0, z)                     # ReLU\nprint(z, pred)\n# z = 0 sits at the ReLU kink; use z = 0.5 by changing b\nb = 0.5\nz = sum(wi * xi for wi, xi in zip(w, x)) + b\ngrad_z = 2 * (z - y) * (1 if z > 0 else 0)\nw = [wi - lr * grad_z * xi for wi, xi in zip(w, x)]\nprint(z, [round(v, 2) for v in w])",
+      "answers": [
+        "0.0 0.0\n0.5 [0.6, -0.05]"
+      ],
+      "explanation": "0.5·1 + (−0.25)·2 = 0 → ReLU 0. With b=0.5, z=0.5; dLoss/dz = 2(0.5−1)·1 = −1; each w moves by −lr·(−1)·x: +0.1 and +0.2."
+    },
+    {
+      "type": "debug",
+      "prompt": "Validation accuracy fluctuates wildly between runs and GPU memory grows during evaluation. Fix the loop.",
+      "code": "for epoch in range(10):\n    for xb, yb in train_loader:\n        loss = loss_fn(torch.softmax(model(xb), dim=1), yb)\n        loss.backward()\n        opt.step()\n    preds = model(X_val).argmax(dim=1)\n    print((preds == y_val).float().mean())",
+      "answer": "Bugs:\n1. No `opt.zero_grad()` — gradients accumulate across batches.\n2. `softmax` applied before `CrossEntropyLoss` — the loss already applies log-softmax; pass raw logits.\n3. Validation runs in train mode (dropout active) and without `no_grad`, building autograd graphs (memory growth).\n4. No `model.train()` at the start of each epoch after switching to eval.\n\n```python\nfor epoch in range(10):\n    model.train()\n    for xb, yb in train_loader:\n        loss = loss_fn(model(xb), yb)\n        opt.zero_grad()\n        loss.backward()\n        opt.step()\n    model.eval()\n    with torch.no_grad():\n        preds = model(X_val).argmax(dim=1)\n        print((preds == y_val).float().mean().item())\n```",
+      "rubric": [
+        "Missing zero_grad causes gradient accumulation",
+        "Do not softmax before CrossEntropyLoss",
+        "Use model.eval() and torch.no_grad() for validation (and model.train() for training)"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain backpropagation intuitively to a backend engineer who knows basic calculus.",
+      "answer": "A network is a long chain of simple functions: linear layer → activation → linear layer → loss. We want, for every weight, how much the loss would change if we nudged that weight (the gradient). The chain rule says the derivative of a composition is the product of the local derivatives along the path. Backprop computes these efficiently by going **backwards** from the loss: each layer receives \"how much the loss changes per unit of my output\", multiplies by its own local derivative, and passes the result to the layer before it, also producing gradients for its own weights. Because intermediate values from the forward pass are reused, getting all millions of gradients costs about one extra forward pass. PyTorch autograd records the operations during the forward pass and does this automatically on `loss.backward()`; the optimiser then uses the gradients to update weights.",
+      "rubric": [
+        "Network as composition of functions; goal is ∂loss/∂weight",
+        "Chain rule applied backwards layer by layer, reusing forward values",
+        "Autograd does it on loss.backward(); optimiser updates weights"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Walk me through a PyTorch training loop and what each line does.",
+      "difficulty": "easy",
+      "answer_md": "```python\nfor epoch in range(epochs):\n    model.train()                       # enable dropout/batchnorm training behaviour\n    for xb, yb in loader:               # mini-batches\n        xb, yb = xb.to(device), yb.to(device)\n        logits = model(xb)              # forward pass\n        loss = loss_fn(logits, yb)      # scalar loss\n        opt.zero_grad()                 # clear accumulated grads\n        loss.backward()                 # autograd computes d(loss)/d(param)\n        opt.step()                      # update params (e.g. AdamW)\n    model.eval()\n    with torch.no_grad():               # no graph building\n        val_loss = ...                  # evaluate, maybe early-stop / checkpoint\n```\nKey points: gradients accumulate unless zeroed; losses like CrossEntropyLoss take raw logits; eval mode + no_grad for validation; save the best checkpoint by validation loss."
+    },
+    {
+      "question": "Why use softmax at the output, and why is it numerically tricky?",
+      "difficulty": "medium",
+      "answer_md": "Softmax converts arbitrary real-valued logits into a probability distribution: `p_i = exp(z_i) / Σ exp(z_j)`. It preserves ranking, makes outputs positive and sum to 1, and pairs naturally with cross-entropy loss. LLMs use it to turn the final layer's logits over the vocabulary into next-token probabilities (temperature divides logits before softmax).\n\nNumerical issue: `exp(1000)` overflows. The fix is to subtract the max logit first — `softmax(z) = softmax(z − max(z))` — which doesn't change the result. Frameworks also fuse log + softmax (`log_softmax`, and CrossEntropyLoss internally) for stability, which is why you should pass raw logits to the loss rather than applying softmax yourself."
+    }
+  ]
+}

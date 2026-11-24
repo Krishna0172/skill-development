@@ -1,0 +1,188 @@
+{
+  "slug": "py-metaclasses-class-creation",
+  "title": "Metaclasses and how classes are created",
+  "skill": "python-advanced",
+  "extra_skills": [
+    "python-internals"
+  ],
+  "category": "Python",
+  "difficulty": "advanced",
+  "tags": [
+    "metaclass",
+    "type",
+    "__init_subclass__",
+    "__new__",
+    "class creation",
+    "abc"
+  ],
+  "summary": "In Python a class is itself an object, created by calling a metaclass (by default type). Understanding the class-creation steps, __init_subclass__ and when a metaclass is truly needed lets you build registries, plugin systems and framework-style APIs.",
+  "why_md": "- Classes being objects explains `ABC`, `Enum`, ORM models and plugin registries.\n- `__init_subclass__` and class decorators solve most 'hook into subclass creation' needs without a metaclass.\n- Interviewers use 'what is a metaclass and when would you use one?' to test depth; the best answer includes 'rarely, and here is the simpler alternative'.",
+  "details_md": "### Classes are objects; `type` makes them\n`type(obj)` tells you an object's class, and `type(MyClass)` is `type`. `type` is the default **metaclass**: the class of classes. You can call it directly to build a class at runtime:\n\n```python\nPoint = type(\"Point\", (object,), {\"x\": 0, \"hello\": lambda self: \"hi\"})\n```\nIt takes the class name, a tuple of bases and a namespace dict. The `class` statement is syntax for exactly this.\n\n### What `class Foo(Base, metaclass=Meta):` does\n1. **Resolve the metaclass**: the explicit `metaclass=` keyword, otherwise the most derived metaclass among the bases, otherwise `type`. Incompatible metaclasses raise `TypeError` (metaclass conflict).\n2. **`Meta.__prepare__(name, bases)`** returns the namespace mapping for the class body (default: a plain dict).\n3. **Execute the body** inside that namespace, collecting attributes and methods.\n4. **Call `Meta(name, bases, namespace)`**, which runs `Meta.__new__` (creates the class object) then `Meta.__init__` (initialises it).\n5. During creation, `__set_name__` is called on every descriptor in the namespace, then the parent's `__init_subclass__` is called.\n6. The result is bound to the name `Foo`.\n\n### Customising: from simplest to heaviest\n1. **Class decorator**: a function receiving the finished class; good for registration or adding methods.\n2. **`__init_subclass__(cls, **kwargs)`** (3.6+): a classmethod on the *parent*, called for every subclass at creation. Handles registries, validation and class keyword arguments (`class Plugin(Base, name=\"csv\")`).\n3. **`__set_name__`** on descriptors for field-aware attributes.\n4. **Metaclass**: needed only when you must control the namespace (`__prepare__`), alter how class *objects* behave (e.g. `__call__` for singletons, `__getitem__` on the class, `__iter__` over an Enum class), or change `__new__`-time structure that hooks cannot reach.\n\n### Where you meet metaclasses\n`abc.ABCMeta` (abstract methods), `enum.EnumMeta`/`EnumType`, Django's model metaclass, and many framework internals. `dataclasses` is *not* a metaclass; it is a class decorator that edits the class.\n\n### Metaclass methods vs class methods\nA method on the metaclass is visible on the class but **not** on its instances. `__call__` on a metaclass controls instance creation: `Meta.__call__` runs `cls.__new__` then `cls.__init__`, so overriding it can implement singletons.\n\n### Design guidance\nTim Peters: metaclasses are deeper magic than 99% of users should ever worry about. Prefer `__init_subclass__`, decorators, descriptors or plain composition; a metaclass makes inheritance with other metaclass-based libraries (ABC, Enum) conflict-prone.",
+  "code_md": "```python\n# 1. build a class dynamically\nProduct = type(\"Product\", (object,), {\n    \"currency\": \"INR\",\n    \"describe\": lambda self: f\"{self.sku} in {self.currency}\",\n})\np = Product()\np.sku = \"A1\"\nprint(Product.__name__, type(Product).__name__, p.describe())\n```\n\n```python\n# 2. __init_subclass__ registry (no metaclass needed)\nclass Processor:\n    registry = {}\n    def __init_subclass__(cls, /, key=None, **kw):\n        super().__init_subclass__(**kw)\n        Processor.registry[key or cls.__name__.lower()] = cls\n\nclass Csv(Processor, key=\"csv\"): pass\nclass Excel(Processor): pass\nprint(sorted(Processor.registry))\n```\n\n```python\n# 3. a metaclass that enforces a rule at class-creation time\nclass RequireRun(type):\n    def __new__(mcls, name, bases, ns):\n        if bases and \"run\" not in ns:\n            raise TypeError(f\"{name} must define run()\")\n        return super().__new__(mcls, name, bases, ns)\n\nclass Job(metaclass=RequireRun): pass\nclass Good(Job):\n    def run(self): ...\n```\n\n```python\n# 4. metaclass __call__ => singleton\nclass Singleton(type):\n    _inst = {}\n    def __call__(cls, *a, **kw):\n        if cls not in cls._inst:\n            cls._inst[cls] = super().__call__(*a, **kw)\n        return cls._inst[cls]\nclass Config(metaclass=Singleton): pass\nprint(Config() is Config())\n```",
+  "use_cases_md": "- Plugin/registry systems: report processors or marketplace handlers self-register on subclassing via `__init_subclass__`.\n- Enforcing that subclasses define required methods or attributes at import time (fail fast).\n- Auto-collecting fields declared on a class (ORM/serialiser style) using `__set_name__` or a metaclass.\n- Abstract base classes (`ABC`) for interfaces.\n- Singletons or class-level `__getitem__`/`__iter__` behaviour in library code.",
+  "mistakes_md": "- **Reaching for a metaclass first**: `__init_subclass__` or a class decorator is almost always enough.\n- **Metaclass conflict** when mixing two libraries' bases (ABC plus another metaclass): derive a combined metaclass.\n- **Forgetting to call `super().__new__` / `super().__init_subclass__`**, breaking cooperative inheritance.\n- **Putting instance behaviour on the metaclass**: its methods are not visible on instances.\n- **Confusing `__new__` on the class (builds instances) with `__new__` on the metaclass (builds classes).**\n- **Hidden global state** in registries (import order dependence).",
+  "best_practices_md": "- Order of preference: plain functions and composition, class decorator, `__init_subclass__`/`__set_name__`, then metaclass.\n- Always call `super()` in hooks and forward `**kwargs`.\n- Keep registries explicit and testable; avoid import-time side effects that depend on import order.\n- Document why a metaclass is used.\n- Use `abc.ABC` and `@abstractmethod` for interfaces rather than a custom metaclass.",
+  "my_context_md": "- `ECSMarketplaceDataUpload` dispatches 150+ report processors through a registry with lazy imports (`importlib`). A subclass-registration approach with `__init_subclass__` is the eager alternative; compare the trade-off: self-registration needs the module imported, while the lazy registry avoids importing all 150+ processors at start-up.",
+  "revision_notes_md": "- Class = object created by its metaclass; default metaclass is `type`.\n- `type(name, bases, ns)` builds a class dynamically.\n- Class creation: resolve metaclass, `__prepare__`, run body, `Meta(name, bases, ns)`, `__set_name__`, `__init_subclass__`.\n- Metaclass `__new__` builds the class; `__init__` initialises it; `__call__` controls instance creation.\n- Prefer `__init_subclass__`, class decorators and descriptors.\n- `ABCMeta` and `EnumType` are common metaclasses; `dataclass` is a decorator.\n- Metaclass methods are not available on instances.\n- Metaclass conflict: bases with different unrelated metaclasses.",
+  "exercises_md": "1. Build a class with `type(...)` including a method and a class attribute; compare with the equivalent `class` statement via `vars()`.\n2. Write a `Handler` base class with `__init_subclass__(cls, marketplace)` that registers subclasses in a dict, rejecting duplicates.\n3. Write a metaclass that raises at class creation if a subclass lacks a `run` method, then re-do it with `__init_subclass__` and compare.\n4. Reproduce a metaclass conflict and resolve it by creating a combined metaclass.",
+  "related": [
+    "py-descriptors-properties",
+    "registry-dispatcher-pattern",
+    "python-oop-dataclasses",
+    "py-internals-memory",
+    "py-dunder-methods-protocols"
+  ],
+  "flashcards": [
+    {
+      "front": "What is the default metaclass?",
+      "back": "`type`. `type(MyClass)` is `type`."
+    },
+    {
+      "front": "What does `type('A', (), {})` do?",
+      "back": "Creates a new class named A with no bases and an empty namespace."
+    },
+    {
+      "front": "Order of class creation steps?",
+      "back": "Resolve metaclass, `__prepare__`, execute body, `Meta(name, bases, ns)` (`__new__` then `__init__`), `__set_name__`, `__init_subclass__`."
+    },
+    {
+      "front": "What is `__init_subclass__`?",
+      "back": "A hook on the parent class called for every subclass at creation; the simple alternative to a metaclass."
+    },
+    {
+      "front": "Metaclass `__call__` controls what?",
+      "back": "How instances are created, i.e. `Cls(...)` (used for singletons)."
+    },
+    {
+      "front": "Is `@dataclass` a metaclass?",
+      "back": "No, it is a class decorator that modifies the class after creation."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is `type(int)`?",
+      "options": [
+        "int",
+        "object",
+        "type",
+        "class"
+      ],
+      "answer_index": 2,
+      "explanation": "Classes are instances of their metaclass; the default metaclass is `type`."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which hook is called on a parent class whenever a subclass is defined?",
+      "options": [
+        "__new__",
+        "__init_subclass__",
+        "__subclasshook__",
+        "__prepare__"
+      ],
+      "answer_index": 1,
+      "explanation": "`__init_subclass__` was added in 3.6 for this purpose."
+    },
+    {
+      "type": "mcq",
+      "prompt": "When is a metaclass genuinely required?",
+      "options": [
+        "To add a method to a class",
+        "To validate subclass methods",
+        "To control the class body namespace via `__prepare__`",
+        "To register subclasses"
+      ],
+      "answer_index": 2,
+      "explanation": "Validation and registration are doable with `__init_subclass__`; namespace control needs `__prepare__` on a metaclass."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The built-in function used to create a class dynamically from a name, bases and namespace is ____.",
+      "answers": [
+        "type"
+      ],
+      "explanation": "`type(name, bases, ns)`."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A class decorator, `__init_subclass__` or a ____ can all customise how a class is created.",
+      "answers": [
+        "metaclass",
+        "metaclasses"
+      ],
+      "explanation": "Metaclass is the heaviest option."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "Product = type(\"Product\", (object,), {\n    \"currency\": \"INR\",\n    \"describe\": lambda self: f\"{self.sku} in {self.currency}\",\n})\np = Product()\np.sku = \"A1\"\nprint(Product.__name__, type(Product).__name__, p.describe())\nprint(isinstance(p, Product), type(type).__name__)\n",
+      "answers": [
+        "Product type A1 in INR\nTrue type"
+      ],
+      "explanation": "type() builds the class; the class's type is `type`, and `type` is its own type."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class Processor:\n    registry = {}\n    def __init_subclass__(cls, /, key=None, **kw):\n        super().__init_subclass__(**kw)\n        Processor.registry[key or cls.__name__.lower()] = cls\n\nclass Csv(Processor, key=\"csv\"): pass\nclass Excel(Processor): pass\nclass Json(Processor, key=\"js\"): pass\n\nprint(list(Processor.registry))\nprint(Processor.registry[\"js\"].__name__)\n\nclass Meta(type):\n    def __call__(cls, *a, **kw):\n        print(\"creating\", cls.__name__)\n        return super().__call__(*a, **kw)\n\nclass X(metaclass=Meta): pass\nX()\n",
+      "answers": [
+        "['csv', 'excel', 'js']\nJson\ncreating X"
+      ],
+      "explanation": "`__init_subclass__` runs in definition order; the metaclass `__call__` runs at instantiation, not at class creation."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong and how do you fix it?",
+      "code": "class Meta(type):\n    def __new__(mcls, name, bases, ns):\n        if \"run\" not in ns:\n            raise TypeError(f\"{name} must define run()\")\n        return super().__new__(mcls, name, bases, ns)\n\nclass Base(metaclass=Meta):\n    pass\n",
+      "answer": "The check also runs for `Base` itself, which has no `run`, so defining `Base` raises TypeError at import. Skip the check for the root class (`if bases and 'run' not in ns:`) or, better, replace the metaclass with `__init_subclass__` on `Base`, which is only called for subclasses. Also note that the check misses `run` inherited from a parent; consider `hasattr`/`callable(getattr(cls, 'run', None))` in `__init_subclass__`.",
+      "rubric": [
+        "Identifies root class also triggers the check",
+        "Fix with bases guard or __init_subclass__",
+        "Prefers the simpler hook over a metaclass"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the steps Python performs when it executes a class statement.",
+      "answer": "Python determines the metaclass (explicit keyword, most derived base metaclass, else `type`). It calls the metaclass's `__prepare__` to get the namespace mapping, executes the class body in that namespace, then calls `Meta(name, bases, namespace)`, which runs `Meta.__new__` to create the class object and `Meta.__init__` to initialise it. Descriptors in the namespace get `__set_name__`, and the parent's `__init_subclass__` is invoked. Finally the class object is bound to its name.",
+      "rubric": [
+        "Metaclass resolution",
+        "__prepare__ and body execution",
+        "Meta.__new__/__init__ create the class",
+        "__set_name__ and __init_subclass__ hooks"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is a metaclass and why do experienced developers avoid writing them?",
+      "answer": "A metaclass is the class of a class: calling it produces class objects (`type` by default). It lets you hook creation and behaviour of classes. They are avoided because they are hard to read, interact badly when two libraries bring different metaclasses (conflicts), and almost every common need (registries, validation, field collection) can be done with `__init_subclass__`, class decorators or descriptors.",
+      "rubric": [
+        "Class of classes (type by default)",
+        "Complexity and conflicts",
+        "Simpler alternatives exist"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between `__new__` and `__init__`, and how do they differ on a metaclass?",
+      "difficulty": "medium",
+      "answer_md": "On a normal class, `__new__(cls, ...)` creates and returns the instance (it is a static method taking the class), and `__init__(self, ...)` initialises it. `__new__` is needed for immutables (`int`, `tuple` subclasses) and singletons. On a metaclass, `__new__(mcls, name, bases, ns)` creates the *class object* and `__init__(cls, name, bases, ns)` initialises it. Metaclass `__call__` sits above both for instances: `Cls(...)` triggers `Meta.__call__`, which calls `cls.__new__` then `cls.__init__`."
+    },
+    {
+      "question": "How would you implement a plugin registry without a metaclass?",
+      "difficulty": "medium",
+      "answer_md": "Use `__init_subclass__` on the base class and register each subclass under a key given as a class keyword:\n\n```python\nclass Handler:\n    registry = {}\n    def __init_subclass__(cls, /, key, **kw):\n        super().__init_subclass__(**kw)\n        Handler.registry[key] = cls\nclass CsvHandler(Handler, key='csv'): ...\n```\nA class decorator (`@register('csv')`) is the other option. Caveat: the module must be imported for registration to happen, so ensure plugins are imported (e.g. via `importlib`) at start-up."
+    },
+    {
+      "question": "What is a metaclass conflict and how do you fix it?",
+      "difficulty": "hard",
+      "answer_md": "When a class inherits from bases whose metaclasses are unrelated (e.g. `ABCMeta` and a library's own metaclass), Python cannot pick a single metaclass that is a subclass of all of them and raises `TypeError: metaclass conflict`. Fix by creating a combined metaclass that inherits from both (`class Combined(ABCMeta, OtherMeta): pass`) and using it explicitly, or avoid one of the metaclasses by switching to `__init_subclass__` or composition."
+    },
+    {
+      "question": "Is `type` an instance of itself? What is `type(type)`?",
+      "difficulty": "easy",
+      "answer_md": "Yes: `type(type) is type`. It is the bootstrapping exception of the object model: every class is an instance of `type`, and `type` is an instance of itself, while `object` is the base of all classes and `type` inherits from `object`. So `isinstance(int, type)` is True and `issubclass(type, object)` is True as well as `isinstance(object, type)`."
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "slug": "registry-dispatcher-pattern",
+  "title": "Registry & Dispatcher Pattern",
+  "skill": "backend-architecture",
+  "extra_skills": [
+    "python"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "design-patterns",
+    "registry",
+    "dispatch",
+    "plugins",
+    "lazy-import",
+    "strategy"
+  ],
+  "summary": "A registry maps keys (like a report type) to handlers, and a dispatcher looks up the key and calls the right handler. It replaces giant if/elif chains with a table, so adding a new handler means adding one entry instead of editing control flow. With lazy imports, each handler's module loads only when it's first needed, keeping startup fast.",
+  "details_md": "### The problem it solves\nWhen behaviour varies by a key - report type, event type, file extension, webhook source - the naive approach is a long `if/elif` chain. It grows with every new case, mixes routing with logic, and forces imports of every handler module up front. A registry turns routing into **data**: `key -> handler`.\n\n### Variations\n1. **Explicit table**: a dict literal or a tuple of specs built into a dict. Everything is visible in one place; easy to audit and test (\"every key resolves\").\n2. **Decorator registration**: `@register(\"amazon_orders\")` on each handler adds it to a global dict at import time. Handlers live next to their registration, but the registry is only complete after all modules are imported - which conflicts with lazy loading.\n3. **Entry points / plugin discovery**: packages advertise handlers via `importlib.metadata.entry_points(group=...)` - used by pytest plugins and similar ecosystems.\n4. **`functools.singledispatch`**: dispatch on the **type** of the first argument rather than a string key.\n5. **Python 3.10 `match`**: structural pattern matching is great for destructuring, but for N interchangeable handlers a table scales better.\n\n### Lazy imports\nFor a large number of handlers, importing all of them at startup costs time and memory (each may pull in pandas helpers, openpyxl, etc.) - critical in AWS Lambda cold starts. Store a **module path + attribute name** instead of the function object and resolve on first use:\n```python\nmodule = importlib.import_module(spec.module)\nhandler = getattr(module, spec.func)\n```\nCache resolved handlers (`functools.cache`) so later calls are dict-fast. `sys.modules` already caches modules, so repeated `import_module` calls are cheap, but caching the resolved callable avoids repeated `getattr` and validation.\n\n### A common handler contract\nDispatch only works if handlers are interchangeable. Define one signature - e.g. `def process(df: pd.DataFrame, ctx: UploadContext) -> Result` - expressed as a `Protocol`. Keep per-type differences in data (column maps, required columns, target table, conflict key) rather than code where possible; many handlers then become configuration of a generic processor.\n\n### Validation and failure modes\n- Unknown key -> raise a clear domain error (`UnsupportedReportType`) listing valid keys, not a `KeyError`.\n- Duplicate keys in a tuple-of-specs silently overwrite when converted to a dict - assert uniqueness at build time.\n- A typo in a lazy module path only fails when that report type is first used. Add a test (or a startup check in CI) that resolves **every** spec.\n- Keep the registry immutable at runtime (`tuple`, `MappingProxyType`) so nothing mutates routing mid-flight.\n\n### Relation to other patterns\nIt's the **Strategy** pattern (interchangeable algorithms) plus a **Factory**/lookup. Web frameworks' routers are registries (`@app.get` registers path -> function). Command-line tools use it for subcommands (argparse `set_defaults(func=...)`).",
+  "code_md": "```python\n# Explicit spec table + lazy-loading dispatcher\nimport importlib\nfrom dataclasses import dataclass\nfrom functools import cache\nfrom types import MappingProxyType\nfrom typing import Protocol, Any\n\nclass Processor(Protocol):\n    def __call__(self, df: Any, org_id: int) -> int: ...\n\n@dataclass(frozen=True, slots=True)\nclass ModuleSpec:\n    key: str        # report type\n    module: str     # dotted module path, imported lazily\n    func: str       # attribute name of the processor\n\n_MODULE_SPECS: tuple[ModuleSpec, ...] = (\n    ModuleSpec(\"amazon_orders\", \"processors.amazon\", \"process_orders\"),\n    ModuleSpec(\"amazon_inventory\", \"processors.amazon\", \"process_inventory\"),\n    ModuleSpec(\"flipkart_orders\", \"processors.flipkart\", \"process_orders\"),\n)\n\ndef _build(specs):\n    table = {}\n    for s in specs:\n        if s.key in table:\n            raise ValueError(f\"duplicate report type: {s.key}\")\n        table[s.key] = s\n    return MappingProxyType(table)              # read-only view\n\nMODULE_DISPATCH = _build(_MODULE_SPECS)\n\nclass UnsupportedReportType(Exception): ...\n\n@cache\ndef get_processor(report_type: str) -> Processor:\n    try:\n        spec = MODULE_DISPATCH[report_type]\n    except KeyError:\n        raise UnsupportedReportType(\n            f\"{report_type!r} not supported; valid: {sorted(MODULE_DISPATCH)}\") from None\n    module = importlib.import_module(spec.module)   # import happens on first use only\n    return getattr(module, spec.func)\n\ndef dispatch(report_type: str, df, org_id: int) -> int:\n    return get_processor(report_type)(df, org_id)\n```\n\n```python\n# Decorator-based registry (eager, self-registering handlers)\nfrom collections.abc import Callable\n\nWEBHOOK_HANDLERS: dict[str, Callable[[dict], None]] = {}\n\ndef on_event(event_type: str):\n    def deco(fn):\n        if event_type in WEBHOOK_HANDLERS:\n            raise ValueError(f\"duplicate handler for {event_type}\")\n        WEBHOOK_HANDLERS[event_type] = fn\n        return fn\n    return deco\n\n@on_event(\"payment.captured\")\ndef handle_captured(payload: dict) -> None:\n    print(\"captured\", payload[\"id\"])\n\n@on_event(\"payment.failed\")\ndef handle_failed(payload: dict) -> None:\n    print(\"failed\", payload[\"id\"])\n\ndef handle_webhook(body: dict) -> None:\n    handler = WEBHOOK_HANDLERS.get(body[\"event\"])\n    if handler is None:\n        return                       # ignore unknown events (log in real code)\n    handler(body[\"payload\"])\n\nhandle_webhook({\"event\": \"payment.captured\", \"payload\": {\"id\": \"pay_1\"}})\n```\n\n```python\n# Type-based dispatch with functools.singledispatch\nfrom functools import singledispatch\nfrom pathlib import Path\n\n@singledispatch\ndef load(source) -> bytes:\n    raise TypeError(f\"unsupported source: {type(source).__name__}\")\n\n@load.register\ndef _(source: Path) -> bytes:\n    return source.read_bytes()\n\n@load.register\ndef _(source: str) -> bytes:          # treat strings as URLs\n    import requests\n    return requests.get(source, timeout=30).content\n```\n\n```python\n# pytest: guarantee every registered spec resolves (catches typos in lazy paths)\nimport pytest\n\n@pytest.mark.parametrize(\"report_type\", sorted(MODULE_DISPATCH))\ndef test_every_processor_resolves(report_type):\n    assert callable(get_processor(report_type))\n```",
+  "use_cases_md": "- Routing 100+ report/file types to their processors in an ETL service.\n- Webhook receivers dispatching on event type or source provider.\n- File parsers chosen by extension (csv/xlsx/xls/xlsb/zip).\n- CLI subcommands and plugin systems.\n- Multi-provider integrations (one adapter per marketplace/OMS/payment gateway behind a common interface).",
+  "mistakes_md": "- **Duplicate keys** silently overwriting entries when building a dict from a list/tuple. Fix: assert uniqueness at build time.\n- **Lazy paths never exercised until production** - typo in a module name fails on first real upload. Fix: a test that resolves every entry.\n- **Inconsistent handler signatures** - dispatcher needs special cases. Fix: one Protocol for all handlers; push differences into config.\n- **Leaking `KeyError` for unknown keys**. Fix: domain error with the list of supported keys.\n- **Decorator registration + lazy loading** - unimported modules never register. Fix: choose explicit tables when you need laziness.\n- **Mutating the registry at runtime**. Fix: immutable tuple/`MappingProxyType`.\n- **Copy-pasted handlers differing only in column names**. Fix: a generic processor parameterised by spec data.",
+  "best_practices_md": "- Keep the registry in one obvious module; treat it as configuration.\n- Store data alongside handlers in the spec (required columns, rename map, target table, conflict keys).\n- Use lazy imports + caching for large registries in cold-start-sensitive environments.\n- Validate the whole registry in tests/CI.\n- Log the resolved handler for each dispatch to aid debugging.\n- Consider a generic handler + per-type config before writing a new handler module.",
+  "my_context_md": "- This is the core of your ECSMarketplaceDataUpload service: the `_MODULE_SPECS` tuple plus `MODULE_DISPATCH` with lazy imports routes 150+ report processors. You can explain it in interviews as Strategy + registry, with lazy imports chosen to keep startup cheap.\n- With no automated tests yet, a single parametrised pytest that resolves every `MODULE_DISPATCH` entry is a high-value first test - it catches broken module paths and missing functions across all 150+ processors.\n- `read_and_validate()` handling CSV/XLSX/XLS/XLSB/ZIP is itself a dispatch-by-extension problem that fits a small parser registry.",
+  "related": [
+    "python-decorators",
+    "python-data-structures",
+    "python-oop-dataclasses",
+    "pytest-essentials",
+    "aws-lambda-essentials"
+  ],
+  "flashcards": [
+    {
+      "front": "What does a registry/dispatcher replace?",
+      "back": "Long if/elif chains: routing becomes a key -> handler table."
+    },
+    {
+      "front": "How do you lazily load a handler from a dotted path?",
+      "back": "`getattr(importlib.import_module(spec.module), spec.func)` on first use, then cache it."
+    },
+    {
+      "front": "Downside of decorator-based registration?",
+      "back": "Handlers only register when their module is imported - incompatible with lazy loading; registry incomplete until all imports run."
+    },
+    {
+      "front": "Which stdlib tool dispatches on argument type?",
+      "back": "`functools.singledispatch` (and `singledispatchmethod`)."
+    },
+    {
+      "front": "Best single test for a large lazy registry?",
+      "back": "Parametrised test that resolves every key and asserts the handler is callable."
+    },
+    {
+      "front": "Design pattern names behind it?",
+      "back": "Strategy (interchangeable handlers) + Factory/lookup table (registry)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Why use lazy imports in a registry of 150 processors running on AWS Lambda?",
+      "options": [
+        "To reduce cold-start time and memory by importing only the needed processor",
+        "Lambda forbids top-level imports",
+        "To make processors run in parallel",
+        "So processors can change at runtime"
+      ],
+      "answer_index": 0,
+      "explanation": "Each invocation typically needs one processor; importing all of them inflates init time and memory."
+    },
+    {
+      "question": "Building `dict((s.key, s) for s in specs)` when two specs share a key results in:",
+      "options": [
+        "A ValueError",
+        "Both entries kept in a list",
+        "The later entry silently overwriting the earlier",
+        "A KeyError at lookup"
+      ],
+      "answer_index": 2,
+      "explanation": "Dicts keep the last value per key; check for duplicates explicitly."
+    },
+    {
+      "question": "What should the dispatcher do for an unknown key?",
+      "options": [
+        "Return None silently",
+        "Raise a domain error naming the key and the supported keys",
+        "Pick the closest match",
+        "Retry later"
+      ],
+      "answer_index": 1,
+      "explanation": "A clear, specific error makes the failure actionable and easy to report in a status table."
+    },
+    {
+      "question": "Which is the best way to make handlers interchangeable?",
+      "options": [
+        "Give each handler its own signature",
+        "Use **kwargs everywhere",
+        "Use global variables",
+        "Define one Protocol/signature all handlers implement"
+      ],
+      "answer_index": 3,
+      "explanation": "A shared contract lets the dispatcher treat all handlers identically."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Describe a registry/dispatch design you'd use to route many file types to processors. What trade-offs did you consider?",
+      "difficulty": "medium",
+      "answer_md": "Design:\n- An immutable **spec table** (tuple of frozen dataclasses): `key`, `module`, `func`, plus config such as required columns, rename map, target table.\n- A **dispatch dict** built from it with a duplicate-key check.\n- A cached `get_processor(key)` that lazily imports `module` and returns `func`; unknown keys raise `UnsupportedReportType`.\n- All processors share one signature (`(df, ctx) -> Result`), typed with a Protocol.\n\n```python\n@cache\ndef get_processor(key):\n    spec = DISPATCH[key]\n    return getattr(importlib.import_module(spec.module), spec.func)\n```\nTrade-offs:\n- **Explicit table vs decorator registration**: explicit is auditable and supports lazy loading; decorators keep registration next to code but require importing everything.\n- **Lazy vs eager imports**: lazy improves cold starts/memory but defers import errors to runtime - mitigated by a test that resolves every key.\n- **Code vs config**: many processors differ only in column names; a generic processor driven by spec data reduces duplication, while truly custom logic stays in code.\n- **Observability**: log the key and resolved handler for every job."
+    },
+    {
+      "question": "When would you use functools.singledispatch vs a dict-based registry vs match statements?",
+      "difficulty": "medium",
+      "answer_md": "- **`functools.singledispatch`**: dispatch on the **type** of the first argument, with support for inheritance (a handler for `Path` also covers subclasses) and ABCs. Good for \"serialise/convert/load anything\" functions where the input type decides behaviour.\n```python\n@singledispatch\ndef to_json(obj): raise TypeError\n@to_json.register\ndef _(obj: datetime): return obj.isoformat()\n```\n- **Dict registry**: dispatch on a **value** (string key, enum) - report type, event name, file extension. Scales to hundreds of entries, can be built from config, supports lazy loading, and is easy to introspect/test.\n- **`match` statement**: best when you need to **destructure** data while choosing a branch - e.g. matching JSON shapes `case {\"event\": \"refund\", \"amount\": int(a)} if a > 0:` - and when the number of cases is small and fixed. It doesn't scale well as a plugin mechanism because every new case edits the same function.\n\nRule of thumb: types -> singledispatch, many keyed handlers -> registry, few structural cases -> match."
+    },
+    {
+      "question": "How would you test a dispatcher with 150 lazily imported processors?",
+      "difficulty": "hard",
+      "answer_md": "Layered tests:\n1. **Registry integrity** (fast, catches most bugs): keys unique; every spec resolves (`importlib.import_module` + `getattr`) to a callable; signatures match the Protocol (`inspect.signature`).\n```python\n@pytest.mark.parametrize(\"key\", sorted(MODULE_DISPATCH))\ndef test_resolves(key):\n    fn = get_processor(key)\n    assert list(inspect.signature(fn).parameters)[:2] == [\"df\", \"ctx\"]\n```\n2. **Dispatcher behaviour**: unknown key raises `UnsupportedReportType`; caching returns the same object; use `monkeypatch` to swap the registry with a fake entry and assert the dispatcher calls it with the right arguments.\n3. **Processor contract tests**: for each report type keep a tiny sample file (a few rows) in `tests/fixtures/<key>.csv`; parametrise a test that runs the processor with a fake DB writer and asserts on the rows it would write (columns, types, row count). This doubles as documentation of each source's format.\n4. **Integration**: a handful of end-to-end tests against a real PostgreSQL (Docker/testcontainers) for the upsert SQL.\n\nRunning the integrity test in CI means a typo in a lazy module path fails the build instead of the first production upload."
+    }
+  ]
+}

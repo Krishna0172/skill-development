@@ -1,0 +1,153 @@
+{
+  "slug": "ai-function-calling",
+  "title": "Function calling (tool use)",
+  "skill": "prompt-engineering",
+  "extra_skills": [
+    "ai-agents",
+    "llm-applications"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "function-calling",
+    "tool-use",
+    "json-schema",
+    "tool-loop",
+    "read-only-tools"
+  ],
+  "summary": "Function calling lets the model request that your code run a named tool with JSON arguments. You describe tools with JSON Schemas; the model replies with tool calls instead of text; your backend validates the arguments, executes the tool, sends results back, and loops until the model gives a final answer. The model never executes anything itself - your code is the gatekeeper.",
+  "why_md": "- It is how LLMs get live data (today's orders, stock levels) instead of hallucinating it.\n- It replaces fragile 'parse the action from text' prompts with typed calls.\n- The security of the whole feature lives in how you validate and execute tool calls.\n- Foundation for agents; interviewers ask you to sketch the tool-call loop.",
+  "details_md": "### Tool definitions\nEach tool has a `name`, a `description` (the model uses it to decide when to call) and `parameters` as a JSON Schema. Good descriptions say when to use the tool and what it returns. Fewer, well-scoped tools beat many overlapping ones.\n\n### The loop\n1. Send messages + `tools`.\n2. If the response has `finish_reason == \"tool_calls\"`, the assistant message contains `tool_calls`, each with an `id`, `function.name` and `function.arguments` - a **JSON string**, which may be invalid or contain unexpected values.\n3. Append that assistant message to the history unchanged, then execute each call and append a `{\"role\": \"tool\", \"tool_call_id\": id, \"content\": result}` message per call.\n4. Call the model again. Repeat until it returns normal content, with a **max-iterations** cap.\nThe model may request several tools in one turn (parallel calls); answer all of them before the next request. `tool_choice` can force a specific tool, require any tool, or disable tools.\n\n### Executing safely\n- **Allow-list dispatch**: map names to functions in a dict; unknown names become an error result, never `getattr`/`eval`.\n- **Validate arguments** with Pydantic: types, ranges, enums, limits (`limit <= 100`).\n- **Inject trusted context yourself**: the tenant `org_id` and user id come from the authenticated session, never from model arguments. Otherwise a prompt-injected model could query another org.\n- **Least privilege**: read-only DB role, parameterised SQL, statement timeout, row caps. Side-effecting tools (refund, email) require confirmation or human approval and idempotency keys.\n- **Return errors as tool results** (\"invalid date range\") so the model can correct itself; keep results compact to save tokens.\n\n### Read-only DB tools vs raw text-to-SQL\nInstead of letting the model write arbitrary SQL, expose narrow tools like `get_sales_summary(start_date, end_date, group_by)` backed by your own parameterised queries. You lose flexibility but gain safety, predictable performance and testability. A middle ground is a `run_select` tool that validates SELECT-only SQL and runs it under a read-only role with `statement_timeout` and RLS or an enforced org filter.\n",
+  "code_md": "```python\n# Tool schema + allow-listed, validated, tenant-scoped execution\nimport json\nfrom datetime import date\nfrom typing import Literal\nfrom pydantic import BaseModel, Field, ValidationError\n\nclass SalesSummaryArgs(BaseModel):\n    start_date: date\n    end_date: date\n    group_by: Literal[\"day\", \"sku\", \"marketplace\"] = \"day\"\n    limit: int = Field(default=20, ge=1, le=100)\n\nTOOLS = [{\n    \"type\": \"function\",\n    \"function\": {\n        \"name\": \"get_sales_summary\",\n        \"description\": \"Revenue and units for the current organisation between two dates. Use for any sales/revenue question.\",\n        \"parameters\": SalesSummaryArgs.model_json_schema(),\n    },\n}]\n\ndef get_sales_summary(args: SalesSummaryArgs, *, org_id: int) -> list[dict]:\n    sql = '''SELECT date_trunc('day', o.created_at)::date AS day, SUM(oi.quantity*oi.unit_price) AS revenue\n             FROM orders o JOIN order_items oi ON oi.order_id = o.id\n             WHERE o.org_id = %s AND o.created_at >= %s AND o.created_at < %s + 1\n             GROUP BY 1 ORDER BY 1 LIMIT %s'''          # parameterised; org_id from session\n    with readonly_cursor(statement_timeout_ms=5000) as cur:\n        cur.execute(sql, (org_id, args.start_date, args.end_date, args.limit))\n        return [dict(r) for r in cur.fetchall()]\n\nREGISTRY = {\"get_sales_summary\": (SalesSummaryArgs, get_sales_summary)}\n\ndef run_tool(name: str, raw_args: str, org_id: int) -> str:\n    if name not in REGISTRY:\n        return json.dumps({\"error\": f\"unknown tool {name}\"})\n    model_cls, fn = REGISTRY[name]\n    try:\n        args = model_cls.model_validate_json(raw_args)\n    except ValidationError as e:\n        return json.dumps({\"error\": \"invalid arguments\", \"details\": e.errors(include_url=False)}, default=str)\n    return json.dumps(fn(args, org_id=org_id), default=str)\n```\n\n```python\n# The tool-call loop with an iteration cap\ndef answer(question: str, org_id: int, max_steps: int = 5) -> str:\n    messages = [{\"role\": \"system\", \"content\": \"Answer using tools. Never guess numbers.\"},\n                {\"role\": \"user\", \"content\": question}]\n    for _ in range(max_steps):\n        resp = client.chat.completions.create(model=MODEL, messages=messages, tools=TOOLS)\n        msg = resp.choices[0].message\n        if not msg.tool_calls:\n            return msg.content\n        messages.append(msg.model_dump(exclude_none=True))   # assistant turn with tool_calls\n        for call in msg.tool_calls:\n            result = run_tool(call.function.name, call.function.arguments, org_id)\n            messages.append({\"role\": \"tool\", \"tool_call_id\": call.id, \"content\": result})\n    raise RuntimeError(\"tool loop exceeded max_steps\")\n```",
+  "use_cases_md": "- Chat over sales data: `get_sales_summary`, `get_top_skus`, `get_inventory(sku)` instead of free-form SQL.\n- Support bot: `lookup_order(order_number)` scoped to the customer, `search_policy(query)` for RAG.\n- Ops assistant: `get_job_status(job_id)` from a job scheduler table (read-only).\n- Side effects like `create_refund_request` gated behind human approval.",
+  "mistakes_md": "- **Trusting `org_id` from model arguments** - cross-tenant data leak via prompt injection. Inject it from the session.\n- **`json.loads` without validation** - wrong types or huge limits reach SQL.\n- **Dynamic dispatch via `getattr(module, name)`** - the model can call anything.\n- **Forgetting to append the assistant tool_calls message** before tool results - the API rejects the conversation.\n- **No iteration cap** - loops forever, burning tokens.\n- **Returning huge result sets** - blows the context window.",
+  "best_practices_md": "- Small set of narrow, well-described tools.\n- Pydantic schema per tool; generate `parameters` from it.\n- Allow-list registry; unknown tool -> error result.\n- Trusted context (org, user) injected server-side.\n- Read-only role, parameterised SQL, timeouts, row limits.\n- Return compact JSON; errors as results; cap loop steps; log every call.",
+  "my_context_md": "`ECSMarketplaceDataUpload` already uses a registry dispatcher (name -> processor) - the same pattern is the safe way to dispatch tool calls. `GetLlmData` stores model-generated SQL; narrow read-only tools are the safer alternative or complement to executing that SQL. Your `db_transaction()` context manager in `AmazonVendorBankRecon/db.py` could have a read-only sibling used only by tools.",
+  "revision_notes_md": "- Tool = name + description + JSON Schema parameters.\n- Response: finish_reason 'tool_calls', message.tool_calls[i].{id, function.name, function.arguments(JSON string)}.\n- Append assistant msg, then one role='tool' msg per call with tool_call_id.\n- Loop until plain content; cap steps.\n- Validate args with Pydantic; allow-list dispatch.\n- org_id/user from session, never from model.\n- Read-only role, parameterised SQL, timeouts, limits.\n- Errors returned as tool results so the model can retry.",
+  "exercises_md": "1. Implement `get_sales_summary` and `get_top_skus` tools against a local Postgres with a read-only role, and run the loop with an Ollama model that supports tools.\n2. Write tests proving a model-supplied `org_id` argument is ignored.\n3. Add a `run_select` tool that rejects non-SELECT statements and enforces `statement_timeout` and `LIMIT`.\n4. Log every tool call (name, args, duration, rows) to a table and build a query showing the most used tools.",
+  "related": [
+    "ai-structured-outputs",
+    "ai-agents-tool-calling",
+    "ai-llm-apis",
+    "registry-dispatcher-pattern",
+    "be-pydantic-validation",
+    "ai-security"
+  ],
+  "flashcards": [
+    {
+      "front": "What type is function.arguments in a tool call?",
+      "back": "A JSON string generated by the model - parse and validate it; it can be malformed."
+    },
+    {
+      "front": "What message do you send back after executing a tool?",
+      "back": "{'role': 'tool', 'tool_call_id': <call id>, 'content': <result string>} - after appending the assistant message containing the tool_calls."
+    },
+    {
+      "front": "Where must the tenant org_id for a tool come from?",
+      "back": "The authenticated session/server context, never from model-generated arguments."
+    },
+    {
+      "front": "Why cap the tool loop?",
+      "back": "To prevent infinite call cycles and runaway token cost."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Who executes a tool when the model returns a tool call?",
+      "options": [
+        "Your application code",
+        "The model provider's servers",
+        "The database directly",
+        "The user's browser"
+      ],
+      "answer_index": 0,
+      "explanation": "The model only proposes calls; your code decides whether and how to run them."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your `get_orders` tool schema includes an `org_id` parameter. What's the risk?",
+      "options": [
+        "Higher latency",
+        "The model may refuse to call it",
+        "JSON Schema can't express integers",
+        "A prompt-injected or confused model can request another tenant's data"
+      ],
+      "answer_index": 3,
+      "explanation": "Tenant scope must come from trusted server context."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Each tool result message must reference the call it answers via the ____ field.",
+      "answers": [
+        "tool_call_id",
+        "tool call id"
+      ],
+      "explanation": "tool_call_id links results to calls."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "When the model wants tools run, the response's finish_reason is ____.",
+      "answers": [
+        "tool_calls",
+        "\"tool_calls\"",
+        "'tool_calls'"
+      ],
+      "explanation": "finish_reason 'tool_calls'."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (a simulated tool-call dispatch)",
+      "code": "import json\n\ndef get_stock(sku, org_id):\n    stock = {(1, \"A1\"): 12, (2, \"A1\"): 99}\n    return stock.get((org_id, sku), 0)\n\nREGISTRY = {\"get_stock\": get_stock}\ncalls = [\n    {\"id\": \"c1\", \"name\": \"get_stock\", \"arguments\": '{\"sku\": \"A1\", \"org_id\": 2}'},\n    {\"id\": \"c2\", \"name\": \"drop_table\", \"arguments\": \"{}\"},\n    {\"id\": \"c3\", \"name\": \"get_stock\", \"arguments\": '{\"sku\": '},\n]\nSESSION_ORG = 1\nfor c in calls:\n    fn = REGISTRY.get(c[\"name\"])\n    if fn is None:\n        print(c[\"id\"], \"error: unknown tool\")\n        continue\n    try:\n        args = json.loads(c[\"arguments\"])\n    except json.JSONDecodeError:\n        print(c[\"id\"], \"error: bad arguments\")\n        continue\n    print(c[\"id\"], fn(sku=args[\"sku\"], org_id=SESSION_ORG))",
+      "answers": [
+        "c1 12\nc2 error: unknown tool\nc3 error: bad arguments"
+      ],
+      "explanation": "c1: the model asked for org 2 but the code uses SESSION_ORG=1 -> 12. c2: not in the allow-list. c3: truncated JSON -> JSONDecodeError."
+    },
+    {
+      "type": "debug",
+      "prompt": "What's wrong with this tool-execution code and how do you fix it?",
+      "code": "import tools_module\n\nfor call in msg.tool_calls:\n    fn = getattr(tools_module, call.function.name)\n    args = json.loads(call.function.arguments)\n    result = fn(**args)\n    messages.append({\"role\": \"tool\", \"content\": str(result)})",
+      "answer": "- `getattr` lets the model call any function in the module (including helpers or imported names).\n- Arguments aren't validated; trusted context (org_id) can be supplied by the model.\n- The assistant message containing `tool_calls` isn't appended, and tool messages lack `tool_call_id` - the API will reject the next request.\n- Exceptions propagate instead of being returned as error results.\n\n```python\nmessages.append(msg.model_dump(exclude_none=True))\nfor call in msg.tool_calls:\n    result = run_tool(call.function.name, call.function.arguments, org_id=session.org_id)\n    messages.append({\"role\": \"tool\", \"tool_call_id\": call.id, \"content\": result})\n```\nwhere `run_tool` uses an allow-list registry and Pydantic validation.",
+      "rubric": [
+        "getattr dispatch is unsafe; use an allow-list registry",
+        "Validate arguments and inject org_id server-side",
+        "Append assistant tool_calls message and include tool_call_id",
+        "Return errors as tool results"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain the tool-call loop to a junior, step by step.",
+      "answer": "1. Send the conversation plus tool definitions (name, description, JSON Schema).\n2. The model either answers in text or returns `tool_calls` with ids, names and JSON-string arguments.\n3. Append that assistant message to history as-is.\n4. For each call: look up the tool in an allow-list, validate arguments, inject trusted context (org/user), execute with least privilege, and append a `tool` message with the matching `tool_call_id` and a compact result (or error).\n5. Call the model again with the extended history.\n6. Repeat until it returns plain content, stopping after N steps.\nThe model never runs code; it only proposes calls.",
+      "rubric": [
+        "Model proposes calls; app executes",
+        "Append assistant message then tool results with tool_call_id",
+        "Validate/allow-list/inject trusted context",
+        "Loop until final answer with a max-steps cap"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When would you choose narrow read-only tools over letting the model generate arbitrary SQL?",
+      "answer": "Narrow tools (`get_sales_summary(start, end, group_by)`) when questions fall into known patterns, data is sensitive or multi-tenant, and you need predictable performance and testability - the SQL is yours and parameterised. Arbitrary SQL (via a validated `run_select` tool) suits exploratory analytics where flexibility matters, but needs a read-only role, SELECT-only validation, row-level or enforced org filtering, timeouts and row limits. Many systems combine them: tools for common questions, guarded SQL for the long tail.",
+      "rubric": [
+        "Narrow tools: safety, predictability, testability",
+        "Arbitrary SQL: flexibility but needs strong guards",
+        "Combination is common"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Design a 'chat with your sales data' feature for a multi-tenant SaaS using function calling. How do you keep it safe?",
+      "difficulty": "hard",
+      "answer_md": "**Tools**: `get_sales_summary(start_date, end_date, group_by)`, `get_top_skus(period, metric, limit)`, `get_inventory(sku)`, maybe `run_select(sql)` for the long tail. Parameters are Pydantic models whose JSON Schema becomes the tool definition.\n\n**Loop**: send question + tools; execute returned calls; feed results back; cap at ~5 steps; stream the final answer.\n\n**Safety**:\n- `org_id` and user id come from the auth session and are injected into every tool; they aren't tool parameters.\n- Allow-list registry; arguments validated (date ranges, `limit <= 100`).\n- DB access through a read-only role with `statement_timeout`; ideally row-level security keyed on a session variable, so even a buggy query can't cross tenants.\n- `run_select`: parse and allow only a single SELECT; enforce LIMIT.\n- Results truncated/summarised before going back to the model.\n- Every call logged (tool, args, rows, latency) for audit and evaluation."
+    },
+    {
+      "question": "What happens if the model returns invalid arguments for a tool?",
+      "difficulty": "easy",
+      "answer_md": "`function.arguments` is a model-generated JSON string, so it can be malformed, missing fields, or have wrong types/out-of-range values. Validate with `json.loads` + Pydantic (or `model_validate_json`). On failure, don't crash the request: return a tool message with a concise error (`{\"error\": \"end_date must be after start_date\"}`) and the matching `tool_call_id`. The model usually corrects itself on the next turn. Keep the loop capped so repeated failures end in a clear error to the user, and log them to improve tool descriptions or schemas."
+    }
+  ],
+  "category": "AI"
+}

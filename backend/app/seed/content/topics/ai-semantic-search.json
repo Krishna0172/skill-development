@@ -1,0 +1,153 @@
+{
+  "slug": "ai-semantic-search",
+  "title": "Semantic search with embeddings",
+  "skill": "rag",
+  "extra_skills": [
+    "nlp-basics"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "semantic-search",
+    "embeddings",
+    "cosine-similarity",
+    "keyword-search",
+    "retrieval"
+  ],
+  "summary": "Semantic search embeds documents and queries into the same vector space and ranks documents by similarity, so 'can I send back a damaged blender' matches a policy titled 'Returns for defective items' without shared keywords. It complements, rather than replaces, keyword search, which still wins on exact identifiers like SKUs and order numbers.",
+  "why_md": "- It is the retrieval step in nearly every RAG system.\n- Understanding its failure modes (exact IDs, negation, numbers, domain jargon) tells you when to add keyword/hybrid search.\n- You'll be asked to explain cosine similarity and why semantic search returns 'related but wrong' results.\n- Simple to prototype with Postgres + pgvector + a local embedding model.",
+  "details_md": "### How it works\n1. **Index time**: split documents into chunks, embed each chunk with an embedding model, store vector + text + metadata.\n2. **Query time**: embed the query with the *same* model, find the top-k most similar chunk vectors (exact or ANN), return them (optionally reranked).\nEmbeddings place texts with similar meaning close together because the model was trained (often contrastively) to pull related pairs together and push unrelated ones apart.\n\n### Similarity measures\n- **Cosine similarity** = dot(a, b) / (|a||b|), range -1..1, ignores vector length.\n- **Dot product** equals cosine when vectors are unit-normalised (most retrieval setups normalise).\n- **Euclidean (L2) distance**: for unit vectors, ranking by L2 equals ranking by cosine.\nUse the metric the embedding model was trained for (stated on its model card).\n\n### Keyword vs semantic\nKeyword search (BM25, PostgreSQL full-text) matches terms: precise for SKUs, error codes, names, rare jargon, and explainable. It misses synonyms and paraphrases. Semantic search captures meaning and paraphrase, works across languages with multilingual models, but is fuzzy on exact tokens. Production systems often combine them (hybrid search).\n\n### Failure modes\n- **Exact identifiers**: 'order 4471-AB' embeds close to other order numbers; keyword search is better.\n- **Negation and constraints**: 'laptops not from Dell' is close to 'Dell laptops'.\n- **Numbers and dates**: 'orders over 500 USD' isn't a vector concept - use structured filters or text-to-SQL.\n- **Domain shift**: general models may not know your internal jargon (e.g. marketplace report names).\n- **Query-document asymmetry**: short questions vs long passages; some models need query/passage prefixes (check the model card).\n- **Always returns something**: top-k exists even when nothing is relevant. Apply a similarity threshold or let the generator say 'not found'.\n- **Chunking problems**: the answer split across chunks or diluted in a huge chunk.\n\n### Practical setup\nStore chunks in Postgres with pgvector, filter by `org_id` and metadata (document type, language, product category) in the same query, and evaluate with a small labelled set of query -> relevant chunk ids before tuning anything.\n",
+  "code_md": "```python\n# Embed + search with a local sentence-transformers model and pgvector\nfrom sentence_transformers import SentenceTransformer\n\nmodel = SentenceTransformer(EMBED_MODEL_NAME)   # chosen from a benchmark/model card; runs locally\n\ndef embed(texts: list[str]) -> list[list[float]]:\n    # normalize -> cosine similarity == dot product\n    return model.encode(texts, normalize_embeddings=True).tolist()\n\ndef semantic_search(cur, org_id: int, query: str, k: int = 5, min_sim: float = 0.3):\n    q = embed([query])[0]\n    cur.execute(\n        '''SELECT id, content, 1 - (embedding <=> %s::vector) AS sim\n           FROM doc_chunks\n           WHERE org_id = %s AND metadata->>'doc_type' = 'policy'\n           ORDER BY embedding <=> %s::vector\n           LIMIT %s''',\n        (to_pgvector(q), org_id, to_pgvector(q), k),\n    )\n    return [r for r in cur.fetchall() if r[2] >= min_sim]   # threshold: allow 'nothing relevant'\n```\n\n```python\n# Cosine similarity from scratch (stdlib) - what the database computes\nimport math\n\ndef cosine(a, b):\n    dot = sum(x * y for x, y in zip(a, b, strict=True))\n    return dot / (math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b)))\n```",
+  "use_cases_md": "- Policy/FAQ search for a support bot ('can I return opened headphones?').\n- Finding similar customer complaints across reviews for one ASIN.\n- Matching free-text product titles from different marketplaces to your catalogue.\n- Selecting relevant table descriptions to include in a text-to-SQL prompt.",
+  "mistakes_md": "- **Different models for queries and documents** - vectors aren't comparable.\n- **Using semantic search for SKUs/order numbers** - use keyword/exact filters.\n- **No threshold** - irrelevant top-k chunks are passed to the LLM, which then hallucinates from them.\n- **Ignoring model-specific query/passage prefixes**.\n- **Evaluating by eyeballing a few queries** instead of a labelled set.",
+  "best_practices_md": "- Same model (and version) for indexing and querying.\n- Normalise vectors; use the model's intended metric.\n- Combine with metadata filters and keyword search where exactness matters.\n- Similarity threshold or 'no answer' path.\n- Build a small labelled query set; measure recall@k before and after changes.",
+  "my_context_md": "`ECSAmazonReviewRatingPostgres/UpdateNgrams.py` computes nltk n-grams on review text - a keyword-style representation. Semantic search is the next step: embedding the same reviews lets you group 'arrived broken' with 'came damaged' even though they share no n-grams. Keep the n-gram path for exact phrases; that pairing is the core of hybrid search.",
+  "revision_notes_md": "- Embed docs and queries with the same model; rank by similarity.\n- Cosine = dot / (|a||b|); normalised vectors -> cosine == dot.\n- Keyword: exact terms, IDs, explainable. Semantic: paraphrase, synonyms, multilingual.\n- Fails on IDs, negation, numeric constraints, unknown jargon.\n- Top-k always returns something -> threshold / 'not found'.\n- Filter by org_id + metadata in the same query.\n- Evaluate with labelled query -> relevant ids.",
+  "exercises_md": "1. Embed 200 return-policy and FAQ paragraphs with a local sentence-transformers model, store in pgvector, and query 20 paraphrased questions.\n2. Find 5 queries where keyword search beats semantic search (SKUs, error codes) and 5 where semantic wins.\n3. Pick a similarity threshold using a labelled set: plot precision vs threshold.\n4. Compare cosine ranking with and without normalisation on your vectors.",
+  "related": [
+    "ai-embeddings",
+    "ai-embedding-models",
+    "ai-vector-databases",
+    "ai-hybrid-search",
+    "ai-chunking",
+    "ai-retrieval-pipelines"
+  ],
+  "flashcards": [
+    {
+      "front": "Cosine similarity formula?",
+      "back": "dot(a, b) / (|a| * |b|); 1 = same direction, 0 = orthogonal."
+    },
+    {
+      "front": "When does dot product equal cosine similarity?",
+      "back": "When both vectors are unit-normalised."
+    },
+    {
+      "front": "Where does keyword search beat semantic search?",
+      "back": "Exact identifiers (SKUs, order ids, error codes), rare names and jargon."
+    },
+    {
+      "front": "Why add a similarity threshold?",
+      "back": "Top-k always returns results; a threshold lets the system say nothing relevant was found."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A user searches 'order 88213-XQ status'. Which retrieval works best for the identifier?",
+      "options": [
+        "Semantic search only",
+        "Keyword/exact match (or a structured lookup)",
+        "Raising top-k to 100",
+        "A larger embedding dimension"
+      ],
+      "answer_index": 1,
+      "explanation": "Embeddings blur exact tokens; IDs need exact matching."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Documents were embedded with model A; queries are embedded with model B (same dimension). What happens?",
+      "options": [
+        "Works fine since dimensions match",
+        "Postgres raises an error",
+        "Search quality is meaningless because the vector spaces differ",
+        "Only latency increases"
+      ],
+      "answer_index": 2,
+      "explanation": "Different models produce incompatible spaces even with equal dimensions."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "For unit-normalised vectors, cosine similarity equals the ____ product.",
+      "answers": [
+        "dot",
+        "inner",
+        "dot product",
+        "inner product"
+      ],
+      "explanation": "Norms are 1, so cosine = dot."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Because top-k always returns results, add a similarity ____ so the system can answer 'not found'.",
+      "answers": [
+        "threshold",
+        "cutoff",
+        "cut-off"
+      ],
+      "explanation": "A minimum similarity threshold."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (ranking by cosine similarity)",
+      "code": "import math\n\ndef cosine(a, b):\n    dot = sum(x * y for x, y in zip(a, b))\n    return dot / (math.hypot(*a) * math.hypot(*b))\n\nquery = [1.0, 1.0, 0.0]\ndocs = {\n    \"returns-policy\": [2.0, 2.0, 0.0],\n    \"shipping-times\": [0.0, 1.0, 1.0],\n    \"warranty\": [1.0, 0.0, 0.0],\n    \"careers\": [0.0, 0.0, 3.0],\n}\nranked = sorted(docs, key=lambda d: cosine(query, docs[d]), reverse=True)\nfor d in ranked:\n    print(d, round(cosine(query, docs[d]), 3))",
+      "answers": [
+        "returns-policy 1.0\nwarranty 0.707\nshipping-times 0.5\ncareers 0.0"
+      ],
+      "explanation": "returns-policy points in exactly the same direction (length doesn't matter) -> 1.0. warranty: dot 1 / (sqrt2 x 1) = 0.707. shipping-times: dot 1 / (sqrt2 x sqrt2) = 0.5. careers is orthogonal -> 0.0."
+    },
+    {
+      "type": "debug",
+      "prompt": "A support bot answers confidently from irrelevant chunks when the policy doesn't cover a question. What's wrong and how do you fix it?",
+      "code": "def retrieve(cur, org_id, question):\n    q = embed([question])[0]\n    cur.execute('''SELECT content FROM doc_chunks WHERE org_id = %s\n                   ORDER BY embedding <=> %s::vector LIMIT 5''',\n                (org_id, to_pgvector(q)))\n    return [r[0] for r in cur.fetchall()]\n\ncontext = retrieve(cur, org_id, question)\nprompt = f\"Answer using this context:\\n{context}\\nQ: {question}\"",
+      "answer": "- Top-k always returns 5 chunks even if none is relevant; there's no similarity threshold.\n- The prompt doesn't allow the model to say it doesn't know, so it improvises from unrelated text.\n\n```python\ncur.execute('''SELECT content, 1 - (embedding <=> %s::vector) AS sim FROM doc_chunks\n               WHERE org_id = %s ORDER BY embedding <=> %s::vector LIMIT 5''',\n            (qv, org_id, qv))\nchunks = [c for c, sim in cur.fetchall() if sim >= MIN_SIM]   # tuned on a labelled set\nif not chunks:\n    return \"I couldn't find this in our policies.\"\nsystem = (\"Answer only from <context>. If it doesn't contain the answer, say you don't know.\")\n```",
+      "rubric": [
+        "No similarity threshold - top-k always returns",
+        "Allow/force an 'I don't know' path in the prompt",
+        "Tune the threshold on labelled data"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior why semantic search found 'Returns for defective items' for the query 'can I send back a broken blender' and when it would fail.",
+      "answer": "Both texts are embedded into vectors by a model trained so that texts with similar meaning are close together. 'send back' ~ 'returns', 'broken' ~ 'defective', so the vectors point in similar directions and cosine similarity is high, even with no shared keywords. It fails when meaning depends on exact tokens (SKU, order number), negation ('not Dell'), numeric constraints ('over 500 USD'), or jargon the model never learned; and it always returns something, so you need thresholds and keyword/hybrid search or structured filters for those cases.",
+      "rubric": [
+        "Same embedding space; similar meaning -> close vectors",
+        "Works without keyword overlap",
+        "Failure cases: IDs, negation, numbers, jargon",
+        "Mitigate with keyword/hybrid, filters, thresholds"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you route 'total revenue last month for SKU A12' versus 'what is our policy on damaged deliveries?'",
+      "answer": "The first is a structured, numeric question with an exact identifier: route to text-to-SQL or a read-only tool (`get_sales_summary`), not vector search. The second is a natural-language policy question: semantic (or hybrid) search over policy chunks, then grounded generation with citations. A lightweight classifier or the LLM's tool choice can route between them.",
+      "rubric": [
+        "Numeric/ID questions -> SQL/tools",
+        "Policy/meaning questions -> semantic/hybrid retrieval",
+        "Routing via classifier or tool selection"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What are the limitations of embedding-based semantic search and how do you address them?",
+      "difficulty": "medium",
+      "answer_md": "Limitations: weak on exact identifiers and rare terms; poor at negation and numeric/date constraints; domain jargon unknown to general models; always returns top-k even when irrelevant; sensitive to chunking; query/document asymmetry.\n\nMitigations: **hybrid search** (BM25/Postgres full-text + vectors, merged with RRF) for exact terms; **metadata/structured filters** (org_id, category, date) and routing numeric questions to SQL; **similarity thresholds** plus an 'I don't know' path; a **cross-encoder reranker** on the top 50; better **chunking**; domain-appropriate or fine-tuned embedding models; and a labelled eval set to measure recall@k as you change things."
+    },
+    {
+      "question": "Cosine similarity vs dot product vs L2 - which do you use?",
+      "difficulty": "easy",
+      "answer_md": "Use what the embedding model was trained for (model card). Cosine measures the angle and ignores magnitude. Dot product also includes magnitude; if vectors are unit-normalised it equals cosine, and it's cheaper. For unit vectors L2 distance is a monotonic function of cosine (`|a-b|^2 = 2 - 2cos`), so all three rank identically. Practical default: normalise at embedding time, store normalised vectors, and use cosine (`<=>` with `vector_cosine_ops` in pgvector) or inner product consistently between index and query."
+    }
+  ],
+  "category": "AI"
+}

@@ -1,0 +1,199 @@
+{
+  "slug": "be-kubernetes-essentials",
+  "title": "Kubernetes essentials: pods, deployments, services, probes",
+  "skill": "docker",
+  "extra_skills": [
+    "system-design",
+    "aws-ecs"
+  ],
+  "category": "Cloud & DevOps",
+  "difficulty": "advanced",
+  "tags": [
+    "kubernetes",
+    "pods",
+    "deployments",
+    "services",
+    "configmaps",
+    "probes"
+  ],
+  "summary": "Kubernetes runs containers across a cluster and keeps them in the desired state. This topic covers the core objects (Pod, Deployment, Service, ConfigMap, Secret), rolling updates, resource requests and limits and liveness/readiness/startup probes, with the controller model that explains how it all works.",
+  "why_md": "- Kubernetes is the dominant platform for running containers at scale; knowing its basics is expected of senior backend engineers.\n- Probes, resource limits and rolling updates directly affect your service's reliability.\n- The declarative model (desired vs actual state) shows up in many modern systems.\n- Interviewers ask how to deploy, scale and debug a service and how config and secrets reach pods.",
+  "details_md": "### The declarative model\nYou describe the **desired state** in YAML (`kubectl apply -f`). The control plane stores it in **etcd**; **controllers** run reconcile loops comparing actual state to desired state and acting to close the gap (start a pod, replace a failed one). The **scheduler** places pods on nodes based on resource requests and constraints; each node runs a **kubelet** and a container runtime. The **API server** is the single front door.\n\n### Core objects\n- **Pod**: the smallest unit; one or more containers sharing network (one IP) and volumes. Pods are ephemeral; you rarely create them directly.\n- **Deployment**: manages a **ReplicaSet** of identical pods. Set `replicas`, update the image, and it performs a **rolling update** (`maxSurge`, `maxUnavailable`), with `kubectl rollout undo` to roll back. Use it for stateless services.\n- **Service**: a stable virtual IP and DNS name (`orders.default.svc`) that load-balances to pods matched by **labels/selector**. Types: `ClusterIP` (internal, default), `NodePort`, `LoadBalancer` (cloud LB). **Ingress** routes external HTTP(S) by host/path to Services.\n- **ConfigMap**: non-secret config, injected as environment variables or mounted files. **Secret**: sensitive values (base64-encoded, *not* encrypted by default; enable encryption at rest and RBAC, or use an external secrets manager).\n- **Namespace**: logical separation of resources. **Job/CronJob**: run-to-completion and scheduled work. **StatefulSet**: stable identity and storage for databases. **HPA**: scales replicas on CPU or custom metrics. **PersistentVolumeClaim**: request durable storage.\n\n### Resources\n`requests` are what the scheduler reserves (guaranteed share); `limits` are caps. Exceeding the **memory limit** gets the container OOMKilled; exceeding the CPU limit throttles it. Requests also define QoS class and HPA percentages. Always set memory requests/limits.\n\n### Probes\n- **startupProbe**: gives slow-starting apps time; others are disabled until it passes.\n- **livenessProbe**: failure -> kubelet restarts the container. Keep it cheap and independent of dependencies.\n- **readinessProbe**: failure -> pod removed from Service endpoints (no restart). Use for 'ready to take traffic', including dependency checks.\nConfigure `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds`, `failureThreshold`.\n\n### Graceful shutdown\nOn termination Kubernetes sends SIGTERM, removes the pod from endpoints, and after `terminationGracePeriodSeconds` (default 30) sends SIGKILL. Handle SIGTERM (finish in-flight requests, close pools); a short `preStop` sleep helps with endpoint propagation delay.\n\n### Debugging toolkit\n`kubectl get pods -o wide`, `describe pod` (events show scheduling, image pull, probe failures), `logs [-f] [--previous]`, `exec -it pod -- sh`, `rollout status`, `top`. Common states: `ImagePullBackOff`, `CrashLoopBackOff` (app keeps exiting; read previous logs), `Pending` (not enough resources), `OOMKilled`.",
+  "code_md": "```yaml\n# deployment.yaml - API with config, probes, resources, rolling update\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: orders-api\nspec:\n  replicas: 3\n  selector:\n    matchLabels: { app: orders-api }\n  strategy:\n    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }\n  template:\n    metadata:\n      labels: { app: orders-api }\n    spec:\n      containers:\n        - name: api\n          image: registry.example.com/orders-api:1.4.2\n          ports: [{ containerPort: 8000 }]\n          envFrom:\n            - configMapRef: { name: orders-config }\n          env:\n            - name: DB_PASSWORD\n              valueFrom: { secretKeyRef: { name: orders-secret, key: db-password } }\n          resources:\n            requests: { cpu: \"250m\", memory: \"256Mi\" }\n            limits: { memory: \"512Mi\" }\n          startupProbe:\n            httpGet: { path: /health/live, port: 8000 }\n            failureThreshold: 30\n            periodSeconds: 2\n          livenessProbe:\n            httpGet: { path: /health/live, port: 8000 }\n            periodSeconds: 10\n          readinessProbe:\n            httpGet: { path: /health/ready, port: 8000 }\n            periodSeconds: 5\n```\n\n```yaml\n# service.yaml + configmap.yaml\napiVersion: v1\nkind: Service\nmetadata: { name: orders-api }\nspec:\n  selector: { app: orders-api }\n  ports: [{ port: 80, targetPort: 8000 }]\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: { name: orders-config }\ndata:\n  LOG_LEVEL: \"INFO\"\n  DB_HOST: \"postgres.default.svc\"\n```\n\n```bash\nkubectl apply -f deployment.yaml -f service.yaml\nkubectl rollout status deploy/orders-api\nkubectl get pods -l app=orders-api -o wide\nkubectl describe pod <pod>              # events: probe failures, OOMKilled\nkubectl logs <pod> --previous           # logs of the crashed container\nkubectl rollout undo deploy/orders-api\nkubectl scale deploy/orders-api --replicas=5\n```",
+  "use_cases_md": "- Running a FastAPI service with 3 replicas, zero-downtime rolling updates and automatic restarts.\n- Scheduled data imports as CronJobs; one-off migrations as Jobs.\n- Injecting environment-specific config via ConfigMaps and credentials via Secrets.\n- Autoscaling workers on CPU or queue length (HPA/KEDA).\n- Isolating dev, staging and prod in namespaces.",
+  "mistakes_md": "- **No resource requests/limits**: noisy neighbours, OOM kills and poor scheduling.\n- **Liveness probe checks dependencies** or is too aggressive: restart storms (use readiness for dependencies, startup probe for slow boot).\n- **Using `latest` image tags**: unpredictable rollouts; use immutable version tags or digests.\n- **Treating Secrets as encrypted**: base64 is encoding, not encryption.\n- **Ignoring SIGTERM**: dropped requests during deploys.\n- **Selector/label mismatch**: the Service has no endpoints.\n- **Storing state in pod filesystem** (ephemeral).\n- **Running as root, privileged**: set `securityContext` (`runAsNonRoot`, drop capabilities).",
+  "best_practices_md": "- Declarative YAML in Git (GitOps); one Deployment per stateless service.\n- Set requests and memory limits; use HPA where load varies.\n- Separate startup, liveness (cheap) and readiness probes.\n- Immutable image tags; rolling update with `maxUnavailable: 0` for critical services; PodDisruptionBudget.\n- Config via ConfigMap, secrets via Secret plus encryption and RBAC or an external secrets operator.\n- Handle SIGTERM; set a suitable grace period.\n- Use namespaces, labels and `securityContext`.",
+  "my_context_md": "The learner's code runs on AWS ECS per service names such as `ECSInventoryPriceTracking`. ECS tasks and services map closely to Pods and Deployments, task health checks to probes, and Secrets Manager (used in `AmazonVendorBankRecon/db.py`) to an external secrets approach. Compare one ECS service definition you know to the YAML above to see the equivalents.",
+  "revision_notes_md": "- Declarative: desired state in etcd; controllers reconcile; scheduler places pods; kubelet runs them.\n- Pod = shared network/volumes, ephemeral. Deployment -> ReplicaSet -> Pods; rolling updates, `rollout undo`.\n- Service = stable IP/DNS, selects pods by labels; types ClusterIP/NodePort/LoadBalancer; Ingress for HTTP routing.\n- ConfigMap (config) vs Secret (base64, not encrypted by default).\n- requests = scheduling guarantee; memory limit exceeded = OOMKilled; CPU limit = throttling.\n- Probes: startup (slow boot), liveness (restart), readiness (traffic).\n- SIGTERM then grace period then SIGKILL.\n- Debug: describe, logs --previous, exec; CrashLoopBackOff, ImagePullBackOff, Pending.",
+  "exercises_md": "1. Install kind or minikube, deploy a small image with 2 replicas and a ClusterIP Service, then `kubectl port-forward` to call it.\n2. Break the readiness probe path and observe `kubectl get endpoints` and pod `READY` status; fix it.\n3. Set a 64Mi memory limit on a container that allocates 200 MB and read the `OOMKilled` reason in `describe pod`.\n4. Change the image tag and watch the rolling update with `rollout status`; then run `rollout undo`.",
+  "related": [
+    "be-docker-basics",
+    "be-docker-compose-multistage",
+    "ecs-fargate",
+    "be-observability-basics",
+    "be-system-design-fundamentals",
+    "be-microservices"
+  ],
+  "flashcards": [
+    {
+      "front": "What does a Deployment manage?",
+      "back": "A ReplicaSet of identical pods, with rolling updates and rollbacks."
+    },
+    {
+      "front": "Liveness vs readiness probe?",
+      "back": "Liveness failure restarts the container; readiness failure removes the pod from Service endpoints."
+    },
+    {
+      "front": "requests vs limits?",
+      "back": "Requests are reserved for scheduling; limits are caps (memory overrun = OOMKilled, CPU = throttled)."
+    },
+    {
+      "front": "Are Kubernetes Secrets encrypted by default?",
+      "back": "No, they are base64-encoded; enable encryption at rest and RBAC."
+    },
+    {
+      "front": "What does a Service do?",
+      "back": "Gives a stable IP/DNS and load-balances to pods selected by labels."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which object keeps N identical stateless pods running and handles rolling updates?",
+      "options": [
+        "Deployment",
+        "Pod",
+        "ConfigMap",
+        "Namespace"
+      ],
+      "answer_index": 0,
+      "explanation": "Deployment manages ReplicaSets."
+    },
+    {
+      "type": "mcq",
+      "prompt": "A container exceeds its memory limit. What happens?",
+      "options": [
+        "It is throttled",
+        "It is OOMKilled",
+        "Nothing",
+        "The node reboots"
+      ],
+      "answer_index": 1,
+      "explanation": "Memory overrun means the kernel kills the container."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which probe failure removes a pod from the Service's endpoints without restarting it?",
+      "options": [
+        "Liveness",
+        "Readiness",
+        "Startup",
+        "Heartbeat"
+      ],
+      "answer_index": 1,
+      "explanation": "Readiness controls traffic."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which is TRUE about Kubernetes Secrets by default?",
+      "options": [
+        "They are encrypted in etcd",
+        "They are base64-encoded, not encrypted",
+        "They cannot be mounted as files",
+        "They are public"
+      ],
+      "answer_index": 1,
+      "explanation": "Enable encryption at rest separately."
+    },
+    {
+      "type": "mcq",
+      "prompt": "How does a Service know which pods to route to?",
+      "options": [
+        "Pod names",
+        "Label selectors",
+        "IP ranges",
+        "Namespaces only"
+      ],
+      "answer_index": 1,
+      "explanation": "Selector matches labels."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The state where a container keeps crashing and restarting is called ____BackOff.",
+      "answers": [
+        "crashloop",
+        "crash loop"
+      ],
+      "explanation": "CrashLoopBackOff."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The default Service type that is reachable only inside the cluster is ____.",
+      "answers": [
+        "clusterip",
+        "cluster ip"
+      ],
+      "explanation": "ClusterIP."
+    },
+    {
+      "type": "debug",
+      "prompt": "The Service exists but requests time out and `kubectl get endpoints orders-api` is empty. What is wrong?",
+      "code": "apiVersion: v1\nkind: Service\nmetadata: { name: orders-api }\nspec:\n  selector: { app: orders }\n  ports: [{ port: 80, targetPort: 8000 }]\n---\n# pod template labels: app: orders-api",
+      "answer": "The Service selector `app: orders` does not match the pod label `app: orders-api`, so no endpoints are selected. Fix the selector (or labels) so they match exactly; also confirm readiness probes pass because unready pods are excluded.",
+      "rubric": [
+        "Selector/label mismatch",
+        "Empty endpoints symptom",
+        "Also check readiness"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how Kubernetes' reconcile loop keeps your app running.",
+      "answer": "You declare desired state (3 replicas of an image). Controllers continuously compare actual state with desired state and act: if a pod dies or a node fails, the ReplicaSet controller creates a replacement and the scheduler places it. The system is eventually consistent and self-healing; you edit the desired state, not individual containers.",
+      "rubric": [
+        "Declarative desired state",
+        "Controllers reconcile continuously",
+        "Self-healing example"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How would you roll out a new version with zero downtime and roll back if it fails?",
+      "answer": "Update the Deployment's image tag. With `maxUnavailable: 0` and `maxSurge: 1` new pods start first, and readiness probes ensure traffic only reaches ready pods; old pods terminate gracefully after SIGTERM handling. Watch with `kubectl rollout status`; if it fails or metrics worsen, run `kubectl rollout undo deployment/<name>`. Also keep PodDisruptionBudgets and sensible probes.",
+      "rubric": [
+        "Rolling update settings",
+        "Readiness gates traffic",
+        "rollout undo"
+      ]
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which setting gives the scheduler the guaranteed amount of CPU/memory for a pod?",
+      "options": [
+        "limits",
+        "requests",
+        "replicas",
+        "selector"
+      ],
+      "answer_index": 1,
+      "explanation": "Requests are used for scheduling decisions."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain the difference between a Pod, ReplicaSet and Deployment.",
+      "difficulty": "easy",
+      "answer_md": "A Pod is one or more containers sharing network and storage; it is ephemeral. A ReplicaSet ensures a given number of identical pods are running. A Deployment manages ReplicaSets to provide declarative updates: changing the pod template creates a new ReplicaSet and gradually shifts replicas (rolling update), keeping old ones for rollback."
+    },
+    {
+      "question": "How do liveness, readiness and startup probes differ and how can they go wrong?",
+      "difficulty": "medium",
+      "answer_md": "Startup delays the other probes until a slow app finishes booting. Liveness restarts a container that is stuck; readiness gates traffic by removing the pod from endpoints. Mistakes: liveness that checks the database (restart storms during outages), probes with too short timeouts under load, or no readiness probe so traffic hits pods still warming up."
+    },
+    {
+      "question": "How do config and secrets get into a pod, and what are the security caveats?",
+      "difficulty": "medium",
+      "answer_md": "ConfigMaps and Secrets can be exposed as environment variables or mounted files. Env vars are read at start; mounted files can update without restarts (with a short delay). Secrets are only base64-encoded unless encryption at rest is enabled, so restrict access with RBAC, avoid logging env, and consider an external secrets manager (AWS Secrets Manager via an operator or CSI driver)."
+    }
+  ]
+}

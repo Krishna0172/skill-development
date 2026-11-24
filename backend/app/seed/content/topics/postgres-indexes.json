@@ -1,0 +1,123 @@
+{
+  "slug": "postgres-indexes",
+  "title": "PostgreSQL Indexes: B-tree, Composite, Partial, GIN and BRIN",
+  "skill": "sql-indexing",
+  "extra_skills": [
+    "postgresql",
+    "query-optimization"
+  ],
+  "category": "Database",
+  "difficulty": "intermediate",
+  "tags": [
+    "postgresql",
+    "indexes",
+    "b-tree",
+    "composite-index",
+    "partial-index",
+    "gin",
+    "brin"
+  ],
+  "summary": "An index is a separate sorted structure that lets PostgreSQL find rows without scanning the whole table, much like a book index. B-tree is the default and handles =, <, >, BETWEEN, ORDER BY and prefix LIKE. Indexes speed up reads but slow down every INSERT/UPDATE/DELETE and take disk space, so add them for real query patterns, not just in case.",
+  "details_md": "### How a B-tree lookup works\nA B-tree keeps keys sorted in pages, with a few levels of internal pages above the leaf pages. A lookup walks root to leaf (usually 3–4 page reads even for hundreds of millions of rows), then follows the leaf entry's **TID** (tuple pointer) to the row in the table heap. Range scans walk leaf pages sideways in key order.\n\n### Scan types you will see in EXPLAIN\n- **Index Scan**: walk the index, fetch each matching heap row. Best for few rows.\n- **Index Only Scan**: all needed columns are in the index, so the heap is skipped for pages marked all-visible in the **visibility map** (kept current by VACUUM).\n- **Bitmap Index Scan + Bitmap Heap Scan**: collect matching TIDs into a bitmap, then read heap pages in physical order. Good for medium selectivity and for combining several indexes (BitmapAnd / BitmapOr).\n- **Seq Scan**: read the whole table. Often *correct* when a query returns a large fraction of rows.\n\n### Composite indexes and column order\nAn index on `(orgid, order_date)` is sorted by `orgid` first, then `order_date` within each orgid. It serves:\n- `WHERE orgid = 7`\n- `WHERE orgid = 7 AND order_date >= '2024-01-01'`\n- `WHERE orgid = 7 ORDER BY order_date DESC LIMIT 20` (no sort needed)\n\nIt is poor for `WHERE order_date >= ...` alone, because the leading column isn't constrained (PG 18 adds skip scans that help some of these cases, but don't design around it). Rule of thumb: **equality columns first, then the range/sort column**.\n\n### Covering indexes\n`CREATE INDEX ... ON orders (customer_id) INCLUDE (total, status)` stores extra payload columns in the leaf pages to enable index-only scans without making them part of the key.\n\n### Partial and expression indexes\n- **Partial**: `CREATE INDEX ... ON fs_jobs (created_at) WHERE status = 'Processing'` indexes only the rows you query, so it stays small and fast. The query's WHERE must imply the index predicate.\n- **Expression**: `CREATE INDEX ... ON customers (lower(email))` supports `WHERE lower(email) = ...`. Without it, wrapping an indexed column in a function disables the index.\n\n### Other index types\n- **GIN**: inverted index for `jsonb` containment (`@>`), arrays, full-text search, and `pg_trgm` for `ILIKE '%abc%'`.\n- **BRIN**: tiny block-range summaries; great for huge append-only tables where values correlate with physical order (event timestamps).\n- **Hash**: equality only; rarely better than B-tree.\n- **GiST / SP-GiST**: geometric data, ranges, exclusion constraints.\n\n### Costs\nEvery index must be updated on INSERT and on UPDATE of indexed columns. Updates of non-indexed columns can be **HOT** updates (no index maintenance) if there is free space on the page, and an extra index on a frequently updated column kills that. Indexes also bloat and need VACUUM/REINDEX.\n\n### Operational notes\n- `CREATE INDEX CONCURRENTLY` avoids blocking writes (slower, cannot run inside a transaction block; check for an INVALID index if it fails).\n- PostgreSQL does **not** index foreign-key columns automatically.\n- Find unused indexes via `pg_stat_user_indexes.idx_scan = 0`.\n- Low-selectivity columns (a boolean with 50/50 values) rarely benefit from a plain index.",
+  "code_md": "```sql\n-- orders(id PK, orgid, customer_id, status, order_date, total)\n\n-- 1) Composite index: equality column first, then range/sort column\nCREATE INDEX CONCURRENTLY idx_orders_org_date\n    ON orders (orgid, order_date DESC);\n\n-- Served efficiently (no Sort node, stops after 20 rows):\nSELECT id, total FROM orders\nWHERE orgid = 7\nORDER BY order_date DESC\nLIMIT 20;\n```\n\n```sql\n-- 2) Covering index for an index-only scan\nCREATE INDEX idx_orders_customer_cover\n    ON orders (customer_id) INCLUDE (total, status);\n\nSELECT customer_id, total, status FROM orders WHERE customer_id = 42;\n-- EXPLAIN shows \"Index Only Scan\" (if the visibility map is up to date)\n```\n\n```sql\n-- 3) Partial and expression indexes\n-- Only a few rows are 'Processing' at any time: tiny, hot index\nCREATE INDEX idx_upload_processing\n    ON upload_jobs (created_at)\n    WHERE status = 'Processing';\n\nSELECT * FROM upload_jobs\nWHERE status = 'Processing' AND created_at < now() - interval '1 hour';   -- uses it\n\n-- Case-insensitive lookup\nCREATE INDEX idx_customers_email_lower ON customers (lower(email));\nSELECT * FROM customers WHERE lower(email) = lower('A@x.com');            -- uses it\n```\n\n```sql\n-- 4) GIN for jsonb, BRIN for huge append-only tables, and checking usage\nCREATE INDEX idx_orders_meta ON orders USING gin (metadata jsonb_path_ops);\nSELECT id FROM orders WHERE metadata @> '{\"channel\": \"amazon\"}';\n\nCREATE INDEX idx_events_ts_brin ON events USING brin (created_at);\n\n-- Which indexes are never used?\nSELECT relname, indexrelname, idx_scan, pg_size_pretty(pg_relation_size(indexrelid))\nFROM pg_stat_user_indexes\nORDER BY idx_scan ASC, pg_relation_size(indexrelid) DESC;\n```",
+  "use_cases_md": "- Multi-tenant lookups: `(orgid, ...)` composite indexes so every tenant-scoped query is selective.\n- Pagination and \"latest N\" lists: an index matching `WHERE ... ORDER BY ... LIMIT`.\n- Job/status tables: partial index on the small \"active\" subset.\n- Unique business keys for upserts (`UNIQUE (id, orgid)`), which double as lookup indexes.\n- JSONB attribute search with GIN; substring search with `pg_trgm` GIN.\n- Time-series/log tables with BRIN to keep index size tiny.",
+  "mistakes_md": "- **Wrong column order in a composite index** (range column first): the index can't narrow on the equality column. Put equality columns first.\n- **Functions or casts on the indexed column** (`WHERE date(order_date) = ...`, `WHERE id::text = '5'`): the index is skipped. Rewrite as a range (`order_date >= d AND order_date < d + 1`) or add an expression index.\n- **Leading-wildcard LIKE** (`LIKE '%abc'`) on a B-tree: can't use it. Use a pg_trgm GIN index.\n- **Indexing everything**: slows writes and bulk loads and prevents HOT updates. Index for measured queries and drop unused ones.\n- **Missing FK indexes**: joins and `ON DELETE` checks scan the child table. Index the FK columns you join on.\n- **Plain CREATE INDEX on a busy production table**: blocks writes for the duration. Use `CONCURRENTLY`.\n- **Expecting an index on low-cardinality columns to help**: the planner will rightly choose a Seq Scan.",
+  "best_practices_md": "- Design indexes from actual queries (`WHERE`, `JOIN`, `ORDER BY`) and verify with `EXPLAIN (ANALYZE, BUFFERS)`.\n- Prefer one well-ordered composite index over several single-column ones for a hot query.\n- Use partial indexes for skewed status columns.\n- Keep statistics fresh (`ANALYZE` after big loads) so the planner picks indexes correctly.\n- For big bulk loads into empty tables, create secondary indexes after loading.\n- Monitor `pg_stat_user_indexes` and index bloat; drop what isn't used.",
+  "my_context_md": "Your upserts depend on unique indexes: `ON CONFLICT (id, orgid)` only works because a unique constraint or index on `(id, orgid)` exists, and every row in a batch probes that index. Because the data is multi-tenant, indexes for reporting and reconciliation queries should normally start with `orgid`. On Citus, indexes are created on each shard, and unique constraints have to include the distribution column, which is a reason the conflict key includes `orgid`. A partial index such as `WHERE status = 'Processing'` is the kind of index that would keep lookups on the `fs_upload` tracking table fast as it grows.",
+  "related": [
+    "explain-analyze",
+    "postgres-upsert",
+    "sql-joins",
+    "database-normalization",
+    "transactions-isolation"
+  ],
+  "flashcards": [
+    {
+      "front": "Rule of thumb for composite index column order?",
+      "back": "Equality-filtered columns first, then the range or ORDER BY column."
+    },
+    {
+      "front": "What enables an Index Only Scan?",
+      "back": "All needed columns are in the index (key or INCLUDE) and heap pages are all-visible in the visibility map."
+    },
+    {
+      "front": "Why does `WHERE lower(email) = 'x'` ignore an index on email?",
+      "back": "The function changes the value; you need an expression index on lower(email)."
+    },
+    {
+      "front": "What is a partial index?",
+      "back": "An index with a WHERE predicate that covers only a subset of rows, e.g. WHERE status = 'Processing'."
+    },
+    {
+      "front": "Which index type for jsonb @> queries?",
+      "back": "GIN (jsonb_ops or jsonb_path_ops)."
+    },
+    {
+      "front": "How do you add an index without blocking writes?",
+      "back": "`CREATE INDEX CONCURRENTLY` (not inside a transaction block)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Index on (orgid, order_date). Which query can use it LEAST effectively?",
+      "options": [
+        "WHERE orgid = 3",
+        "WHERE orgid = 3 AND order_date > '2024-01-01'",
+        "WHERE order_date > '2024-01-01'",
+        "WHERE orgid = 3 ORDER BY order_date"
+      ],
+      "answer_index": 2,
+      "explanation": "Without the leading column constrained, the B-tree can't be narrowed efficiently."
+    },
+    {
+      "question": "Which predicate can use a plain B-tree index on `order_date` (timestamp)?",
+      "options": [
+        "WHERE date(order_date) = '2024-05-01'",
+        "WHERE order_date::text LIKE '2024-05%'",
+        "WHERE extract(month FROM order_date) = 5",
+        "WHERE order_date >= '2024-05-01' AND order_date < '2024-05-02'"
+      ],
+      "answer_index": 3,
+      "explanation": "A sargable range on the raw column uses the index; the others wrap the column in a function or cast."
+    },
+    {
+      "question": "Best index type for a 2-billion-row append-only events table filtered by created_at?",
+      "options": [
+        "BRIN",
+        "Hash",
+        "GIN",
+        "GiST"
+      ],
+      "answer_index": 0,
+      "explanation": "BRIN stores min/max per block range; tiny and effective when values correlate with physical order."
+    },
+    {
+      "question": "What is a downside of adding an index on a frequently updated column?",
+      "options": [
+        "It disables VACUUM",
+        "It prevents HOT updates and adds write overhead",
+        "It makes SELECTs slower",
+        "It changes query results"
+      ],
+      "answer_index": 1,
+      "explanation": "HOT updates are only possible when no indexed column changes."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you decide the column order for a composite index?",
+      "difficulty": "medium",
+      "answer_md": "A B-tree on `(a, b, c)` is sorted by `a`, then `b` within `a`, then `c`. It can efficiently answer queries that constrain a **leftmost prefix**.\n\nGuidelines:\n1. **Equality columns first**, range or sort columns last. For `WHERE orgid = $1 AND status = $2 AND order_date >= $3 ORDER BY order_date`, use `(orgid, status, order_date)`. Once a range condition appears, columns after it can't narrow the scan.\n2. Make the index **match ORDER BY** (including direction) so `LIMIT` queries stop early without a Sort.\n3. Among equality columns, order matters less for that query, so choose the order that lets the **same index serve other queries** (e.g. `orgid` first serves all tenant-scoped queries).\n4. Consider `INCLUDE` columns to make hot queries index-only.\n\n```sql\nCREATE INDEX ON orders (orgid, status, order_date DESC) INCLUDE (total);\n```\n\nThen confirm with `EXPLAIN (ANALYZE, BUFFERS)`: look for `Index Cond` covering all the columns and no separate `Sort` node."
+    },
+    {
+      "question": "Why might PostgreSQL ignore an index you created?",
+      "difficulty": "medium",
+      "answer_md": "Common reasons:\n- **Low selectivity**: the query returns a large share of the table; a sequential scan is cheaper than many random heap reads. This is often the right decision.\n- **Non-sargable predicate**: a function/cast on the column (`date(ts)`, `col::text`), a leading wildcard `LIKE '%x'`, or mismatched types. Fix the predicate or create an expression/trigram index.\n- **Leading column not constrained** in a composite index.\n- **Stale statistics**: after a big load the planner thinks the table is tiny or the value is rare. Run `ANALYZE`.\n- **Small tables**: a seq scan over a few pages beats any index.\n- **Partial index predicate not implied** by the query's WHERE (e.g. a parameterised value the planner can't prove).\n- **Cost settings**: `random_page_cost = 4` (the default) is tuned for spinning disks; on SSDs, ~1.1 makes index scans look appropriately cheaper.\n\nTo diagnose, compare `EXPLAIN ANALYZE` estimated vs actual rows, and test with `SET enable_seqscan = off` in a session (for diagnosis only) to see the index plan's real cost."
+    },
+    {
+      "question": "What is the cost of indexes on write-heavy ETL tables, and how do you manage it?",
+      "difficulty": "hard",
+      "answer_md": "Each INSERT must add an entry to **every** index; each UPDATE that changes an indexed column, or that can't be done as a **HOT** update, inserts new entries into every index (the old ones are cleaned by VACUUM later). More indexes mean more WAL, more I/O, more bloat and slower bulk loads. Unique indexes also add a uniqueness check.\n\nManaging it:\n- Keep only indexes that are used (`pg_stat_user_indexes.idx_scan`) and that serve important queries.\n- Avoid indexing columns that change frequently (status timestamps) unless needed; this keeps updates HOT. A lower `fillfactor` (e.g. 90) leaves room on pages for HOT updates.\n- For **initial bulk loads** into a new table: load first, then `CREATE INDEX` (sorted builds are much faster than incremental inserts).\n- For recurring upserts: keep the conflict-key unique index plus the minimum needed for reads; skip no-op updates with `WHERE ... IS DISTINCT FROM ...` to avoid creating dead tuples.\n- Tune autovacuum for hot tables (`autovacuum_vacuum_scale_factor` per table) so bloat stays under control.\n- Use `REINDEX CONCURRENTLY` for bloated indexes."
+    }
+  ]
+}

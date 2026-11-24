@@ -1,0 +1,140 @@
+{
+  "slug": "group-orders-by-status",
+  "title": "Group order IDs by status",
+  "category": "python",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "python",
+  "concepts": [
+    "dict grouping",
+    "defaultdict",
+    "data normalisation"
+  ],
+  "related_topics": [
+    "python-data-structures"
+  ],
+  "problem_md": "An orders report gives you a list of order records (dicts). Ops wants a quick view of which orders are in which status.\n\nImplement:\n\n```python\ndef group_order_ids_by_status(orders: list[dict]) -> dict[str, list[str]]:\n```\n\nRules:\n- Each order has an `\"order_id\"` and usually a `\"status\"`.\n- Normalise the status: strip whitespace and lowercase it (`\" Shipped\"` and `\"SHIPPED\"` are both `\"shipped\"`).\n- If `\"status\"` is missing, `None`, or blank after stripping, use `\"unknown\"`.\n- Within each status, keep order IDs in the order they appear in the input.\n- An empty input returns `{}`.",
+  "examples": [
+    {
+      "input": "orders = [{'order_id': 'O1', 'status': 'Shipped'}, {'order_id': 'O2', 'status': 'pending'}, {'order_id': 'O3', 'status': 'SHIPPED'}]",
+      "output": "{'shipped': ['O1', 'O3'], 'pending': ['O2']}"
+    }
+  ],
+  "hints": [
+    "Build up a dict where each key is a normalised status and each value is a list.",
+    "`dict.setdefault(key, [])` or `collections.defaultdict(list)` saves you the 'is the key there yet?' check.",
+    "`status = (order.get('status') or '').strip().lower() or 'unknown'` handles missing, None and blank in one line."
+  ],
+  "starter_code": "def group_order_ids_by_status(orders: list[dict]) -> dict[str, list[str]]:\n    # your code here\n    ...\n",
+  "solution_code": "from collections import defaultdict\n\n\ndef group_order_ids_by_status(orders: list[dict]) -> dict[str, list[str]]:\n    groups = defaultdict(list)\n    for order in orders:\n        status = (order.get(\"status\") or \"\").strip().lower() or \"unknown\"\n        groups[status].append(order[\"order_id\"])\n    return dict(groups)\n",
+  "solution_md": "Single pass with a `defaultdict(list)`: normalise the status, then append the order ID to that bucket. Appending in input order keeps each list in input order.\n\n`(order.get(\"status\") or \"\")` turns both a missing key and `None` into `\"\"`; after `.strip().lower()`, a trailing `or \"unknown\"` catches blanks.\n\n- **Time:** O(n)\n- **Space:** O(n)\n\nReturning `dict(groups)` converts back to a plain dict so callers don't get surprise keys created by lookups.\n\nIn pandas the same thing is `df.assign(status=...).groupby(\"status\")[\"order_id\"].apply(list).to_dict()` — handy for big reports, overkill for a list of dicts.",
+  "tests": {
+    "function": "group_order_ids_by_status",
+    "cases": [
+      {
+        "args": [
+          [
+            {
+              "order_id": "O1",
+              "status": "Shipped"
+            },
+            {
+              "order_id": "O2",
+              "status": "pending"
+            },
+            {
+              "order_id": "O3",
+              "status": "SHIPPED"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "shipped": [
+            "O1",
+            "O3"
+          ],
+          "pending": [
+            "O2"
+          ]
+        }
+      },
+      {
+        "args": [
+          []
+        ],
+        "kwargs": {},
+        "expected": {}
+      },
+      {
+        "args": [
+          [
+            {
+              "order_id": "O1",
+              "status": "  Delivered "
+            },
+            {
+              "order_id": "O2",
+              "status": "delivered"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "delivered": [
+            "O1",
+            "O2"
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "order_id": "O1"
+            },
+            {
+              "order_id": "O2",
+              "status": null
+            },
+            {
+              "order_id": "O3",
+              "status": "   "
+            },
+            {
+              "order_id": "O4",
+              "status": "cancelled"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "unknown": [
+            "O1",
+            "O2",
+            "O3"
+          ],
+          "cancelled": [
+            "O4"
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "order_id": "O9",
+              "status": "returned"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "returned": [
+            "O9"
+          ]
+        }
+      }
+    ]
+  }
+}

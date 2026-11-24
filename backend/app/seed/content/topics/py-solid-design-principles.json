@@ -1,0 +1,155 @@
+{
+  "slug": "py-solid-design-principles",
+  "title": "SOLID and composition in Python",
+  "skill": "python-oop",
+  "extra_skills": [
+    "backend-architecture",
+    "python-typing"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "solid",
+    "composition",
+    "protocols",
+    "dependency-inversion",
+    "refactoring"
+  ],
+  "summary": "SOLID translated to idiomatic Python: small single-purpose units, extension through composition and registries instead of if/elif chains, substitutable implementations, narrow interfaces via `typing.Protocol`, and high-level logic that depends on abstractions passed in rather than concrete clients it creates. Applied to breaking up long procedural ETL functions.",
+  "why_md": "- A 300-line `process_report()` that downloads, parses, cleans, writes to Postgres and emails is untestable: you can't run any step without all of them.\n- SOLID gives a vocabulary for *where* to cut such functions and is a standard senior-backend interview topic.\n- Dependency inversion is what makes unit tests possible without patching boto3/psycopg2 everywhere.\n- The same structure (pluggable parsers, stores, LLM clients) is how AI backends swap models and vector stores.",
+  "details_md": "### S — Single Responsibility\nA unit should have one *reason to change*. In ETL that usually means separating: **fetch** (S3/API), **parse** (bytes → DataFrame), **transform** (pure business rules), **load** (SQL), **notify**. Pure transforms become trivially testable.\n\n### O — Open/Closed\nAdd behaviour by adding code, not editing a growing `if marketplace == ...` chain. In Python: a dict registry of handlers, strategy objects, or plain functions passed in.\n\n### L — Liskov Substitution\nA subtype must honour the base contract: same accepted inputs (or wider), same guarantees on outputs, no new surprise exceptions. A `ReadOnlyRepo(Repo)` that raises on `save()` violates LSP — model it as a separate, narrower interface instead.\n\n### I — Interface Segregation\nClients shouldn't depend on methods they don't use. Prefer several small Protocols (`RowSource`, `RowSink`) over one fat `DataManager` base class.\n\n### D — Dependency Inversion\nHigh-level policy (\"process this report\") depends on abstractions; concrete details (boto3, psycopg2) are plugged in from outside. In Python, `typing.Protocol` gives *structural* typing: any object with matching methods satisfies it, no inheritance needed. Construction happens at the edge (`main()`/handler), and dependencies are passed as parameters.\n\n### Composition over inheritance\nInheritance couples you to the parent's internals and creates deep hierarchies (`BaseProcessor → AmazonProcessor → AmazonVendorProcessor`). Composition — an object *holding* a parser, a writer, a notifier — lets you mix behaviours independently and swap them in tests. Use inheritance for true *is-a* relationships and small template hooks; use composition for *has-a* and pluggable behaviour.\n\n### Refactoring a long procedural function\n1. Write a characterisation test around the current function with a small input file.\n2. Extract pure steps first (transform), then I/O (load, fetch) behind small interfaces.\n3. Replace globals and module-level clients with constructor/function parameters.\n4. Leave an orchestrator that reads like a recipe: `rows = parse(fetch(key)); sink.write(transform(rows))`.\n\nDon't over-apply: a 20-line script doesn't need five Protocols. SOLID is a tool to reduce change cost where change actually happens.",
+  "code_md": "```python\n# Before: one function, hard-wired dependencies\ndef process(key):\n    s3 = boto3.client(\"s3\")\n    df = pd.read_csv(s3.get_object(Bucket=BUCKET, Key=key)[\"Body\"])\n    df = df[df.qty > 0]\n    conn = psycopg2.connect(DSN)\n    ...  # 200 more lines\n\n# After: small Protocols + composition + injection\nfrom typing import Protocol\nimport pandas as pd\n\nclass Source(Protocol):\n    def read(self, key: str) -> bytes: ...\n\nclass Sink(Protocol):\n    def write(self, df: pd.DataFrame) -> int: ...\n\ndef clean(df: pd.DataFrame) -> pd.DataFrame:      # pure -> easy to test\n    return df[df[\"qty\"] > 0].rename(columns=str.lower)\n\nclass ReportProcessor:\n    def __init__(self, source: Source, sink: Sink, parse=pd.read_csv):\n        self.source, self.sink, self.parse = source, sink, parse\n\n    def run(self, key: str) -> int:\n        import io\n        df = self.parse(io.BytesIO(self.source.read(key)))\n        return self.sink.write(clean(df))\n```\n\n```python\n# Wiring at the edge (handler / main); tests pass fakes instead\nclass S3Source:\n    def __init__(self, client, bucket):\n        self.client, self.bucket = client, bucket\n    def read(self, key):\n        return self.client.get_object(Bucket=self.bucket, Key=key)[\"Body\"].read()\n\nclass FakeSink:                      # satisfies Sink structurally\n    def __init__(self): self.frames = []\n    def write(self, df): self.frames.append(df); return len(df)\n\ndef main():\n    proc = ReportProcessor(S3Source(boto3.client(\"s3\"), \"reports\"), PgSink(pool))\n    proc.run(\"amazon/settlement.csv\")\n```",
+  "use_cases_md": "- Splitting a marketplace report processor into parse / transform / load so each of 150 processors reuses the same loader.\n- Swapping a Postgres sink for a CSV sink in local dry-runs.\n- An `LLMClient` Protocol so the chat backend can switch providers or use a fake in tests.\n- Notification strategy (SES email, Slack, no-op) selected by config instead of `if` branches.\n- Replacing `global` DB connections with an injected connection pool.",
+  "mistakes_md": "- **God base class**: `BaseProcessor` with 40 methods subclasses must override half of. Fix: compose small collaborators.\n- **Creating dependencies inside logic** (`boto3.client()` deep in a function): forces patching in tests. Fix: pass it in, construct at the edge.\n- **Subclass that breaks the contract** (raises `NotImplementedError` for an inherited method): LSP violation. Fix: narrower interface.\n- **Abstraction for its own sake**: interfaces with one implementation and no test seam. Fix: introduce them when a second implementation or a test needs it.\n- **Refactoring without tests**: behaviour drifts. Fix: characterisation test first.",
+  "best_practices_md": "- Prefer functions and small classes; keep business rules pure (DataFrame in, DataFrame out).\n- Use `typing.Protocol` for seams; ABCs only when you need shared implementation or runtime enforcement.\n- Inject dependencies via `__init__` or function parameters; build the object graph in one place.\n- Replace `if/elif` dispatch on type/marketplace with a registry dict.\n- Keep inheritance shallow (1-2 levels); favour composition.\n- Refactor in small, test-covered steps.",
+  "my_context_md": "The repo audit found **641 functions over 100 lines** and **342 `global` statements** — the classic symptoms SRP and DIP address. `ECSMarketplaceDataUpload` already has an Open/Closed design at the top level: a registry dispatcher with lazy imports routing 150+ processors, so adding a marketplace means adding a module, not editing a chain. The next step is inside the processors themselves (pandas `read_csv/read_excel → rename/merge/groupby/apply` then DB write): extract the pure transform into its own function and inject the DB writer. `AmazonVendorBankRecon/db.py`'s `db_transaction()` context manager is a natural concrete `Sink` dependency to pass in rather than import.",
+  "revision_notes_md": "- SRP: one reason to change — split fetch / parse / transform / load / notify.\n- OCP: extend via registry/strategy, not by editing if/elif chains.\n- LSP: subtypes must honour the base contract (no surprise exceptions).\n- ISP: many small Protocols > one fat base class.\n- DIP: logic depends on abstractions; concrete clients injected from the edge.\n- `typing.Protocol` = structural typing, no inheritance needed.\n- Composition (has-a) for pluggable behaviour; inheritance for genuine is-a.\n- Refactor: characterisation test → extract pure core → inject I/O.",
+  "exercises_md": "1. Pick one 100+ line marketplace processor and draw its responsibilities as boxes; extract the pure transform into a function with a pytest using a 5-row DataFrame.\n2. Define `Source` and `Sink` Protocols and implement `S3Source`, `PgSink`, and `FakeSink`; run the processor with fakes in a test.\n3. Replace one `global conn` usage with a connection/pool passed as a parameter.\n4. Find an if/elif chain on marketplace or report type and convert it to a dict registry.",
+  "related": [
+    "py-clean-architecture",
+    "python-oop-dataclasses",
+    "python-typing",
+    "registry-dispatcher-pattern",
+    "py-testing-mocking",
+    "be-dependency-injection"
+  ],
+  "flashcards": [
+    {
+      "front": "What does Dependency Inversion mean in Python practice?",
+      "back": "High-level logic depends on an abstraction (often a `typing.Protocol`), and concrete clients (boto3, psycopg2) are constructed at the edge and passed in as parameters."
+    },
+    {
+      "front": "Protocol vs ABC?",
+      "back": "Protocol = structural typing checked by type checkers; any class with matching methods fits, no inheritance. ABC = nominal, must subclass, can enforce abstract methods at instantiation and share implementation."
+    },
+    {
+      "front": "Give an LSP violation example.",
+      "back": "`ReadOnlyRepo(Repo)` whose `save()` raises. Callers relying on `Repo.save` break when handed the subtype. Use a separate narrower interface."
+    },
+    {
+      "front": "When prefer composition over inheritance?",
+      "back": "When behaviour should be pluggable or mixed independently (parser, writer, notifier). Use inheritance only for true is-a with a stable contract."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A `report_processor()` function downloads from S3, parses, applies business rules, writes to Postgres, and sends an email. Which principle does it most directly violate?",
+      "options": [
+        "Liskov Substitution",
+        "Single Responsibility",
+        "Interface Segregation",
+        "None — it is cohesive"
+      ],
+      "answer_index": 1,
+      "explanation": "It has many reasons to change (storage, format, rules, DB schema, notifications)."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What is the main advantage of `typing.Protocol` over an ABC for dependency inversion?",
+      "options": [
+        "It is faster at runtime",
+        "It enforces method implementation at instantiation",
+        "It allows sharing method implementations",
+        "Existing/third-party classes satisfy it structurally without inheriting from it"
+      ],
+      "answer_index": 3,
+      "explanation": "Protocols are structural: anything with matching methods type-checks, including fakes and library classes you don't control."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The principle 'open for extension, closed for modification' is commonly implemented in Python with a dict ____ that maps keys to handler functions.",
+      "answers": [
+        "registry",
+        "lookup table",
+        "dispatch table",
+        "mapping"
+      ],
+      "explanation": "A registry lets you add handlers without editing the dispatch code."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To declare a structural interface for type checkers, subclass `typing.____`.",
+      "answers": [
+        "Protocol"
+      ],
+      "explanation": "`class Sink(Protocol): def write(self, df) -> int: ...`"
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from typing import Protocol\n\nclass Sink(Protocol):\n    def write(self, rows: list) -> int: ...\n\nclass ListSink:\n    def __init__(self):\n        self.rows = []\n    def write(self, rows):\n        self.rows.extend(rows)\n        return len(rows)\n\ndef load(rows, sink: Sink) -> int:\n    return sink.write([r for r in rows if r[\"qty\"] > 0])\n\ns = ListSink()\nprint(load([{\"qty\": 1}, {\"qty\": 0}, {\"qty\": 2}], s), len(s.rows))\nprint(isinstance(s, ListSink), issubclass(ListSink, object))",
+      "answers": [
+        "2 2\nTrue True"
+      ],
+      "explanation": "`ListSink` never inherits from `Sink` but works as one: the filter keeps 2 rows and the sink stores 2."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "class Report:\n    def __init__(self, parser, writer):\n        self.parser, self.writer = parser, writer\n    def run(self, raw):\n        return self.writer(self.parser(raw))\n\ndef csv_parser(raw):\n    return [line.split(\",\") for line in raw.splitlines()]\n\nprint(Report(csv_parser, lambda rows: f\"{len(rows)} rows\").run(\"a,1\\nb,2\\nc,3\"))\nprint(Report(csv_parser, lambda rows: rows[0]).run(\"a,1\\nb,2\"))",
+      "answers": [
+        "3 rows\n['a', '1']"
+      ],
+      "explanation": "Composition: the same Report class behaves differently depending on the writer injected."
+    },
+    {
+      "type": "debug",
+      "prompt": "This processor is impossible to unit-test without real AWS and Postgres. What's wrong and how do you fix it?",
+      "code": "import boto3, psycopg2\n\nclass SettlementProcessor:\n    def run(self, key):\n        s3 = boto3.client(\"s3\")\n        body = s3.get_object(Bucket=\"reports\", Key=key)[\"Body\"].read()\n        rows = [l.split(\",\") for l in body.decode().splitlines()[1:]]\n        rows = [r for r in rows if float(r[2]) != 0]\n        conn = psycopg2.connect(DSN)\n        with conn, conn.cursor() as cur:\n            cur.executemany(\"INSERT INTO settlement VALUES (%s,%s,%s)\", rows)",
+      "answer": "The class constructs its own concrete dependencies (S3 client, DB connection) inside the logic and mixes parsing, business rules and I/O in one method (SRP + DIP violations). Inject the dependencies and extract the pure part:\n\n```python\ndef parse(body: bytes) -> list[list[str]]:\n    return [l.split(\",\") for l in body.decode().splitlines()[1:]]\n\ndef non_zero(rows):\n    return [r for r in rows if float(r[2]) != 0]\n\nclass SettlementProcessor:\n    def __init__(self, source, sink):\n        self.source, self.sink = source, sink\n    def run(self, key):\n        self.sink.write(non_zero(parse(self.source.read(key))))\n\n# edge: SettlementProcessor(S3Source(boto3.client('s3'), 'reports'), PgSink(pool))\n# test: SettlementProcessor(FakeSource(b'...'), FakeSink())\n```",
+      "rubric": [
+        "Dependencies created inside the method (no seam for tests)",
+        "Inject source/sink via constructor or parameters",
+        "Extract pure parse/transform functions that can be tested alone"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain 'composition over inheritance' to a junior, using a report-processing example.",
+      "answer": "Inheritance shares behaviour by making a class a specialised version of another; composition shares behaviour by having an object hold collaborators and delegate to them. With inheritance, `AmazonCsvPostgresProcessor(CsvProcessor, PostgresWriter)` quickly explodes into a class for every combination of format x destination x marketplace, and subclasses depend on parent internals (fragile base class). With composition, `ReportProcessor(parser=CsvParser(), sink=PgSink(pool), rules=amazon_rules)` mixes independent pieces, each testable on its own, and tests just pass fakes. Use inheritance for genuine is-a relationships with a stable contract (e.g. custom exception hierarchies); use composition for pluggable behaviour.",
+      "rubric": [
+        "Inheritance = is-a, couples to parent internals; composition = has-a, delegates",
+        "Avoids class explosion for combinations of behaviours",
+        "Composed parts can be swapped/faked in tests"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Walk me through how you'd refactor a 400-line ETL function.",
+      "difficulty": "medium",
+      "answer_md": "1. **Pin behaviour**: write a characterisation test running the function on a small real-ish input file and asserting the rows written (with the DB call faked or against a test DB).\n2. **Map responsibilities**: fetch, parse, validate, transform, load, notify.\n3. **Extract pure code first**: `transform(df) -> df` functions with no I/O; unit-test each with tiny DataFrames.\n4. **Put I/O behind seams**: small `Source`/`Sink` Protocols, implementations wrapping boto3/psycopg2.\n5. **Inject**: pass dependencies as parameters; remove globals; construct everything in `main()`/handler.\n6. Keep an orchestrator that reads like a recipe:\n\n```python\ndef run(key, source, sink):\n    df = parse(source.read(key))\n    sink.write(transform(df))\n```\n\nShip in small commits, re-running the characterisation test each time."
+    },
+    {
+      "question": "Explain Liskov Substitution with a Python example.",
+      "difficulty": "medium",
+      "answer_md": "Code written against a base type must keep working with any subtype. Subtypes may accept more and promise more, not less.\n\n```python\nclass Repo:\n    def save(self, row): ...\n    def get(self, id): ...\n\nclass CachedRepo(Repo):   # fine: same contract, extra caching\n    ...\n\nclass ReadOnlyRepo(Repo):\n    def save(self, row):\n        raise NotImplementedError   # violates LSP\n```\n\nAny function calling `repo.save()` breaks when given `ReadOnlyRepo`. Fix by segregating interfaces: a `Reader` Protocol with `get` and a `Writer` Protocol with `save`; functions that only read depend on `Reader`. Other LSP smells: overriding a method to require stricter input types, returning `None` where the base returns a list, or changing units/meaning of a return value."
+    },
+    {
+      "question": "How do you do dependency injection in Python without a framework?",
+      "difficulty": "easy",
+      "answer_md": "Pass dependencies in as constructor or function arguments, and build the object graph once at the application edge (Lambda handler, `main()`, FastAPI startup).\n\n```python\nclass UploadService:\n    def __init__(self, s3, repo, clock=datetime.utcnow):\n        self.s3, self.repo, self.clock = s3, repo, clock\n\ndef handler(event, ctx):\n    svc = UploadService(boto3.client(\"s3\"), PgRepo(pool))\n    return svc.process(event)\n```\n\nTests construct `UploadService(FakeS3(), InMemoryRepo(), clock=lambda: FIXED)`. Default arguments or factory functions keep call sites short. Type the parameters with Protocols so mypy verifies fakes match. Frameworks (FastAPI `Depends`) are just conveniences on top of this."
+    }
+  ]
+}

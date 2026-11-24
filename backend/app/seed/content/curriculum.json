@@ -1,0 +1,643 @@
+{
+  "_note": "Learning tracks -> modules -> topics. label: demonstrated (strong evidence in your code: quick check + revise) | revise (used, may be forgotten) | deepen (used thinly) | new (not in your code). Derived from docs/03-work-repo-assessment.md.",
+  "tracks": [
+    {
+      "slug": "python",
+      "title": "Python Mastery",
+      "summary": "The most important track. Strengthen the language you use every day, fix the patterns found in your code (broad excepts, print logging, long functions), and reach interview-level depth.",
+      "modules": [
+        {
+          "title": "Python foundations (basic)",
+          "label": "new",
+          "topics": [
+            "py-variables-types-operators",
+            "py-strings-formatting",
+            "py-control-flow-loops",
+            "py-lists-tuples-sets-dicts-basics",
+            "py-comprehensions",
+            "py-functions-basics",
+            "py-oop-basics"
+          ],
+          "n": 23
+        },
+        {
+          "n": 1,
+          "title": "Python fundamentals",
+          "label": "revise",
+          "topics": [
+            "py-fundamentals-refresher"
+          ]
+        },
+        {
+          "n": 2,
+          "title": "Data structures",
+          "label": "demonstrated",
+          "topics": [
+            "python-data-structures"
+          ]
+        },
+        {
+          "n": 3,
+          "title": "Functions and scope",
+          "label": "revise",
+          "topics": [
+            "python-functions-args"
+          ]
+        },
+        {
+          "n": 4,
+          "title": "OOP and design principles",
+          "label": "deepen",
+          "topics": [
+            "python-oop-dataclasses",
+            "py-solid-design-principles"
+          ]
+        },
+        {
+          "n": 5,
+          "title": "Iterators and generators",
+          "label": "deepen",
+          "topics": [
+            "python-generators-iterators"
+          ]
+        },
+        {
+          "n": 6,
+          "title": "Decorators",
+          "label": "deepen",
+          "topics": [
+            "python-decorators"
+          ]
+        },
+        {
+          "n": 7,
+          "title": "Context managers",
+          "label": "demonstrated",
+          "topics": [
+            "python-context-managers"
+          ]
+        },
+        {
+          "n": 8,
+          "title": "Exception handling",
+          "label": "revise",
+          "topics": [
+            "python-exceptions"
+          ]
+        },
+        {
+          "n": 9,
+          "title": "File handling",
+          "label": "demonstrated",
+          "topics": [
+            "py-file-handling"
+          ]
+        },
+        {
+          "n": 10,
+          "title": "Modules and packages",
+          "label": "revise",
+          "topics": [
+            "py-modules-packages"
+          ]
+        },
+        {
+          "n": 11,
+          "title": "Virtual environments and dependencies",
+          "label": "revise",
+          "topics": [
+            "python-venv-pip"
+          ]
+        },
+        {
+          "n": 12,
+          "title": "Type hints",
+          "label": "deepen",
+          "topics": [
+            "python-typing"
+          ]
+        },
+        {
+          "title": "Python intermediate toolkit",
+          "label": "new",
+          "topics": [
+            "py-dunder-methods-protocols",
+            "py-itertools-functools-collections",
+            "py-datetime-json-regex"
+          ],
+          "n": 24
+        },
+        {
+          "n": 13,
+          "title": "Python internals and memory management",
+          "label": "new",
+          "topics": [
+            "py-internals-memory"
+          ]
+        },
+        {
+          "n": 14,
+          "title": "GIL and concurrency",
+          "label": "deepen",
+          "topics": [
+            "python-threading-gil"
+          ]
+        },
+        {
+          "n": 15,
+          "title": "Threading",
+          "label": "revise",
+          "topics": [
+            "py-threading-patterns"
+          ]
+        },
+        {
+          "n": 16,
+          "title": "Multiprocessing",
+          "label": "new",
+          "topics": [
+            "py-multiprocessing"
+          ]
+        },
+        {
+          "n": 17,
+          "title": "Asyncio and asynchronous programming",
+          "label": "deepen",
+          "topics": [
+            "python-asyncio"
+          ]
+        },
+        {
+          "n": 18,
+          "title": "Performance optimization",
+          "label": "deepen",
+          "topics": [
+            "py-performance",
+            "pandas-cleaning-performance"
+          ]
+        },
+        {
+          "n": 19,
+          "title": "Profiling and debugging",
+          "label": "new",
+          "topics": [
+            "py-profiling-debugging"
+          ]
+        },
+        {
+          "n": 20,
+          "title": "Testing with pytest",
+          "label": "deepen",
+          "topics": [
+            "pytest-essentials",
+            "py-testing-mocking"
+          ]
+        },
+        {
+          "n": 21,
+          "title": "Logging",
+          "label": "deepen",
+          "topics": [
+            "py-logging"
+          ]
+        },
+        {
+          "n": 22,
+          "title": "Clean architecture and design patterns",
+          "label": "deepen",
+          "topics": [
+            "py-clean-architecture",
+            "registry-dispatcher-pattern"
+          ]
+        },
+        {
+          "title": "Python pro internals",
+          "label": "new",
+          "topics": [
+            "py-descriptors-properties",
+            "py-metaclasses-class-creation",
+            "py-cpython-bytecode-gc",
+            "py-packaging-publishing"
+          ],
+          "n": 25
+        }
+      ]
+    },
+    {
+      "slug": "backend",
+      "title": "Backend Engineering",
+      "summary": "Extra weight on PostgreSQL and Python backend architecture. You are strong on raw SQL and AWS; the gaps are frameworks (FastAPI, SQLAlchemy), auth, caching/queues and explaining performance work.",
+      "modules": [
+        {
+          "title": "SQL foundations (basic)",
+          "label": "new",
+          "topics": [
+            "sql-select-filter-sort",
+            "sql-data-types-ddl",
+            "sql-insert-update-delete",
+            "sql-constraints-keys",
+            "sql-aggregates-having-basics"
+          ],
+          "n": 17
+        },
+        {
+          "title": "SQL intermediate toolkit",
+          "label": "new",
+          "topics": [
+            "sql-case-set-operations",
+            "sql-views-materialized",
+            "sql-functions-text-date"
+          ],
+          "n": 19
+        },
+        {
+          "n": 1,
+          "title": "PostgreSQL: SQL you already write",
+          "label": "demonstrated",
+          "topics": [
+            "sql-joins",
+            "sql-group-by",
+            "sql-subqueries",
+            "sql-ctes",
+            "sql-null-handling",
+            "postgres-upsert"
+          ]
+        },
+        {
+          "n": 2,
+          "title": "PostgreSQL: window functions",
+          "label": "deepen",
+          "topics": [
+            "sql-window-functions"
+          ]
+        },
+        {
+          "n": 3,
+          "title": "PostgreSQL: indexing and query optimization",
+          "label": "deepen",
+          "topics": [
+            "postgres-indexes",
+            "explain-analyze"
+          ]
+        },
+        {
+          "n": 4,
+          "title": "PostgreSQL: transactions, locking and deadlocks",
+          "label": "revise",
+          "topics": [
+            "transactions-isolation",
+            "be-postgres-locking-deadlocks"
+          ]
+        },
+        {
+          "n": 5,
+          "title": "Python + PostgreSQL: drivers and connection pooling",
+          "label": "demonstrated",
+          "topics": [
+            "psycopg2-essentials",
+            "be-connection-pooling"
+          ]
+        },
+        {
+          "n": 6,
+          "title": "Database design",
+          "label": "revise",
+          "topics": [
+            "database-normalization"
+          ]
+        },
+        {
+          "title": "PostgreSQL pro",
+          "label": "new",
+          "topics": [
+            "pg-recursive-ctes-lateral",
+            "pg-jsonb-deep",
+            "pg-plpgsql-triggers",
+            "pg-mvcc-vacuum",
+            "pg-partitioning-replication"
+          ],
+          "n": 20
+        },
+        {
+          "n": 7,
+          "title": "SQLAlchemy and migrations",
+          "label": "new",
+          "topics": [
+            "sqlalchemy-essentials",
+            "be-alembic-migrations"
+          ]
+        },
+        {
+          "title": "Backend foundations (basic)",
+          "label": "new",
+          "topics": [
+            "be-http-rest-basics",
+            "be-git-basics",
+            "be-linux-shell-basics",
+            "be-docker-basics",
+            "be-databases-orm-concepts"
+          ],
+          "n": 18
+        },
+        {
+          "n": 8,
+          "title": "REST API architecture",
+          "label": "deepen",
+          "topics": [
+            "rest-api-design",
+            "be-request-lifecycle"
+          ]
+        },
+        {
+          "n": 9,
+          "title": "FastAPI",
+          "label": "new",
+          "topics": [
+            "fastapi-essentials",
+            "be-pydantic-validation",
+            "be-dependency-injection",
+            "be-fastapi-middleware",
+            "be-background-tasks",
+            "be-api-error-handling"
+          ]
+        },
+        {
+          "n": 10,
+          "title": "Authentication and authorization",
+          "label": "new",
+          "topics": [
+            "be-authn-authz",
+            "jwt-authentication",
+            "web-security-owasp"
+          ]
+        },
+        {
+          "title": "Backend intermediate toolkit",
+          "label": "new",
+          "topics": [
+            "be-git-advanced",
+            "be-api-testing-contracts",
+            "be-observability-basics"
+          ],
+          "n": 21
+        },
+        {
+          "n": 11,
+          "title": "Integrations and resilience",
+          "label": "demonstrated",
+          "topics": [
+            "retries-backoff-idempotency",
+            "server-sent-events"
+          ]
+        },
+        {
+          "n": 12,
+          "title": "Caching and Redis",
+          "label": "new",
+          "topics": [
+            "caching-strategies",
+            "be-redis"
+          ]
+        },
+        {
+          "n": 13,
+          "title": "Queues and background processing",
+          "label": "new",
+          "topics": [
+            "message-queues"
+          ]
+        },
+        {
+          "n": 14,
+          "title": "AWS: Lambda, S3, ECS, DynamoDB",
+          "label": "demonstrated",
+          "topics": [
+            "aws-lambda-essentials",
+            "s3-presigned-urls",
+            "ecs-fargate",
+            "dynamodb-essentials"
+          ]
+        },
+        {
+          "n": 15,
+          "title": "Docker and CI/CD",
+          "label": "deepen",
+          "topics": [
+            "docker-essentials",
+            "github-actions-ci",
+            "git-workflow"
+          ]
+        },
+        {
+          "n": 16,
+          "title": "System design and microservices",
+          "label": "new",
+          "topics": [
+            "be-system-design-fundamentals",
+            "be-microservices"
+          ]
+        },
+        {
+          "title": "Backend pro: distributed and platform",
+          "label": "new",
+          "topics": [
+            "be-docker-compose-multistage",
+            "be-distributed-patterns",
+            "be-kubernetes-essentials"
+          ],
+          "n": 22
+        }
+      ]
+    },
+    {
+      "slug": "ai",
+      "title": "AI Engineering",
+      "summary": "Practical path to AI / GenAI Engineer roles. Your bridge: you already built the backend of an LLM text-to-SQL chat (GetLlmData). pandas/NumPy are strong; ML, embeddings, RAG and evaluation are new.",
+      "modules": [
+        {
+          "title": "AI foundations (basic)",
+          "label": "new",
+          "topics": [
+            "ai-what-is-ai-ml-genai",
+            "ai-python-ml-toolkit-basics",
+            "ai-prompting-basics"
+          ],
+          "n": 8
+        },
+        {
+          "n": 1,
+          "title": "Stage 1 · Foundations",
+          "label": "new",
+          "topics": [
+            "ai-math-linear-algebra",
+            "ai-statistics-probability",
+            "ai-numpy-for-ml",
+            "pandas-essentials",
+            "ai-data-preprocessing",
+            "ai-ml-fundamentals"
+          ]
+        },
+        {
+          "n": 2,
+          "title": "Stage 2 · Machine learning",
+          "label": "new",
+          "topics": [
+            "ai-supervised-learning",
+            "ai-unsupervised-learning",
+            "ai-model-training",
+            "ai-model-evaluation",
+            "ai-scikit-learn",
+            "ai-feature-engineering"
+          ]
+        },
+        {
+          "n": 3,
+          "title": "Stage 3 · Deep learning fundamentals",
+          "label": "new",
+          "topics": [
+            "ai-neural-networks",
+            "ai-transformers",
+            "ai-tokenization",
+            "ai-embeddings",
+            "ai-model-inference"
+          ]
+        },
+        {
+          "n": 4,
+          "title": "Stage 4 · Generative AI",
+          "label": "new",
+          "topics": [
+            "ai-llm-fundamentals",
+            "ai-prompt-engineering",
+            "ai-llm-apis",
+            "ai-structured-outputs",
+            "ai-function-calling",
+            "ai-context-tokens-cost"
+          ]
+        },
+        {
+          "n": 5,
+          "title": "Stage 5 · RAG engineering",
+          "label": "new",
+          "topics": [
+            "ai-vector-databases",
+            "ai-semantic-search",
+            "ai-chunking",
+            "ai-embedding-models",
+            "ai-retrieval-pipelines",
+            "ai-rag-evaluation",
+            "ai-hybrid-search"
+          ]
+        },
+        {
+          "n": 6,
+          "title": "Stage 6 · AI application development",
+          "label": "new",
+          "topics": [
+            "ai-frameworks-langchain-llamaindex",
+            "ai-agents-tool-calling",
+            "ai-multistep-workflows",
+            "ai-memory-management",
+            "ai-guardrails",
+            "ai-evaluation-observability"
+          ]
+        },
+        {
+          "title": "AI intermediate builds",
+          "label": "new",
+          "topics": [
+            "ai-text-to-sql-systems",
+            "ai-llm-evals-hands-on",
+            "ai-rag-from-scratch"
+          ],
+          "n": 9
+        },
+        {
+          "n": 7,
+          "title": "Stage 7 · Production AI engineering",
+          "label": "new",
+          "topics": [
+            "ai-serving-fastapi",
+            "ai-deployment-docker-aws",
+            "ai-monitoring",
+            "ai-latency-cost-optimization",
+            "ai-security"
+          ]
+        },
+        {
+          "title": "AI pro engineering",
+          "label": "new",
+          "topics": [
+            "ai-fine-tuning-lora-peft",
+            "ai-agent-reliability-patterns",
+            "ai-inference-optimization"
+          ],
+          "n": 10
+        }
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "slug": "proj-text-to-sql",
+      "title": "Local text-to-SQL assistant with evaluation",
+      "track": "ai",
+      "level": "advanced",
+      "why_md": "Builds directly on GetLlmData (the text-to-SQL chat backend you worked on) and on your strongest skill: SQL over real e-commerce data. Adds what was missing there: prompting, schema context, structured output, SQL validation, and an evaluation set.",
+      "steps": [
+        "Sample e-commerce schema in PostgreSQL (orders, settlements, returns)",
+        "FastAPI endpoint: question -> schema-aware prompt -> SQL",
+        "Run a local model via Ollama (no external API) or a pluggable provider",
+        "Validate SQL (read-only role, EXPLAIN before execute, row limits)",
+        "Evaluation set of 30 questions with expected results; measure execution accuracy",
+        "Log tokens, latency and cost per request (as GetLlmData did)"
+      ]
+    },
+    {
+      "slug": "proj-ingestion-api",
+      "title": "Ingestion service in FastAPI + SQLAlchemy + pytest",
+      "track": "backend",
+      "level": "intermediate",
+      "why_md": "Re-creates the patterns of ECSMarketplaceDataUpload in a public, tested codebase using the frameworks you haven't used yet.",
+      "steps": [
+        "FastAPI upload endpoint with Pydantic validation",
+        "Registry/dispatcher of report processors with lazy imports",
+        "SQLAlchemy 2.0 models + Alembic migrations",
+        "Upserts with ON CONFLICT via SQLAlchemy insert().on_conflict_do_update",
+        "Upload status tracking + background processing",
+        "pytest suite with fixtures and a test database; GitHub Actions CI",
+        "Structured logging and specific exception handling throughout"
+      ]
+    },
+    {
+      "slug": "proj-local-rag",
+      "title": "Private RAG over this platform's knowledge base",
+      "track": "ai",
+      "level": "advanced",
+      "why_md": "Learn embeddings, chunking, pgvector, hybrid search and RAG evaluation on content you care about, fully offline.",
+      "steps": [
+        "Chunk topic markdown with overlap",
+        "Local embedding model (sentence-transformers)",
+        "Store vectors in PostgreSQL + pgvector",
+        "Hybrid search: BM25/full-text + vector, reciprocal rank fusion",
+        "Answer with a local LLM, citing sources",
+        "Evaluate retrieval (recall@k) and answer faithfulness on 20 questions"
+      ]
+    },
+    {
+      "slug": "proj-job-queue",
+      "title": "Postgres-backed job queue with retries",
+      "track": "backend",
+      "level": "advanced",
+      "why_md": "Formalises what you built in ForcesightJobSchedulerAndRunner (FOR UPDATE SKIP LOCKED) and compares it with Redis/Celery.",
+      "steps": [
+        "jobs table with status, attempts, run_at",
+        "Workers claiming jobs with SKIP LOCKED",
+        "Exponential backoff + dead-letter status",
+        "Idempotent handlers",
+        "Concurrency tests with multiple workers",
+        "Write-up: Postgres queue vs Redis/Celery vs SQS"
+      ]
+    }
+  ]
+}

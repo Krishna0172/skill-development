@@ -1,0 +1,184 @@
+{
+  "slug": "sql-data-types-ddl",
+  "title": "Data types and DDL: CREATE, ALTER, DROP",
+  "skill": "database-design",
+  "extra_skills": [
+    "postgresql"
+  ],
+  "category": "Database",
+  "difficulty": "beginner",
+  "tags": [
+    "ddl",
+    "data-types",
+    "create-table",
+    "numeric",
+    "timestamptz"
+  ],
+  "summary": "DDL (Data Definition Language) is the part of SQL that creates and changes tables. Choosing the right column type up front, such as numeric for money and timestamptz for times, prevents rounding and timezone bugs that are painful to fix later.",
+  "why_md": "- A table definition is a contract: types and constraints decide what bad data can ever be stored.\n- Money in `float` and times without a timezone are two of the most common real-world data bugs.\n- You will write and review migrations, so you must know what `ALTER TABLE` does and what it costs.\n- Interviewers ask 'numeric vs float' and 'timestamp vs timestamptz' constantly.",
+  "details_md": "### Creating a table\n`CREATE TABLE` names the table, its columns and each column's type. Example: `CREATE TABLE products (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name text NOT NULL, price numeric(10,2) NOT NULL);`. `IF NOT EXISTS` makes it safe to re-run.\n\n### Types you need first\n- **Integers**: `smallint` (2 bytes), `integer` (4 bytes, about +-2.1 billion), `bigint` (8 bytes). Use `bigint` for ids that may grow.\n- **Auto ids**: `GENERATED ALWAYS AS IDENTITY` is the modern standard; `serial` is the older shortcut that still works.\n- **Exact decimals**: `numeric(precision, scale)`, e.g. `numeric(10,2)` holds up to 8 digits before the decimal point and 2 after. Arithmetic is exact. Use it for money.\n- **Approximate**: `real` / `double precision` (float). Binary fractions cannot represent 0.1 exactly, so `0.1 + 0.2` is not exactly `0.3`. Fine for measurements, wrong for money.\n- **Text**: `text` is unlimited and just as fast as `varchar(n)` in PostgreSQL. Use `varchar(n)` only if the limit is a real business rule.\n- **Boolean**: `boolean` (true/false/NULL).\n- **Dates and times**: `date`, `time`, `timestamp` (no zone), `timestamptz` (timestamp with time zone). `timestamptz` stores an absolute instant (internally UTC) and converts to the session time zone when displayed. Prefer it for event times. Plain `timestamp` stores the wall-clock digits only and breaks across zones and daylight saving.\n- **Others**: `uuid`, `jsonb`, arrays like `text[]`.\n\n### Changing a table\n`ALTER TABLE products ADD COLUMN weight_g integer;`, `DROP COLUMN`, `ALTER COLUMN price TYPE numeric(12,2)`, `RENAME COLUMN`, `ADD CONSTRAINT`. Some changes rewrite the whole table and take a strong lock that blocks others; on a big live table plan them carefully (adding a nullable column or a constant default is cheap in PostgreSQL 11+, changing a type often is not).\n\n### Dropping\n`DROP TABLE products;` deletes data and definition immediately. `DROP TABLE IF EXISTS` avoids an error; `CASCADE` also drops dependent objects, so use it deliberately. `TRUNCATE` empties a table quickly but keeps its definition.\n\n### DDL is transactional in PostgreSQL\nYou can wrap DDL in `BEGIN; ... ROLLBACK;` and undo it. This is a major advantage over many other databases and makes migrations safer.\n\n### Casting\n`CAST('42' AS integer)` or `'42'::integer`; `now()::date`. A bad cast raises an error rather than guessing.",
+  "code_md": "```sql\nCREATE TABLE IF NOT EXISTS products (\n    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n    sku        text           NOT NULL,\n    name       text           NOT NULL,\n    price      numeric(10, 2) NOT NULL,      -- exact: use for money\n    in_stock   boolean        NOT NULL DEFAULT true,\n    created_at timestamptz    NOT NULL DEFAULT now()  -- absolute instant\n);\n```\n```sql\nALTER TABLE products ADD COLUMN weight_g integer;           -- cheap, nullable\nALTER TABLE products RENAME COLUMN sku TO product_code;\nALTER TABLE products ALTER COLUMN price TYPE numeric(12, 2); -- may rewrite table\nALTER TABLE products DROP COLUMN weight_g;\n```\n```sql\n-- Why not float for money\nSELECT 0.1::float8 + 0.2::float8 = 0.3::float8   AS float_equal,   -- false\n       0.1::numeric + 0.2::numeric = 0.3::numeric AS numeric_equal; -- true\n```\n```sql\n-- DDL is transactional in PostgreSQL\nBEGIN;\nDROP TABLE products;\nROLLBACK;   -- table is back\n```",
+  "use_cases_md": "- Designing an `orders` table: bigint identity id, numeric totals, timestamptz created_at, text status.\n- Adding a `currency` column during a feature release through a migration.\n- Choosing `uuid` ids when records are created by several services.\n- Storing event timestamps from marketplaces in several time zones as `timestamptz`.",
+  "mistakes_md": "- **Money as `float`/`double precision`**: rounding errors. Use `numeric(p,s)` (or integer cents).\n- **`timestamp` for event times**: loses the zone. Use `timestamptz`.\n- **`varchar(255)` out of habit**: no performance gain in PostgreSQL; use `text`.\n- **`integer` ids on tables that will exceed 2.1 billion rows**: use `bigint` from the start.\n- **`DROP ... CASCADE` casually**: silently removes views and constraints that depend on the object.\n- **Changing a column type on a huge live table without planning**: full rewrite and a blocking lock.",
+  "best_practices_md": "- Give every table a primary key.\n- `numeric` for money, `timestamptz` for instants, `text` for strings, `bigint` for ids.\n- Add `NOT NULL` by default and allow NULL only when 'unknown' is meaningful.\n- Keep DDL in versioned migrations, run inside a transaction when possible.\n- Use lowercase snake_case names without quotes.\n- Test destructive DDL on a copy first.",
+  "my_context_md": "",
+  "revision_notes_md": "- `CREATE TABLE name (col type constraints, ...)`; `IF NOT EXISTS` for reruns.\n- Money: `numeric(p,s)`. Float is approximate.\n- Instants: `timestamptz`; `timestamp` has no zone.\n- `text` = `varchar` speed in PostgreSQL.\n- `bigint` ids; `GENERATED ALWAYS AS IDENTITY`.\n- ALTER can rewrite the table and lock it.\n- `DROP` deletes now; `CASCADE` drops dependants; `TRUNCATE` empties.\n- DDL can be rolled back in PostgreSQL.\n- Cast with `::type` or `CAST(x AS type)`.",
+  "exercises_md": "1. Create a `customers` and an `orders` table with sensible types, then insert one row each.\n2. Demonstrate in psql that `0.1::float8 + 0.2::float8 = 0.3::float8` is false but the numeric version is true.\n3. Add a column, rename it, change its type, and drop it, all inside a transaction you roll back.\n4. Insert a `timestamptz` value, then run `SET TIME ZONE 'Asia/Kolkata'` and select it again. Do the same on a `timestamp` column and compare.",
+  "related": [
+    "sql-constraints-keys",
+    "database-normalization",
+    "be-alembic-migrations",
+    "sql-insert-update-delete"
+  ],
+  "flashcards": [
+    {
+      "front": "Which type for money?",
+      "back": "`numeric(p,s)` (exact decimal), not float."
+    },
+    {
+      "front": "timestamp vs timestamptz?",
+      "back": "timestamptz stores an absolute instant and converts to the session zone on display; timestamp stores only wall-clock digits with no zone."
+    },
+    {
+      "front": "text vs varchar(n) in PostgreSQL?",
+      "back": "Same performance; use text unless the length limit is a real rule."
+    },
+    {
+      "front": "Modern auto-increment id?",
+      "back": "`bigint GENERATED ALWAYS AS IDENTITY` (serial is the older shortcut)."
+    },
+    {
+      "front": "Can you roll back DDL in PostgreSQL?",
+      "back": "Yes, DDL is transactional."
+    },
+    {
+      "front": "TRUNCATE vs DELETE?",
+      "back": "TRUNCATE empties the table fast and keeps its definition; DELETE removes rows one at a time and can use WHERE."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which type is best for storing prices like 19.99?",
+      "options": [
+        "numeric(10,2)",
+        "text",
+        "real",
+        "double precision"
+      ],
+      "answer_index": 0,
+      "explanation": "numeric is exact decimal arithmetic."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does timestamptz actually store?",
+      "options": [
+        "Text",
+        "Only the date",
+        "The local time digits and the zone name",
+        "An absolute instant, shown in the session time zone"
+      ],
+      "answer_index": 3,
+      "explanation": "PostgreSQL stores UTC internally and converts on output; it does not store the zone name."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which id type avoids overflow at 2.1 billion rows?",
+      "options": [
+        "integer",
+        "bigint",
+        "numeric(4)",
+        "smallint"
+      ],
+      "answer_index": 1,
+      "explanation": "bigint is 8 bytes (about 9.2e18)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Complete: ALTER TABLE products ____ COLUMN weight_g integer;",
+      "answers": [
+        "add"
+      ],
+      "explanation": "ADD COLUMN adds a new column."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To make sure a column never stores unknown values, declare it with ____ NULL.",
+      "answers": [
+        "not"
+      ],
+      "explanation": "NOT NULL forbids missing values."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.execute(\"create table t(id integer primary key, name text not null, price real default 9.5)\")\nc.execute(\"insert into t(name) values ('pen')\")\nc.execute(\"alter table t add column stock integer default 0\")\nc.execute(\"alter table t rename column name to title\")\nprint([r[1] for r in c.execute(\"pragma table_info(t)\")])\nprint(c.execute(\"select title, price, stock from t\").fetchall())",
+      "answers": [
+        "['id', 'title', 'price', 'stock']\n[('pen', 9.5, 0)]"
+      ],
+      "explanation": "Columns after the rename: id, title, price, stock; the existing row gets defaults."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.execute(\"create table t(n integer)\")\nc.execute(\"insert into t values (1),(2),(3)\")\nc.execute(\"drop table if exists t\")\nc.execute(\"drop table if exists t\")\nprint(c.execute(\"select count(*) from sqlite_master where name='t'\").fetchone()[0])",
+      "answers": [
+        "0"
+      ],
+      "explanation": "IF EXISTS makes the second drop harmless; the table no longer exists."
+    },
+    {
+      "type": "debug",
+      "prompt": "A teammate stores order totals this way and later reports are off by cents. What is wrong, and what is the fix?",
+      "code": "CREATE TABLE orders (\n    id serial PRIMARY KEY,\n    total double precision,\n    placed_at timestamp\n);",
+      "answer": "`double precision` is binary floating point and cannot represent most decimals exactly, so sums drift. `timestamp` has no time zone, so instants from different zones are ambiguous. Also `total` should be NOT NULL and the id should be bigint.\n```sql\nCREATE TABLE orders (\n  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\n  total numeric(12,2) NOT NULL,\n  placed_at timestamptz NOT NULL DEFAULT now()\n);\n```",
+      "rubric": [
+        "numeric instead of float for money",
+        "timestamptz instead of timestamp",
+        "NOT NULL / bigint identity are good extras"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain numeric vs float for a beginner.",
+      "answer": "Float stores numbers in binary and is approximate: 0.1 has no exact binary form, so 0.1 + 0.2 is slightly off 0.3. It is fast and fine for measurements. numeric stores exact decimal digits with a chosen precision and scale, so money adds up exactly, at the cost of speed.",
+      "rubric": [
+        "float is approximate binary",
+        "numeric is exact decimal",
+        "use numeric for money"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why can ALTER TABLE be dangerous on a large production table?",
+      "answer": "Some alterations (type changes, adding a column with a volatile default, adding some constraints) rewrite the table or scan it while holding a strong lock, blocking reads and writes. Plan with smaller steps, lock timeouts and off-peak windows.",
+      "rubric": [
+        "Table rewrite or scan",
+        "Strong lock blocks traffic",
+        "Mitigate with phased changes or lock_timeout"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "When would you use numeric vs integer cents for money?",
+      "difficulty": "easy",
+      "answer_md": "Both are exact. `numeric(12,2)` is readable and handles any scale in SQL; integer cents is compact and fast and avoids decimals in application code but requires you to remember the unit. Never float. Multi-currency systems often store integer minor units plus a currency code."
+    },
+    {
+      "question": "timestamp vs timestamptz?",
+      "difficulty": "easy",
+      "answer_md": "timestamptz represents one real instant: input with an offset is converted to UTC and output is shown in the session time zone. timestamp stores digits without a zone, so '2026-03-01 10:00' means different instants for different clients. Use timestamptz for events; plain timestamp only for 'local wall time' concepts like store opening hours."
+    },
+    {
+      "question": "What are the risks of ALTER TABLE ... TYPE?",
+      "difficulty": "medium",
+      "answer_md": "It usually takes an ACCESS EXCLUSIVE lock and rewrites the table and its indexes (except for binary-compatible changes such as widening varchar). On a large live table this blocks all queries. Alternative: add a new column, backfill in batches, swap in a short transaction."
+    },
+    {
+      "question": "Why is DDL being transactional useful?",
+      "difficulty": "medium",
+      "answer_md": "A multi-step migration can be wrapped in BEGIN/COMMIT. If step 3 fails, everything rolls back and the schema is never half-migrated. Exceptions: statements like CREATE INDEX CONCURRENTLY cannot run inside a transaction block."
+    }
+  ]
+}

@@ -1,0 +1,158 @@
+{
+  "slug": "py-profiling-debugging",
+  "title": "Profiling and debugging Python services",
+  "skill": "python-performance",
+  "extra_skills": [
+    "python-exceptions-logging",
+    "aws-ecs"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "cprofile",
+    "pstats",
+    "line-profiler",
+    "tracemalloc",
+    "pdb",
+    "breakpoint",
+    "tracebacks",
+    "ecs-debugging"
+  ],
+  "summary": "A practical toolkit for finding why code is slow or wrong: cProfile + pstats for function-level hot spots, line-level profiling and sampling profilers, tracemalloc for memory, pdb/`breakpoint()` and post-mortem debugging, reading chained tracebacks, and debugging services running in Docker/ECS through logs.",
+  "why_md": "- Guessing at performance problems wastes days; a profile usually points at one or two functions within minutes.\n- In ECS/Lambda you can't attach a debugger — your logs and tracebacks *are* the debugger, so they must carry context.\n- Swallowed exceptions (`except: pass`) make production failures invisible; reading tracebacks well is a core skill.\n- Interviewers ask 'a job got 5x slower — what do you do?' to see a method, not a guess.",
+  "details_md": "### cProfile + pstats\n`python -m cProfile -o out.prof script.py` records every function call: `ncalls`, `tottime` (time in the function itself) and `cumtime` (including callees). Load with `pstats.Stats('out.prof').sort_stats('cumulative').print_stats(20)`. Sort by **cumtime** to find the expensive branch from the top, by **tottime** to find the function actually burning CPU. High `ncalls` on a cheap function points to a loop that should be vectorised or batched. In code: `with cProfile.Profile() as pr: run(); pr.print_stats('cumtime')` (3.8+). Visualise with snakeviz. cProfile adds overhead and attributes time poorly to C extensions (pandas internals show up as a few big calls).\n\n### Line and sampling profilers\n`line_profiler` (`@profile` + `kernprof -l -v`) times each line in chosen functions — useful once cProfile has narrowed it down to one long function. Sampling profilers like `py-spy` attach to a **running** process (`py-spy top --pid`, `py-spy dump` for current stacks) with negligible overhead — great for a hung or slow production worker, if you can access the host/container.\n\n### Memory\n`tracemalloc` snapshots and diffs (see the memory topic); `tracemalloc.get_traced_memory()` gives current/peak.\n\n### pdb\n`breakpoint()` drops into pdb (respecting `PYTHONBREAKPOINT`; set it to `0` to disable in prod). Commands: `n` next, `s` step into, `c` continue, `l`/`ll` list, `p expr`, `pp`, `w` where (stack), `u`/`d` up/down frames, `b file:line`, `until`, `q`. **Post-mortem**: `python -m pdb -c continue script.py` or `pdb.pm()` after an exception, or `pytest --pdb`, lands you in the frame that raised with all locals.\n\n### Reading tracebacks\nRead bottom-up: the last line is the exception type and message; the frame just above it is where it was raised; walk up to find *your* code. `The above exception was the direct cause of...` means `raise ... from e` (explicit chaining, `__cause__`); `During handling of the above exception, another exception occurred` means an error inside an `except` block (`__context__`). Python 3.11+ shows `^^^^` markers pointing at the exact sub-expression, and exception notes (`e.add_note()`) can add context.\n\n### Debugging in Docker/ECS\nYou usually only have logs (CloudWatch). Make them useful: `logger.exception()` to include tracebacks, job/upload IDs on every line, timings per stage (`perf_counter`) so slowness is visible without a profiler, and enough input context (file key, row number) to reproduce locally. Reproduce with the same image locally (`docker run` with the same env), use `aws ecs execute-command` for a shell if enabled, and enable `faulthandler` (`PYTHONFAULTHANDLER=1`) to dump stacks on crashes or `faulthandler.dump_traceback_later(timeout)` for hangs.",
+  "code_md": "```python\nimport cProfile, pstats\n\ndef profile(fn, *args, top=15):\n    with cProfile.Profile() as pr:          # 3.8+ context manager\n        result = fn(*args)\n    stats = pstats.Stats(pr).strip_dirs()\n    stats.sort_stats(\"cumulative\").print_stats(top)   # where time goes, top-down\n    stats.sort_stats(\"tottime\").print_stats(top)      # who burns CPU\n    return result\n\nprofile(process_report, \"samples/amazon_settlement.csv\")\n```\n\n```bash\n# whole script, then inspect\npython -m cProfile -o run.prof -m app.jobs.upload --file sample.csv\npython -c \"import pstats; pstats.Stats('run.prof').sort_stats('cumtime').print_stats(20)\"\n\n# post-mortem: drop into pdb at the crash\npython -m pdb -c continue -m app.jobs.upload --file bad.csv\npytest tests/test_upload.py -x --pdb\n\n# live process (host/container access needed)\npy-spy dump --pid 1234        # current stack of every thread - great for hangs\n```\n\n```python\n# Logging-based debugging that works in ECS/CloudWatch\nimport logging, time\nlog = logging.getLogger(__name__)\n\ndef run(upload_id, key):\n    t0 = time.perf_counter()\n    df = parse(key)\n    log.info(\"parsed\", extra={\"upload_id\": upload_id, \"rows\": len(df),\n                               \"ms\": round((time.perf_counter() - t0) * 1000)})\n    try:\n        write(df)\n    except Exception:\n        log.exception(\"write failed upload_id=%s key=%s\", upload_id, key)  # traceback\n        raise\n```",
+  "use_cases_md": "- A marketplace upload slowed from 2 to 15 minutes: cProfile on a sample file shows 80% cumtime in a per-row `apply`.\n- An ECS job hangs nightly: `faulthandler.dump_traceback_later` or `py-spy dump` reveals it's blocked on a DB lock or an HTTP call without timeout.\n- A pandas transform produces NaNs for some SKUs: post-mortem pdb on a failing test to inspect the merge keys.\n- Reading a chained traceback where a `KeyError` in a mapping was wrapped in a custom `ProcessingError`.\n- Adding per-stage timing logs so CloudWatch Insights can show which stage regressed.",
+  "mistakes_md": "- **Optimising before profiling**. Fix: profile a representative input first.\n- **Reading only tottime or only cumtime**. Fix: use both — cumtime for the branch, tottime for the culprit.\n- **`except: pass` / logging without traceback**: the evidence is destroyed. Fix: `logger.exception` and re-raise or handle specifically.\n- **Leaving `breakpoint()` in committed code**: a container hangs waiting for stdin. Fix: lint for it; `PYTHONBREAKPOINT=0` in prod.\n- **Profiling with tiny inputs**: setup dominates. Fix: realistic data size.\n- **Logs without IDs**: can't correlate lines of one job among concurrent jobs. Fix: include job/upload IDs on every line.\n- **`print` debugging in prod**: unstructured, no level, no timestamps. Fix: logging.",
+  "best_practices_md": "- Measure stage timings in production logs routinely.\n- cProfile to narrow down, line profiler/py-spy to pinpoint.\n- Use post-mortem debugging and `pytest --pdb` rather than sprinkling prints.\n- Always preserve tracebacks (`logger.exception`, `raise ... from e`).\n- Make failures reproducible: log the input key and row context, keep sample files as test fixtures.\n- Enable `faulthandler` in long-running workers.\n- Put timeouts on I/O so hangs become errors with tracebacks.",
+  "my_context_md": "The repo audit found **432 `except: pass`** blocks, **88% broad excepts**, and **print() used 11x more than logging** — in ECS services where CloudWatch logs are the only debugging tool, this means many failures leave no trace. A high-value change is replacing `except: pass` in `ECSMarketplaceDataUpload` processors with `logger.exception(...)` that includes the upload ID and file key (the service already tracks upload status, so that ID is available). With **641 functions over 100 lines**, cProfile's `cumtime`/`tottime` view is the quickest way to find which part of a long processor function is slow before refactoring it.",
+  "revision_notes_md": "- `python -m cProfile -o out.prof ...`; `pstats.Stats(...).sort_stats('cumtime').print_stats(20)`.\n- cumtime = with callees (find branch); tottime = self (find culprit); ncalls = loops.\n- line_profiler for per-line; py-spy for live/hung processes (low overhead).\n- `breakpoint()`; pdb: n, s, c, p, pp, w, u/d, ll, b, q.\n- Post-mortem: `python -m pdb -c continue`, `pdb.pm()`, `pytest --pdb`.\n- Tracebacks: read bottom-up; 'direct cause' = `from e`; 'during handling' = implicit context.\n- ECS: logs are your debugger → `logger.exception`, IDs, stage timings, `faulthandler`.\n- `PYTHONBREAKPOINT=0` disables breakpoints in prod.",
+  "exercises_md": "1. Profile one marketplace processor on a real sample file with cProfile; list the top 5 functions by cumtime and by tottime and write down what you'd change.\n2. Write a pytest that fails on a bad row and practise `pytest --pdb`: inspect the DataFrame and move up/down frames.\n3. Add `faulthandler.dump_traceback_later(600, exit=False)` to a long job, simulate a hang with a blocking call, and read the dumped stack.\n4. Pick five `except: pass` blocks in one service and replace them with specific exceptions plus `logger.exception` including the job/upload ID.",
+  "related": [
+    "py-performance",
+    "py-logging",
+    "py-internals-memory",
+    "python-exceptions",
+    "pytest-essentials",
+    "ecs-fargate"
+  ],
+  "flashcards": [
+    {
+      "front": "tottime vs cumtime in cProfile?",
+      "back": "tottime = time spent in the function's own code; cumtime = including all functions it called. Sort by cumtime to find the expensive branch, tottime to find the hot function."
+    },
+    {
+      "front": "How do you debug at the point of a crash after it happened?",
+      "back": "Post-mortem: `python -m pdb -c continue script.py`, `pdb.pm()` in a REPL, or `pytest --pdb`."
+    },
+    {
+      "front": "How do you see what a hung production Python process is doing?",
+      "back": "`py-spy dump --pid PID` (stack of every thread), or enable `faulthandler` (signal / `dump_traceback_later`) to print stacks."
+    },
+    {
+      "front": "'The above exception was the direct cause' vs 'During handling...'?",
+      "back": "Direct cause = explicit `raise X from e` (`__cause__`). During handling = an exception raised inside an except block without `from` (`__context__`)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "In a cProfile report, `normalize_row` has ncalls=2,000,000, tottime=48s. What does that most likely indicate?",
+      "options": [
+        "The profiler overhead is too high to trust",
+        "A per-row Python function called in a loop — a candidate for vectorisation or batching",
+        "Disk I/O is the bottleneck",
+        "The function is waiting on the GIL"
+      ],
+      "answer_index": 1,
+      "explanation": "Huge call counts with high self-time usually mean row-by-row processing."
+    },
+    {
+      "type": "mcq",
+      "prompt": "An ECS task occasionally hangs forever. Which tool shows the current stack of every thread in the running process with minimal overhead?",
+      "options": [
+        "cProfile",
+        "`timeit`",
+        "`tracemalloc`",
+        "`py-spy dump`"
+      ],
+      "answer_index": 3,
+      "explanation": "py-spy is a sampling profiler that can attach to a live process (needs access to the host/container and ptrace permission)."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Calling the built-in ____() drops into the debugger (pdb by default) at that line.",
+      "answers": [
+        "breakpoint",
+        "breakpoint()"
+      ],
+      "explanation": "Controlled by the `PYTHONBREAKPOINT` environment variable."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To drop into pdb when a test fails, run pytest with the `--____` flag.",
+      "answers": [
+        "pdb"
+      ],
+      "explanation": "`pytest --pdb` starts post-mortem debugging on failures/errors."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import traceback\n\ndef parse(v):\n    return int(v)\n\ndef load(rows):\n    try:\n        return [parse(r) for r in rows]\n    except ValueError as e:\n        raise RuntimeError(\"bad row\") from e\n\ntry:\n    load([\"1\", \"x\"])\nexcept RuntimeError as e:\n    print(e, \"<-\", type(e.__cause__).__name__)\n    print(e.__cause__)\n    print(traceback.extract_tb(e.__cause__.__traceback__)[-1].name)",
+      "answers": [
+        "bad row <- ValueError\ninvalid literal for int() with base 10: 'x'\nparse"
+      ],
+      "explanation": "`raise ... from e` stores the original as `__cause__`; its traceback's last frame is where it was raised (`parse`)."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import cProfile, pstats\n\ndef slow(n):\n    return sum(i * i for i in range(n))\n\ndef job():\n    for _ in range(3):\n        slow(1000)\n\npr = cProfile.Profile()\npr.enable()\njob()\npr.disable()\nst = pstats.Stats(pr)\ncounts = {name: nc for (f, line, name), (cc, nc, *_rest) in st.stats.items()\n          if name in (\"slow\", \"job\")}\nprint(sorted(counts.items()))",
+      "answers": [
+        "[('job', 1), ('slow', 3)]"
+      ],
+      "explanation": "pstats records per-function call counts; `slow` was called 3 times from `job`."
+    },
+    {
+      "type": "debug",
+      "prompt": "Uploads silently end up with fewer rows than the source file and nobody knows why. What's wrong and how do you fix it?",
+      "code": "def process(upload_id, rows):\n    loaded = 0\n    for row in rows:\n        try:\n            insert(transform(row))\n            loaded += 1\n        except:\n            pass\n    print(\"done\", loaded)",
+      "answer": "The bare `except: pass` swallows every error (including bugs like `KeyError`/`TypeError`, and even `KeyboardInterrupt`), and `print` gives no level, no IDs, no traceback. The data loss is invisible.\n\n```python\nlog = logging.getLogger(__name__)\n\ndef process(upload_id, rows):\n    loaded, failed = 0, 0\n    for i, row in enumerate(rows, start=1):\n        try:\n            insert(transform(row))\n            loaded += 1\n        except (ValueError, KeyError) as e:      # expected data errors only\n            failed += 1\n            log.warning(\"row rejected upload_id=%s row=%d err=%r\", upload_id, i, e)\n    log.info(\"upload finished upload_id=%s loaded=%d failed=%d\", upload_id, loaded, failed)\n    if failed:\n        mark_upload_partial(upload_id, failed)\n```\nUnexpected exceptions now propagate with a traceback (log them with `logger.exception` at the job boundary).",
+      "rubric": [
+        "Bare except/pass hides errors and data loss",
+        "Catch specific expected exceptions; let unexpected ones propagate",
+        "Log with logger (IDs, row number, traceback) instead of print",
+        "Record/report the failed count"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "A nightly job on ECS went from 10 to 50 minutes. Explain how you'd find the cause.",
+      "answer": "Start with what the logs already tell me: per-stage timings (if logged) show whether extract, transform or load grew, and input size (row count, file size) shows whether the data simply grew 5x. If unclear, reproduce locally with the same container image and a copy of the input, then run cProfile, sorting by cumtime to find the expensive branch and tottime to find the hot function; high ncalls suggests row-by-row work. If the time is in the DB, run EXPLAIN ANALYZE on the slow queries and check for lock waits (pg_stat_activity) or missing indexes. If it can only be seen in production, add stage timing logs or use py-spy against the running task. Fix the top item, re-measure, and add the timing logs permanently so the next regression is visible immediately.",
+      "rubric": [
+        "Check logs/stage timings and whether input volume changed",
+        "Reproduce with same image and profile (cProfile cumtime/tottime)",
+        "Check DB side (EXPLAIN ANALYZE, locks)",
+        "Fix biggest cost, re-measure, add permanent timing logs"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you profile a Python application and interpret the output?",
+      "difficulty": "medium",
+      "answer_md": "Run with a realistic input: `python -m cProfile -o out.prof -m app.job` (or the `cProfile.Profile()` context manager around one call). Inspect with pstats or snakeviz.\n\n- Sort by **cumtime** and read top-down: which high-level step dominates?\n- Sort by **tottime** to find the function actually burning CPU.\n- Look at **ncalls**: millions of calls to a small function means a per-row loop → vectorise/batch.\n- Time in `{method 'execute' of psycopg2...}` or socket reads means you're I/O-bound → batching, fewer queries, concurrency.\n\nThen zoom in: `line_profiler` on the one function, `tracemalloc` if memory is the issue, `py-spy` for production processes without restarts. Fix the biggest item, re-profile, repeat."
+    },
+    {
+      "question": "How do you debug a failure that only happens in production on ECS?",
+      "difficulty": "hard",
+      "answer_md": "1. **Logs first** (CloudWatch Logs Insights): filter by the job/upload ID, find the traceback (`logger.exception` must be used), and the input identifiers (S3 key, row number).\n2. **Reproduce locally** with the same Docker image tag and environment variables, using the same input file. Many 'prod only' bugs are data or config differences (encoding, missing env var, IAM permission, timezone).\n3. If it doesn't reproduce: compare dependency versions (pinned lockfile?), memory/CPU limits (OOM kill shows exit code 137 in ECS task stopped reason), concurrency (more workers in prod → races, DB lock waits), network timeouts.\n4. For hangs: `faulthandler`, `py-spy dump`, or `aws ecs execute-command` into the task if enabled; check `pg_stat_activity` for blocked queries.\n5. Add the missing context to logs and a regression test with the failing input."
+    },
+    {
+      "question": "Walk me through using pdb effectively.",
+      "difficulty": "easy",
+      "answer_md": "Enter with `breakpoint()` in code, `python -m pdb script.py`, or post-mortem after a crash (`python -m pdb -c continue script.py`, `pdb.pm()`, `pytest --pdb`). Post-mortem is the most useful: you land in the raising frame with all locals intact.\n\nCore commands: `ll` show the current function, `p`/`pp expr` inspect, `w` stack, `u`/`d` move between frames (inspect the caller's arguments), `n` next line, `s` step into, `unt` run until a later line (skip loops), `c` continue, `b file:line, condition` conditional breakpoint (e.g. `b processor.py:88, row['sku'] == 'B0X1'`), `display expr` to watch, `interact` for a full REPL in the frame.\n\nIn pandas debugging, `pp df.head()`, `p df.dtypes` and `p df[df.sku.isna()]` inside the failing frame usually reveal the issue fast. Never commit `breakpoint()`; set `PYTHONBREAKPOINT=0` in production."
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "slug": "rest-api-design",
+  "title": "REST API Design",
+  "skill": "api-development",
+  "extra_skills": [
+    "backend-architecture",
+    "system-design"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "rest",
+    "http",
+    "api-design",
+    "status-codes",
+    "pagination",
+    "versioning"
+  ],
+  "summary": "A REST API exposes resources (nouns like `/orders`) and uses HTTP methods (GET, POST, PUT, PATCH, DELETE) to act on them. Good APIs use correct status codes, consistent JSON shapes, pagination for lists, clear error bodies, and are safe to retry. Design for the client: predictable URLs and behaviour matter more than cleverness.",
+  "details_md": "### Resources and URLs\nModel **nouns**, not actions: `GET /orders`, `GET /orders/{id}`, `POST /orders`, `GET /orgs/{org_id}/uploads`. Use plural collection names, lowercase-with-hyphens, and nest only one level for clear ownership. For actions that don't fit CRUD, use a sub-resource (`POST /uploads/{id}/retry`) or model the action as a resource (`POST /sync-requests`).\n\n### Methods and their semantics\n| Method | Use | Safe | Idempotent |\n|---|---|---|---|\n| GET | read | yes | yes |\n| POST | create / trigger processing | no | no |\n| PUT | replace whole resource | no | yes |\n| PATCH | partial update | no | not necessarily |\n| DELETE | remove | no | yes |\n\n**Safe** = no side effects. **Idempotent** = repeating the same request leaves the same server state - important because networks fail and clients retry. Make POSTs retry-safe with an `Idempotency-Key` header.\n\n### Status codes that matter\n- `200 OK`, `201 Created` (+ `Location` header), `202 Accepted` (async processing started), `204 No Content`.\n- `400` malformed request, `401` not authenticated, `403` authenticated but not allowed, `404` not found, `409` conflict (duplicate/version mismatch), `422` validation failed (FastAPI's default), `429` rate limited (+ `Retry-After`).\n- `500` server bug, `502/503/504` upstream/availability problems (retryable).\nNever return `200` with `{\"error\": ...}` in the body - clients, proxies and monitoring rely on status codes.\n\n### Consistent errors\nPick one error shape and use it everywhere, e.g. RFC 9457 Problem Details:\n```json\n{\"type\": \"https://example.com/errors/validation\", \"title\": \"Validation failed\",\n \"status\": 422, \"detail\": \"Missing column: SKU\", \"instance\": \"/uploads/42\"}\n```\nInclude a machine-readable code and field-level details; never leak stack traces or SQL.\n\n### Pagination, filtering, sorting\n- **Offset** (`?limit=50&offset=100`) is simple but slow on deep pages and unstable when rows are inserted.\n- **Cursor/keyset** (`?limit=50&cursor=eyJpZCI6MTIzfQ`) encodes the last seen sort key; stable and uses an index (`WHERE id > $last ORDER BY id LIMIT 50`).\n- Filters as query params (`?status=Error&from=2026-01-01`), sorting with `?sort=-created_at`. Cap `limit`.\n\n### Long-running work\nDon't hold an HTTP request open for minutes. Return `202 Accepted` with a job resource (`/jobs/{id}`) the client polls, or push updates via SSE/webhooks. API Gateway, for example, has an integration timeout, so long jobs must be asynchronous.\n\n### Versioning and evolution\nVersion in the path (`/v1/`) or a header. Additive changes (new optional fields, new endpoints) are non-breaking; removing/renaming fields or changing types is breaking. Clients should ignore unknown fields.\n\n### Other essentials\n- Content negotiation: JSON with `Content-Type: application/json`; ISO 8601 UTC timestamps; consistent field casing.\n- Authentication via `Authorization: Bearer <token>`; HTTPS only.\n- Rate limiting, request size limits and timeouts.\n- Caching: `ETag`/`If-None-Match`, `Cache-Control` for GETs; `If-Match` for optimistic concurrency on updates.\n- Documentation via OpenAPI (FastAPI generates it automatically).",
+  "code_md": "```text\n# Resource-oriented endpoint design for an upload service\nPOST   /v1/uploads                 -> 202 {\"id\": 42, \"status\": \"Processing\"}\nGET    /v1/uploads?status=Error&limit=50&cursor=...  -> 200 {\"items\": [...], \"next_cursor\": \"...\"}\nGET    /v1/uploads/42              -> 200 {\"id\": 42, \"status\": \"Completed\", ...}\nPOST   /v1/uploads/42/retry        -> 202\nDELETE /v1/uploads/42              -> 204\n```\n\n```python\n# FastAPI implementation of the key patterns\nfrom fastapi import FastAPI, HTTPException, Header, Response, status\nfrom pydantic import BaseModel\n\napp = FastAPI()\nUPLOADS: dict[int, dict] = {}\nIDEMPOTENCY: dict[str, int] = {}\n\nclass UploadIn(BaseModel):\n    org_id: int\n    report_type: str\n    file_url: str\n\n@app.post(\"/v1/uploads\", status_code=status.HTTP_202_ACCEPTED)\ndef create_upload(body: UploadIn, response: Response,\n                  idempotency_key: str | None = Header(default=None)):\n    if idempotency_key and idempotency_key in IDEMPOTENCY:     # retry-safe POST\n        return UPLOADS[IDEMPOTENCY[idempotency_key]]\n    upload_id = len(UPLOADS) + 1\n    UPLOADS[upload_id] = {\"id\": upload_id, \"status\": \"Processing\", **body.model_dump()}\n    if idempotency_key:\n        IDEMPOTENCY[idempotency_key] = upload_id\n    response.headers[\"Location\"] = f\"/v1/uploads/{upload_id}\"\n    return UPLOADS[upload_id]\n\n@app.get(\"/v1/uploads/{upload_id}\")\ndef get_upload(upload_id: int):\n    if upload_id not in UPLOADS:\n        raise HTTPException(status_code=404, detail=\"upload not found\")\n    return UPLOADS[upload_id]\n```\n\n```sql\n-- Keyset (cursor) pagination: stable and index-friendly\nSELECT id, status, created_at\nFROM fs_upload\nWHERE orgid = %(org_id)s\n  AND (created_at, id) < (%(cursor_ts)s, %(cursor_id)s)   -- last row of previous page\nORDER BY created_at DESC, id DESC\nLIMIT 50;\n```\n\n```bash\n# Exercising the API with curl\ncurl -i -X POST localhost:8000/v1/uploads \\\n  -H \"Content-Type: application/json\" -H \"Idempotency-Key: 7f9c...\" \\\n  -d '{\"org_id\": 7, \"report_type\": \"amazon_orders\", \"file_url\": \"https://...\"}'\n```",
+  "use_cases_md": "- Public or internal APIs consumed by web/mobile frontends.\n- Upload/processing services that accept a job and report status asynchronously.\n- Integration APIs for partners (marketplaces, OMS, payment gateways) - and judging the quality of APIs you consume.\n- Admin/reporting APIs with filtering and pagination over large tables.",
+  "mistakes_md": "- **Verbs in URLs** (`/getOrders`, `/createUpload`). Fix: nouns + HTTP methods.\n- **Always returning 200** with an error flag in the body. Fix: proper 4xx/5xx codes.\n- **Unbounded list endpoints** - one request returns 2 million rows. Fix: mandatory pagination with a max limit.\n- **Non-idempotent retries** - a client retries a timed-out POST and creates duplicates. Fix: idempotency keys or natural unique keys with upserts.\n- **Long synchronous processing** - gateway timeouts while the work continues. Fix: 202 + job resource/polling/SSE.\n- **Leaking internals in errors** (stack traces, SQL). Fix: generic message + correlation ID; log details server-side.\n- **Breaking changes without versioning**. Fix: additive evolution; version for breaking changes.",
+  "best_practices_md": "- Design the URL/method table before writing code; keep naming and casing consistent.\n- Validate input at the edge and return 422 with field-level errors.\n- Document with OpenAPI; give every endpoint example requests/responses.\n- Make writes idempotent where possible; return `Retry-After` on 429/503.\n- Use cursor pagination for large or frequently changing collections.\n- Include a request/correlation ID in responses and logs.\n- Require HTTPS and authentication; apply least-privilege authorisation per resource.",
+  "my_context_md": "- ECSMarketplaceDataUpload is fronted by API Gateway (you simulate its events with `lambda_test.py`) and processes uploads asynchronously, tracking state in the `fs_upload` table (Processing/Completed/Error) - that is the \"202 Accepted + job status resource\" pattern.\n- Your resume lists REST API integrations with Unicommerce, EasyEcom and OmsGuru: as a consumer you've dealt with pagination, auth headers and error codes from the other side.\n- Your FastAPI downloader apps expose job-style endpoints with background jobs and SSE progress - the same long-running-work design applied to your own APIs.",
+  "related": [
+    "fastapi-essentials",
+    "retries-backoff-idempotency",
+    "jwt-authentication",
+    "server-sent-events",
+    "web-security-owasp"
+  ],
+  "flashcards": [
+    {
+      "front": "Which HTTP methods are idempotent?",
+      "back": "GET, HEAD, OPTIONS, PUT, DELETE (POST and usually PATCH are not)."
+    },
+    {
+      "front": "401 vs 403?",
+      "back": "401: not authenticated (missing/invalid credentials). 403: authenticated but not permitted."
+    },
+    {
+      "front": "What status for 'job accepted, processing later'?",
+      "back": "202 Accepted, ideally with a Location/status URL to poll."
+    },
+    {
+      "front": "Offset vs cursor pagination?",
+      "back": "Offset is simple but slow on deep pages and unstable under inserts; cursor/keyset uses the last seen key - stable and index-friendly."
+    },
+    {
+      "front": "How do you make a POST safe to retry?",
+      "back": "Client sends an `Idempotency-Key`; server stores key -> result and returns the stored result on repeats."
+    },
+    {
+      "front": "Standard JSON error format RFC?",
+      "back": "RFC 9457 Problem Details (`type`, `title`, `status`, `detail`, `instance`)."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "A client sends valid JSON but `qty` is negative. Best status code?",
+      "options": [
+        "400 Bad Request or 422 Unprocessable Content",
+        "500 Internal Server Error",
+        "200 OK with error field",
+        "404 Not Found"
+      ],
+      "answer_index": 0,
+      "explanation": "It's a client validation error; FastAPI uses 422 for validation failures, 400 is also common."
+    },
+    {
+      "question": "Which endpoint design is most RESTful for retrying a failed upload?",
+      "options": [
+        "GET /retryUpload?id=42",
+        "POST /uploads/42/retry",
+        "PUT /retry",
+        "DELETE /uploads/42/error"
+      ],
+      "answer_index": 1,
+      "explanation": "A POST to an action sub-resource keeps the URL noun-based and uses a non-safe method for a side effect."
+    },
+    {
+      "question": "Why is `OFFSET 500000 LIMIT 50` problematic?",
+      "options": [
+        "Syntax error in PostgreSQL",
+        "It returns random rows",
+        "The database must scan and discard 500,000 rows, and results shift when rows are inserted",
+        "It locks the table"
+      ],
+      "answer_index": 2,
+      "explanation": "Keyset pagination (`WHERE key < last ORDER BY key LIMIT n`) avoids both problems."
+    },
+    {
+      "question": "Which is a breaking API change?",
+      "options": [
+        "Adding a new optional query parameter",
+        "Adding a field to the response",
+        "Adding a new endpoint",
+        "Renaming a response field"
+      ],
+      "answer_index": 3,
+      "explanation": "Existing clients reading the old field name break; additive changes are safe if clients ignore unknown fields."
+    }
+  ],
+  "interview": [
+    {
+      "question": "Design an API for uploading a large report file and processing it asynchronously.",
+      "difficulty": "hard",
+      "answer_md": "1. **Get an upload target**: `POST /v1/uploads` with metadata (`org_id`, `report_type`, filename). Server creates an upload record (`status=Pending`) and returns `201` with a **presigned S3 PUT URL**. The client uploads the file directly to S3 - the API never streams large bodies (and avoids API Gateway payload/time limits).\n2. **Start processing**: an S3 event, or the client calling `POST /v1/uploads/{id}/process`, enqueues a job and returns `202 Accepted` with `Location: /v1/uploads/{id}`. Use an `Idempotency-Key` (or the upload ID itself) so retries don't start duplicate jobs.\n3. **Worker** (Lambda/ECS) downloads, validates, transforms and upserts; updates status `Processing -> Completed | Error` with row counts and error details.\n4. **Status**: `GET /v1/uploads/{id}` returns status, progress, counts, and an error report link. Optionally push updates via SSE or a webhook callback.\n5. **List**: `GET /v1/uploads?status=Error&cursor=...` with cursor pagination.\n\nCross-cutting: auth scoped by org (a user can only see their org's uploads), validation errors as 422 Problem Details, idempotent DB writes (`ON CONFLICT`) so reprocessing is safe, and observability (correlation ID through API, queue and worker logs)."
+    },
+    {
+      "question": "What does idempotency mean in HTTP and why does it matter?",
+      "difficulty": "medium",
+      "answer_md": "An operation is **idempotent** if performing it once or many times leaves the server in the same state. GET, PUT and DELETE are idempotent by definition: `PUT /orders/1 {...}` twice yields the same order; `DELETE /orders/1` twice leaves it deleted (the second may return 404, but state is the same). POST is not: two `POST /payments` can charge twice.\n\nIt matters because **networks are unreliable**: a client may time out after the server committed the work, and the only safe recovery is to retry. Load balancers, SDKs and queues (SQS at-least-once delivery) also retry automatically.\n\nMaking non-idempotent operations safe:\n- **Idempotency keys**: client generates a UUID per logical operation; the server stores `key -> response` (with a TTL) and replays the stored response on duplicates.\n- **Natural keys + upserts**: `INSERT ... ON CONFLICT (id, orgid) DO NOTHING/UPDATE` so reprocessing a file doesn't duplicate rows.\n- **Conditional updates**: `UPDATE ... WHERE status = 'Processing'` or `If-Match` ETags.\n\nRule: only auto-retry operations you've made idempotent."
+    },
+    {
+      "question": "How do you choose between returning 400, 404, 409 and 422?",
+      "difficulty": "easy",
+      "answer_md": "- **400 Bad Request**: the request itself is malformed - invalid JSON, wrong content type, unparseable parameters.\n- **422 Unprocessable Content**: well-formed but semantically invalid - a required field missing, `qty` negative, unknown enum value. FastAPI returns 422 automatically for Pydantic validation failures, with a list of field errors.\n- **404 Not Found**: the target resource doesn't exist (or the caller isn't allowed to know it exists - returning 404 instead of 403 avoids leaking existence of other tenants' resources).\n- **409 Conflict**: the request conflicts with the current state - creating a duplicate unique resource, a version mismatch in optimistic locking, or retrying an upload that's already processing.\n\nExample:\n```python\n@app.post(\"/uploads/{id}/retry\", status_code=202)\ndef retry(id: int):\n    up = get_upload(id) or raise_404()\n    if up.status == \"Processing\":\n        raise HTTPException(409, \"upload is already processing\")\n    ...\n```\nWhatever you choose, be consistent and pair the code with a structured error body."
+    }
+  ]
+}

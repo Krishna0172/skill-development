@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% from "macros.html" import empty, stat %}
+{% block title %}Practice{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Practice <a class="btn" style="font-size:.5em;vertical-align:middle" href="/practice/new">+ New exercise</a></h1><p>Python and SQL exercises run against hidden tests locally. Text exercises are self-assessed. The solution unlocks after your first attempt.</p></div>
+</div>
+<div class="grid g3 mb">
+  {{ stat("Solved", counts.solved, href="/practice?status=solved") }}
+  {{ stat("Attempted, not solved", counts.attempted, href="/practice?status=attempted") }}
+  {{ stat("Not started", counts.pending, href="/practice?status=pending") }}
+</div>
+<form method="get" action="/practice" class="grid g4 mb">
+  <input name="q" value="{{ q }}" placeholder="Search exercises…" style="grid-column:span 2">
+  <select name="difficulty"><option value="">Any difficulty</option>{% for d in ["easy", "medium", "hard"] %}<option value="{{ d }}" {{ 'selected' if d == difficulty }}>{{ d|label }}</option>{% endfor %}</select>
+  <div class="row"><select name="status"><option value="">Any status</option>{% for s in ["pending", "attempted", "solved"] %}<option value="{{ s }}" {{ 'selected' if s == status }}>{{ s|label }}</option>{% endfor %}</select><button class="btn">Filter</button></div>
+</form>
+<div class="small faint mb">{{ count }} exercises</div>
+{% if not groups %}{{ empty("No exercises match", "Clear the filters to see everything.") }}{% endif %}
+{% for cat, label_, rows in groups %}
+  <section class="card mb">
+    <header><h2>{{ label_ }}</h2><span class="tiny faint num">{{ rows|selectattr("status", "equalto", "solved")|list|length }}/{{ rows|length }} solved</span></header>
+    <div class="flush"><table class="table">
+      {% for r in rows %}
+        <tr>
+          <td style="width:50%"><a href="/practice/{{ r.id }}">{{ r.title }}</a>{% if r.retry_needed %} <span class="badge warn">retry</span>{% endif %}</td>
+          <td>{{ badge(r.difficulty) }}</td>
+          <td class="small muted">{{ r.language|upper }}{% if r.auto_check %} · auto-checked{% endif %}</td>
+          <td>{{ badge(r.status) }}</td>
+          <td class="tiny faint num" style="text-align:right">{% if r.attempts %}{{ r.attempts }} attempt{{ 's' if r.attempts != 1 }} · {{ r.last_attempt_at|rel }}{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </table></div>
+  </section>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,153 @@
+{
+  "slug": "be-postgres-locking-deadlocks",
+  "title": "PostgreSQL locking, SKIP LOCKED queues and deadlocks",
+  "skill": "transactions-locking",
+  "extra_skills": [
+    "postgresql",
+    "python-concurrency"
+  ],
+  "category": "Database",
+  "difficulty": "advanced",
+  "tags": [
+    "locks",
+    "for-update",
+    "skip-locked",
+    "deadlock",
+    "advisory-locks",
+    "pg_locks",
+    "40P01"
+  ],
+  "summary": "Postgres uses MVCC so readers don't block writers, but writes take row locks and DDL takes table locks. `SELECT … FOR UPDATE` with `NOWAIT` or `SKIP LOCKED` gives precise control, and SKIP LOCKED is the basis of reliable Postgres job queues. Deadlocks happen when transactions lock the same rows in different orders; Postgres aborts one with SQLSTATE 40P01, so you prevent them with consistent lock ordering and handle them with a retry.",
+  "why_md": "- Concurrent workers updating the same rows (uploads, balances, inventory) will deadlock or lose updates without deliberate locking.\n- `SKIP LOCKED` job claiming is a core pattern for schedulers and workers.\n- Knowing `pg_locks`/`pg_stat_activity` turns a 'the DB is stuck' incident into a 5-minute fix.\n- Locking and isolation are favourite senior backend interview topics.",
+  "details_md": "### Row and table locks\n- Plain `SELECT` takes no row locks (MVCC snapshot). `UPDATE`/`DELETE` lock the rows they modify until commit/rollback.\n- `SELECT … FOR UPDATE` locks selected rows as if updating; `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` are weaker variants (FKs use KEY SHARE).\n- Table-level modes range from `ACCESS SHARE` (any SELECT) to `ACCESS EXCLUSIVE` (most `ALTER TABLE`, `DROP`, `TRUNCATE`), which blocks even reads. A DDL waiting for ACCESS EXCLUSIVE also blocks every query queued behind it — set `lock_timeout` for migrations.\n\n### NOWAIT and SKIP LOCKED\n- `FOR UPDATE NOWAIT`: error immediately (SQLSTATE 55P03) if a row is locked — for 'someone else is editing' UX.\n- `FOR UPDATE SKIP LOCKED`: silently skip locked rows — each worker grabs different rows. A job queue:\n```sql\nWITH next AS (\n  SELECT id FROM jobs WHERE status = 'queued' AND run_at <= now()\n  ORDER BY priority, run_at\n  LIMIT 10 FOR UPDATE SKIP LOCKED)\nUPDATE jobs j SET status = 'running', started_at = now()\nFROM next WHERE j.id = next.id RETURNING j.id, j.payload;\n```\nCommit immediately so the claim is visible; the status column (not the lock) then marks ownership. Add a partial index on `(priority, run_at) WHERE status = 'queued'`.\n\n### Deadlocks\nT1 locks row A then wants B; T2 locks B then wants A. Neither can proceed. After `deadlock_timeout` (1s default) Postgres detects the cycle and aborts one transaction with `ERROR: deadlock detected` (**40P01**). Typical causes: batch updates of the same rows in different orders, parent/child updates in opposite order, FK checks.\nPrevention: **consistent lock order** (sort IDs, `ORDER BY id FOR UPDATE` before updating), smaller and shorter transactions, avoid user think-time inside transactions. Handling: retry the **whole transaction** on 40P01 (and 40001 serialization failures) with backoff.\n\n### Advisory locks\nApplication-defined locks on a bigint key: `pg_advisory_xact_lock(key)` (released at transaction end — safe behind transaction-mode PgBouncer), `pg_try_advisory_lock` (non-blocking), session-level `pg_advisory_lock` (needs explicit unlock). Good for 'only one run of the nightly job for seller 7'.\n\n### Diagnosing\n`pg_stat_activity` shows state, `wait_event_type = 'Lock'`, query and `xact_start`. `pg_blocking_pids(pid)` lists blockers. Join `pg_locks` for details. Enable `log_lock_waits` and set `lock_timeout` / `idle_in_transaction_session_timeout`.",
+  "code_md": "```sql\n-- Who is blocked, and by whom?\nSELECT a.pid, a.state, a.wait_event_type, now() - a.xact_start AS xact_age,\n       pg_blocking_pids(a.pid) AS blocked_by, left(a.query, 80) AS query\nFROM pg_stat_activity a\nWHERE cardinality(pg_blocking_pids(a.pid)) > 0;\n\n-- Lock rows in a consistent order before updating them (prevents deadlocks)\nSELECT id FROM inventory WHERE sku = ANY(%(skus)s) ORDER BY id FOR UPDATE;\n\n-- Only one nightly settlement run per seller, released at commit/rollback\nSELECT pg_try_advisory_xact_lock(hashtext('settlement'), %(seller_id)s);\n```\n\n```python\nimport random, time\nimport psycopg2\nfrom psycopg2 import errorcodes\n\nRETRYABLE = {errorcodes.DEADLOCK_DETECTED, errorcodes.SERIALIZATION_FAILURE}  # 40P01, 40001\n\ndef run_in_tx(pool, fn, attempts=4):\n    for attempt in range(1, attempts + 1):\n        conn = pool.getconn()\n        try:\n            result = fn(conn)          # the WHOLE transaction is re-run\n            conn.commit()\n            return result\n        except psycopg2.Error as e:\n            conn.rollback()\n            if e.pgcode not in RETRYABLE or attempt == attempts:\n                raise\n            time.sleep(0.05 * 2 ** attempt + random.uniform(0, 0.05))   # backoff + jitter\n        finally:\n            pool.putconn(conn)\n\ndef adjust_stock(conn, changes: dict[int, int]):\n    with conn.cursor() as cur:\n        for item_id in sorted(changes):                 # consistent order\n            cur.execute(\"UPDATE inventory SET qty = qty + %s WHERE id = %s\",\n                        (changes[item_id], item_id))\n```",
+  "use_cases_md": "- Job runner claiming due jobs with `FOR UPDATE SKIP LOCKED` across multiple ECS tasks and threads.\n- Debit note processing locking the note row with `FOR UPDATE` before changing its status, so two workers can't both settle it.\n- Bulk report uploads updating overlapping inventory rows — sorted IDs + deadlock retry.\n- `pg_try_advisory_xact_lock` to make sure only one reconciliation per seller runs at a time.\n- Migration with `SET lock_timeout = '3s'` so an `ALTER TABLE` doesn't freeze production traffic.",
+  "mistakes_md": "- **Read-modify-write without locks** (`SELECT qty` → compute in Python → `UPDATE qty = x`): lost updates. Use `UPDATE … SET qty = qty + n` or `FOR UPDATE`.\n- **Updating batches in arbitrary order** (dict/DataFrame order) → deadlocks between parallel uploads.\n- **Retrying only the failed statement** after 40P01 — the transaction is aborted; rerun all of it.\n- **Long transactions** holding locks while calling APIs/S3 → blocked workers, idle-in-transaction.\n- **SKIP LOCKED without committing the claim** → long-held locks; or without a status column → jobs re-run after crash with no trace.\n- **Session advisory locks behind transaction-mode PgBouncer** → lock held by an unrelated client.\n- **DDL on hot tables without lock_timeout**.",
+  "best_practices_md": "- Prefer atomic single statements (`UPDATE … SET x = x + 1`, upserts) over read-modify-write.\n- Lock in a consistent order (by primary key).\n- Keep transactions short; no network calls inside.\n- Retry whole transactions on 40P01/40001 with backoff and a cap.\n- `SKIP LOCKED` for queues; `NOWAIT` for fail-fast UX.\n- Prefer `pg_advisory_xact_lock` over session locks.\n- Set `lock_timeout`, `statement_timeout`, `idle_in_transaction_session_timeout`; enable `log_lock_waits`.",
+  "my_context_md": "This topic maps directly onto your code: `ForcesightJobSchedulerAndRunner` claims jobs with `SELECT … FOR UPDATE SKIP LOCKED` (src/lock.py, job_repo.py) and runs them via `ThreadPoolExecutor` in runner.py, with tests for locking; `DebitNotes` uses `SELECT … FOR UPDATE` row locks; and `ECSMarketplaceDataUpload` has deadlock retry. Worth checking: does the upload retry re-run the whole transaction (not just the failed statement), does it match on SQLSTATE 40P01 specifically, and are batch updates ordered by key to prevent the deadlocks in the first place?",
+  "revision_notes_md": "- MVCC: reads don't block writes; writes lock rows until commit.\n- `FOR UPDATE` / `NO KEY UPDATE` / `SHARE` / `KEY SHARE`.\n- `NOWAIT` → error 55P03; `SKIP LOCKED` → skip locked rows (queues).\n- Queue claim: CTE `… LIMIT n FOR UPDATE SKIP LOCKED` + `UPDATE … RETURNING`, commit fast.\n- Deadlock = lock cycle; detected after `deadlock_timeout`; error 40P01; one tx aborted.\n- Prevent: consistent order (sort IDs), short tx; handle: retry whole tx.\n- Advisory: `pg_advisory_xact_lock`, `pg_try_advisory_lock`.\n- Diagnose: `pg_stat_activity`, `pg_blocking_pids()`, `pg_locks`, `log_lock_waits`.\n- DDL needs ACCESS EXCLUSIVE → use `lock_timeout`.",
+  "exercises_md": "1. Open two psql sessions and reproduce a deadlock by updating rows 1 and 2 in opposite orders; read the server log message, then prevent it by ordering.\n2. Write a Python test with 4 threads claiming jobs via `FOR UPDATE SKIP LOCKED` and assert no job is claimed twice.\n3. Review the deadlock retry in `ECSMarketplaceDataUpload` and rewrite it as a generic `run_in_tx(fn)` helper that retries 40P01/40001 with jittered backoff.\n4. Write a monitoring query showing blocked sessions, their blockers and transaction age; run it while reproducing a lock wait.",
+  "related": [
+    "transactions-isolation",
+    "be-connection-pooling",
+    "be-background-tasks",
+    "postgres-upsert",
+    "retries-backoff-idempotency",
+    "python-threading-gil"
+  ],
+  "flashcards": [
+    {
+      "front": "SQLSTATE for deadlock detected?",
+      "back": "40P01 (psycopg2 `errorcodes.DEADLOCK_DETECTED`)."
+    },
+    {
+      "front": "NOWAIT vs SKIP LOCKED?",
+      "back": "NOWAIT errors immediately if a row is locked; SKIP LOCKED silently omits locked rows from the result."
+    },
+    {
+      "front": "Primary way to prevent deadlocks?",
+      "back": "Acquire locks in a consistent order (e.g. sorted by primary key) and keep transactions short."
+    },
+    {
+      "front": "Advisory lock that's safe with transaction-mode PgBouncer?",
+      "back": "`pg_advisory_xact_lock` / `pg_try_advisory_xact_lock` — released automatically at transaction end."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Four workers run `SELECT id FROM jobs WHERE status='queued' ORDER BY id LIMIT 1 FOR UPDATE` concurrently. What happens?",
+      "options": [
+        "Each worker gets a different job",
+        "Postgres raises a deadlock error",
+        "Workers 2-4 block waiting for the same row and then re-check it after worker 1 commits — effectively serializing",
+        "All four get the same job and run it in parallel"
+      ],
+      "answer_index": 2,
+      "explanation": "Without SKIP LOCKED they all target the same first row and wait on worker 1's lock. Adding SKIP LOCKED lets each worker take a different row."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Your transaction fails with SQLSTATE 40P01. What is the correct reaction?",
+      "options": [
+        "Roll back and re-run the entire transaction, ideally with backoff",
+        "Re-execute only the statement that failed",
+        "Increase deadlock_timeout so it doesn't happen",
+        "Switch to SERIALIZABLE isolation"
+      ],
+      "answer_index": 0,
+      "explanation": "A deadlock aborts the whole transaction; the only valid retry is from the start. Raising deadlock_timeout just delays detection."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To build a job queue where concurrent workers each claim different rows, use `SELECT … FOR UPDATE ____`.",
+      "answers": [
+        "SKIP LOCKED",
+        "skip locked"
+      ],
+      "explanation": "Rows locked by other transactions are skipped instead of waited on."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "The function `pg_____(pid)` returns the PIDs of sessions blocking the given backend.",
+      "answers": [
+        "blocking_pids"
+      ],
+      "explanation": "`pg_blocking_pids(pid)` is the quickest way to find blockers."
+    },
+    {
+      "type": "output",
+      "prompt": "This stdlib simulation retries a transaction that hits deadlocks. What does it print?",
+      "code": "class DBError(Exception):\n    def __init__(self, pgcode):\n        super().__init__(pgcode)\n        self.pgcode = pgcode\n\noutcomes = iter([\"40P01\", \"40P01\", None])\n\ndef transaction():\n    code = next(outcomes)\n    if code:\n        raise DBError(code)\n    return \"committed\"\n\ndef run_in_tx(fn, attempts=3):\n    for attempt in range(1, attempts + 1):\n        try:\n            return fn(), attempt\n        except DBError as e:\n            print(f\"attempt {attempt}: {e.pgcode}, rollback\")\n            if e.pgcode != \"40P01\" or attempt == attempts:\n                raise\n\nprint(run_in_tx(transaction))\n",
+      "answers": [
+        "attempt 1: 40P01, rollback\nattempt 2: 40P01, rollback\n('committed', 3)"
+      ],
+      "explanation": "The first two runs hit deadlocks and are retried; the third succeeds, so the function returns the tuple ('committed', 3)."
+    },
+    {
+      "type": "debug",
+      "prompt": "Two parallel upload workers frequently fail with 'deadlock detected'. Explain why and fix it.",
+      "code": "def apply_stock_changes(conn, changes: dict[str, int]):\n    # changes comes from a DataFrame groupby, order varies per file\n    with conn.cursor() as cur:\n        for sku, delta in changes.items():\n            cur.execute(\"UPDATE inventory SET qty = qty + %s WHERE sku = %s\", (delta, sku))\n    conn.commit()\n",
+      "answer": "Each `UPDATE` locks a row until commit. Worker 1 updates SKU-A then SKU-B; worker 2 (different file order) updates SKU-B then SKU-A. Each holds one lock and waits for the other → cycle → Postgres aborts one with 40P01.\n\nFix: lock/update in a consistent order, and retry on deadlock as a safety net:\n```python\ndef apply_stock_changes(conn, changes):\n    with conn.cursor() as cur:\n        for sku in sorted(changes):                      # same order in every worker\n            cur.execute(\"UPDATE inventory SET qty = qty + %s WHERE sku = %s\", (changes[sku], sku))\n    conn.commit()\n# call via run_in_tx(...) which retries the whole transaction on 40P01\n```\nAlternatively a single statement `UPDATE inventory i SET qty = qty + v.delta FROM (VALUES ...) v(sku, delta) WHERE i.sku = v.sku` — but its lock order is not guaranteed, so pre-lock with `SELECT … ORDER BY sku FOR UPDATE` if needed.",
+      "rubric": [
+        "Row locks held until commit, acquired in different orders",
+        "Explains the wait cycle and 40P01 abort",
+        "Fix by sorting keys / consistent order",
+        "Retry whole transaction as a safety net"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain how a Postgres-backed job queue using SKIP LOCKED works, including crash recovery.",
+      "answer": "Jobs live in a table with `status`, `run_at`, `attempts`, `locked_by`, `heartbeat_at`. A worker runs, in one short transaction, a CTE selecting due `queued` jobs `ORDER BY priority, run_at LIMIT n FOR UPDATE SKIP LOCKED`, then `UPDATE … SET status='running', locked_by=me, started_at=now() … RETURNING`. It commits immediately: the row lock was only needed to claim atomically; the status now marks ownership. Other workers skip locked rows, so they never wait on each other or claim the same job. The worker runs the job outside the transaction and records `succeeded`/`failed` (with attempts and error). For crashes, the worker updates `heartbeat_at` periodically and a reaper re-queues `running` jobs whose heartbeat is stale; jobs must be idempotent since they may run twice. A partial index on queued jobs keeps the claim query fast.",
+      "rubric": [
+        "Claim with FOR UPDATE SKIP LOCKED + UPDATE status in short tx",
+        "Commit quickly; status marks ownership",
+        "Heartbeat/reaper for crashed workers",
+        "Idempotent jobs and supporting index"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Production is 'hanging': many API requests time out on simple updates. What queries do you run first?",
+      "answer": "1. `SELECT pid, state, wait_event_type, wait_event, now()-xact_start AS age, pg_blocking_pids(pid), left(query,100) FROM pg_stat_activity WHERE datname = current_database() ORDER BY age DESC;` to find blocked sessions and the oldest transactions.\n2. Follow `pg_blocking_pids` to the root blocker — often an `idle in transaction` session or a migration waiting on ACCESS EXCLUSIVE.\n3. Inspect `pg_locks` joined to `pg_class` for the relation/mode.\nThen decide: `pg_cancel_backend(pid)` / `pg_terminate_backend(pid)` for the root blocker, and fix the cause (missing commit, long transaction, DDL without lock_timeout).",
+      "rubric": [
+        "pg_stat_activity with wait events and transaction age",
+        "pg_blocking_pids / pg_locks to find root blocker",
+        "Cancel/terminate and fix root cause (idle in transaction, DDL)"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is a deadlock in Postgres, how is it detected, and how do you prevent it in application code?",
+      "difficulty": "medium",
+      "answer_md": "A deadlock is a cycle of transactions each waiting for a lock held by another — e.g. T1 updated order 1 and waits for order 2, while T2 updated order 2 and waits for order 1. When a lock wait exceeds `deadlock_timeout` (1s default), Postgres runs deadlock detection on the wait-for graph; if it finds a cycle it aborts one transaction with `ERROR: deadlock detected` (SQLSTATE 40P01), releasing its locks so the other proceeds.\n\nPrevention: acquire locks in a **consistent global order** (sort IDs before updating, or `SELECT … ORDER BY id FOR UPDATE` first); keep transactions short and avoid external calls inside them; reduce the rows touched per transaction (smaller batches); use single-statement atomic updates. Because deadlocks can still occur (FKs, triggers, index ordering), wrap transactions in a retry helper that rolls back and re-runs the **whole** transaction on 40P01 with jittered backoff and a retry cap, and log occurrences to find hotspots."
+    },
+    {
+      "question": "Compare SELECT FOR UPDATE, optimistic locking with a version column, and advisory locks.",
+      "difficulty": "hard",
+      "answer_md": "**FOR UPDATE (pessimistic)**: lock the row up front; other writers wait (or NOWAIT/SKIP LOCKED). Simple and correct for short read-modify-write transactions with real contention — e.g. settling a debit note. Cost: blocking, deadlock risk, can't span user think-time.\n\n**Optimistic locking**: read `version`, later `UPDATE … SET …, version = version + 1 WHERE id = %s AND version = %s`; zero rows updated means someone else changed it → reload/retry or return 409. No locks held between read and write, so it works across HTTP requests (edit forms, APIs with ETags/If-Match). Best when conflicts are rare.\n\n**Advisory locks**: locks on an application-chosen key, not on rows. Good for coarse mutual exclusion over something that isn't a single row — 'only one reconciliation per seller', 'one migration runner'. Use `pg_try_advisory_xact_lock` so it's released at commit and works behind PgBouncer transaction pooling. They're only respected by code that asks for them."
+    }
+  ]
+}

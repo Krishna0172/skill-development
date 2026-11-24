@@ -1,0 +1,163 @@
+{
+  "slug": "be-request-lifecycle",
+  "title": "Request lifecycle: ASGI, Uvicorn and FastAPI internals",
+  "skill": "api-design",
+  "extra_skills": [
+    "fastapi",
+    "python-asyncio"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "asgi",
+    "wsgi",
+    "uvicorn",
+    "fastapi",
+    "starlette",
+    "threadpool",
+    "lambda"
+  ],
+  "summary": "A FastAPI request travels from a TCP socket through Uvicorn (the ASGI server), the Starlette middleware stack, the router, dependency resolution, Pydantic validation, your handler and response serialization. Knowing each stage tells you where latency, errors and blocking calls really come from. Sync `def` handlers run in a threadpool; `async def` handlers run on the event loop and must never block.",
+  "why_md": "- Debugging slow or hanging APIs almost always comes down to *which stage* is slow: a blocking call in an `async def`, an exhausted threadpool, or heavy serialization.\n- Interviewers love \"what happens when a request hits your API?\" — a crisp layered answer signals seniority.\n- Choosing between Lambda + API Gateway and a long-running ASGI service (ECS) is an architecture decision you will make for AI serving endpoints too.\n- Understanding ASGI explains why streaming (SSE) and WebSockets work in FastAPI but not in classic Flask/WSGI.",
+  "details_md": "### WSGI vs ASGI\n**WSGI** (Flask, Django classic) is a synchronous callable: `app(environ, start_response)` returns the whole body. One request occupies one worker thread/process for its full duration. **ASGI** is async: `await app(scope, receive, send)`. The app *receives* events (request body chunks) and *sends* events (`http.response.start`, `http.response.body`), so one process can interleave thousands of in-flight requests while they wait on I/O, and can stream or hold WebSockets.\n\n### From socket to handler\n1. **Uvicorn** accepts the TCP connection, parses HTTP (httptools/h11), builds the `scope` dict and calls the app. `uvicorn --workers 4` (or gunicorn with uvicorn workers) runs 4 *processes*, each with its own event loop — that is how you use multiple cores.\n2. **Middleware stack** (Starlette): `ServerErrorMiddleware` outermost, then your middlewares (last added = outermost), then `ExceptionMiddleware`.\n3. **Router** matches path + method to a route; no match → 404/405.\n4. **Dependency resolution**: FastAPI walks the `Depends` graph (cached per request), extracting path/query/header/body params.\n5. **Validation**: Pydantic v2 parses inputs; failures raise `RequestValidationError` → 422.\n6. **Handler** runs. `async def` runs directly on the loop; plain `def` is sent to a threadpool (AnyIO, default 40 tokens).\n7. **Serialization**: return value filtered through `response_model`, converted with Pydantic, JSON-encoded, then sent. Yield-dependency teardown runs around/after this.\n\n### Sync vs async handlers\nAn `async def` handler that calls `requests.get` or a psycopg2 query blocks the *entire* loop — every other request in that worker freezes. Either use async libraries (httpx.AsyncClient, asyncpg/psycopg3 async) or make the handler `def` so it runs in the threadpool, or wrap one call with `await run_in_threadpool(...)` / `asyncio.to_thread`.\n\n### Compared with Lambda + API Gateway\nAPI Gateway terminates HTTP, does auth/throttling, and invokes a Lambda with an event JSON; each container serves **one request at a time**, scaling by adding containers (cold starts, connection storms on Postgres). A FastAPI service on ECS keeps warm processes, pools and caches across requests, and handles concurrency inside the process. Adapters like Mangum let a FastAPI app run inside Lambda, but you inherit Lambda's one-request-per-container model.",
+  "code_md": "```python\n# Minimal raw ASGI app — what Uvicorn actually calls\nasync def app(scope, receive, send):\n    assert scope[\"type\"] == \"http\"\n    body = b\"\"\n    while True:                      # read the (possibly chunked) request body\n        event = await receive()\n        body += event.get(\"body\", b\"\")\n        if not event.get(\"more_body\"):\n            break\n    await send({\"type\": \"http.response.start\", \"status\": 200,\n                \"headers\": [(b\"content-type\", b\"text/plain\")]})\n    await send({\"type\": \"http.response.body\", \"body\": b\"got %d bytes\" % len(body)})\n# run: uvicorn module:app --workers 2\n```\n\n```python\nfrom fastapi import FastAPI\nfrom fastapi.concurrency import run_in_threadpool\nimport httpx, requests\n\napp = FastAPI()\n\n@app.get(\"/bad\")\nasync def bad():\n    return requests.get(\"https://example.com\").status_code   # blocks the event loop!\n\n@app.get(\"/sync-ok\")\ndef sync_ok():                                               # runs in threadpool\n    return requests.get(\"https://example.com\").status_code\n\n@app.get(\"/async-ok\")\nasync def async_ok():\n    async with httpx.AsyncClient() as c:                     # non-blocking I/O\n        r = await c.get(\"https://example.com\")\n    return r.status_code\n\n@app.get(\"/mixed\")\nasync def mixed():\n    rows = await run_in_threadpool(legacy_psycopg2_query)    # offload one blocking call\n    return {\"n\": len(rows)}\n```",
+  "use_cases_md": "- Serving a seller dashboard API where most endpoints run psycopg2 queries: keep them `def` so they use the threadpool instead of blocking the loop.\n- An LLM chat endpoint that streams tokens via SSE — only possible because ASGI can send multiple body chunks.\n- Diagnosing p99 latency spikes: an `async def` endpoint calling boto3 synchronously stalls every concurrent request on that worker.\n- Deciding whether a marketplace report API should stay on Lambda + API Gateway (spiky, low traffic) or move to ECS with Uvicorn workers (steady traffic, pooled DB connections).",
+  "mistakes_md": "- **Blocking calls inside `async def`** (requests, psycopg2, boto3, `time.sleep`): freezes the worker. Fix: async client, `def` handler, or `run_in_threadpool`.\n- **Assuming `--workers` shares memory**: each worker is a separate process with its own pool/cache. Size DB pools per worker.\n- **CPU-heavy work in a handler** (pandas on a 200 MB report): starves the loop/threadpool. Push it to a background worker/queue.\n- **Thinking the threadpool is unlimited**: default ~40 threads; 40 slow sync calls queue everything else.\n- **Doing expensive setup per request** (creating clients/pools): use the `lifespan` handler to create them once per process.",
+  "best_practices_md": "- Default to `def` handlers when your stack is sync (psycopg2, boto3); go `async def` only when everything awaited is truly async.\n- Create clients and pools in `lifespan`, store on `app.state`.\n- Run 1 worker per container on ECS/K8s and scale containers, or `workers ≈ cores` on a VM.\n- Add a timing middleware so you can see per-stage latency.\n- Keep handlers thin: validation in models, logic in services, heavy work in queues.\n- Put a reverse proxy/load balancer (ALB, nginx) in front for TLS and slow-client buffering.",
+  "my_context_md": "Your `GetLlmData` / `ECSLlmQueryProcess` services are Flask, i.e. WSGI: each request holds a worker for its full duration, and streaming LLM responses is awkward. Your `ECSInventoryPriceTracking/app/fetchers/spapi.py` already uses async httpx with an `asyncio.Lock` for pacing — exactly the kind of non-blocking I/O an `async def` FastAPI handler needs. Conversely, anything using the psycopg2 `ThreadedConnectionPool` from `AmazonVendorBankRecon/db.py` is blocking and belongs in `def` handlers (threadpool). Your boto3 Lambda usage is the API Gateway → Lambda model: one request per container, which is why the PgBouncer layer matters there.",
+  "revision_notes_md": "- WSGI: sync `app(environ, start_response)`; ASGI: `await app(scope, receive, send)`.\n- Uvicorn = ASGI server; `--workers N` = N processes, each with its own event loop.\n- Order: server → ServerErrorMiddleware → user middleware (last added outermost) → ExceptionMiddleware → router → dependencies → validation (422) → handler → response_model serialization → send.\n- `async def` runs on the loop; `def` runs in AnyIO threadpool (~40 threads).\n- Blocking call in `async def` = whole worker stalls.\n- Offload: `run_in_threadpool` / `asyncio.to_thread`.\n- Use `lifespan` for per-process setup (pools, clients).\n- Lambda: one request per container, scale by containers, cold starts; ECS: long-lived processes with in-process concurrency.",
+  "exercises_md": "1. Write a raw ASGI app (no framework) that echoes the request path and body length; run it with `uvicorn` and hit it with curl.\n2. Create a FastAPI app with `async def` endpoint calling `time.sleep(2)` and a `def` endpoint doing the same. Fire 10 concurrent requests at each (e.g. with `httpx` + `asyncio.gather`) and compare total time.\n3. Add a `lifespan` that creates a psycopg2 `ThreadedConnectionPool` once and closes it on shutdown; log when each happens.\n4. Write a one-page comparison of serving one of your Flask LLM endpoints on Lambda + API Gateway vs ECS + Uvicorn: cold start, concurrency, DB connections, streaming.",
+  "related": [
+    "fastapi-essentials",
+    "python-asyncio",
+    "be-fastapi-middleware",
+    "be-dependency-injection",
+    "aws-lambda-essentials",
+    "ecs-fargate"
+  ],
+  "flashcards": [
+    {
+      "front": "ASGI app signature?",
+      "back": "`async def app(scope, receive, send)` — receive request events, send response events (start + body chunks)."
+    },
+    {
+      "front": "Where does a plain `def` FastAPI handler run?",
+      "back": "In the AnyIO threadpool (default ~40 threads), so blocking I/O doesn't stall the event loop."
+    },
+    {
+      "front": "What does `uvicorn --workers 4` create?",
+      "back": "4 separate processes, each with its own event loop, memory, pools and caches."
+    },
+    {
+      "front": "Which middleware is outermost in Starlette among user-added ones?",
+      "back": "The last one added with `add_middleware` (it wraps everything added before)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "An `async def` FastAPI endpoint runs a psycopg2 query that takes 3 seconds. What happens to other requests on that Uvicorn worker during those 3 seconds?",
+      "options": [
+        "They run normally because FastAPI moves async handlers to a threadpool",
+        "They are stalled because the blocking call holds the event loop",
+        "They are rejected with 503",
+        "They are routed to another worker automatically by Uvicorn"
+      ],
+      "answer_index": 1,
+      "explanation": "`async def` handlers run on the event loop itself. A blocking psycopg2 call never yields control, so every other coroutine on that worker waits."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which statement about API Gateway + Lambda versus FastAPI on ECS is correct?",
+      "options": [
+        "Both handle many concurrent requests inside a single process",
+        "Lambda keeps one warm process per route",
+        "ECS cannot autoscale",
+        "A Lambda execution environment processes one request at a time, scaling by adding environments"
+      ],
+      "answer_index": 3,
+      "explanation": "Lambda concurrency = number of execution environments, each handling a single event at a time. A Uvicorn worker handles many requests concurrently."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "In FastAPI, request input that fails Pydantic validation produces HTTP status code ____ by default.",
+      "answers": [
+        "422",
+        "422 unprocessable entity",
+        "422 unprocessable content"
+      ],
+      "explanation": "`RequestValidationError` is handled by a default exception handler that returns 422 with error details."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To call one blocking function from inside an `async def` handler without stalling the loop you can use `await asyncio.____(func, *args)`.",
+      "answers": [
+        "to_thread"
+      ],
+      "explanation": "`asyncio.to_thread` (or Starlette's `run_in_threadpool`) runs the function in a worker thread and awaits its result."
+    },
+    {
+      "type": "output",
+      "prompt": "This simulates how middleware wraps an app (each `make_mw` call wraps the current app, like `add_middleware`). What does it print?",
+      "code": "def make_mw(name, app):\n    def mw(req):\n        print(f\"{name} in\")\n        resp = app(req)\n        print(f\"{name} out\")\n        return resp\n    return mw\n\ndef handler(req):\n    print(\"handler\")\n    return \"ok\"\n\napp = handler\nfor name in [\"A\", \"B\"]:\n    app = make_mw(name, app)\nprint(app(\"req\"))\n",
+      "answers": [
+        "B in\nA in\nhandler\nA out\nB out\nok"
+      ],
+      "explanation": "B wraps A which wraps the handler, so B is outermost: it runs first on the way in and last on the way out. Starlette behaves the same — the last middleware added is the outermost."
+    },
+    {
+      "type": "output",
+      "prompt": "Two async 'handlers' run concurrently on one event loop. What does this print?",
+      "code": "import asyncio\n\nasync def handler(name, delay):\n    print(f\"start {name}\")\n    await asyncio.sleep(delay)\n    print(f\"end {name}\")\n\nasync def main():\n    await asyncio.gather(handler(\"a\", 0.2), handler(\"b\", 0.05))\n\nasyncio.run(main())\n",
+      "answers": [
+        "start a\nstart b\nend b\nend a"
+      ],
+      "explanation": "`await asyncio.sleep` yields to the loop, so `b` starts while `a` waits, and `b` finishes first. Replace it with `time.sleep` and you'd get start a, end a, start b, end b — that's a blocked loop."
+    },
+    {
+      "type": "debug",
+      "prompt": "Under load this endpoint makes the whole service slow, even for unrelated endpoints. What's wrong and how do you fix it?",
+      "code": "import boto3\nfrom fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get(\"/reports/{key}\")\nasync def get_report(key: str):\n    s3 = boto3.client(\"s3\")\n    obj = s3.get_object(Bucket=\"seller-reports\", Key=key)\n    return {\"size\": obj[\"ContentLength\"]}\n",
+      "answer": "boto3 is synchronous. Inside an `async def` handler, `get_object` blocks the event loop, so every other request on that worker waits. It also creates a new client per request (slow).\n\n```python\nimport boto3\nfrom fastapi import FastAPI\n\napp = FastAPI()\ns3 = boto3.client(\"s3\")          # create once (clients are thread-safe)\n\n@app.get(\"/reports/{key}\")\ndef get_report(key: str):          # plain def -> runs in threadpool\n    obj = s3.get_object(Bucket=\"seller-reports\", Key=key)\n    return {\"size\": obj[\"ContentLength\"]}\n```\nAlternatively keep `async def` and `await run_in_threadpool(s3.get_object, ...)`, or use an async S3 client.",
+      "rubric": [
+        "Identifies boto3 call as blocking inside async def",
+        "Explains it stalls the event loop for all requests on the worker",
+        "Fix: make handler `def` or offload with run_in_threadpool/to_thread",
+        "Creates the client once instead of per request"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Walk me through what happens from the moment a client opens a TCP connection to the moment it receives a JSON response from a FastAPI endpoint.",
+      "answer": "1. **Uvicorn** worker accepts the TCP connection, parses HTTP and builds an ASGI `scope`.\n2. It calls the app: **ServerErrorMiddleware** (catches unhandled errors → 500), then **user middleware** (CORS, timing, request-id; last added is outermost), then **ExceptionMiddleware** (maps HTTPException/custom handlers).\n3. **Router** matches path and method (404/405 otherwise).\n4. FastAPI resolves the **dependency graph** (DB session, auth user), cached per request.\n5. **Pydantic validates** path/query/body params; failures → 422.\n6. The **handler** runs — on the event loop if `async def`, in the threadpool if `def`.\n7. The return value is **serialized** through `response_model` and JSON-encoded; Uvicorn sends `http.response.start` and body events. Yield-dependency teardown (e.g. closing the DB session) runs at the end.",
+      "rubric": [
+        "ASGI server (Uvicorn) and scope/receive/send",
+        "Middleware stack before routing",
+        "Dependency resolution and Pydantic validation (422)",
+        "async vs def handler execution and response serialization"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "When would you keep an API on API Gateway + Lambda instead of moving it to FastAPI on ECS?",
+      "answer": "Keep Lambda when traffic is **spiky or low** (pay per request, scales to zero), endpoints are **short** (<29s API Gateway integration timeout by default), and you want managed auth/throttling with minimal ops. Move to ECS + Uvicorn when traffic is **steady** (always-on is cheaper), you need **long requests, streaming/SSE or WebSockets**, warm in-process caches, or stable DB connection pools — Lambda's one-request-per-environment model causes cold starts and Postgres connection storms (mitigated with RDS Proxy/PgBouncer).",
+      "rubric": [
+        "Lambda fits spiky/low traffic and short requests",
+        "ECS fits steady traffic, streaming, long-lived pools/caches",
+        "Mentions cold starts and DB connection storms"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "Explain the difference between WSGI and ASGI and why it matters for an LLM-backed API.",
+      "difficulty": "medium",
+      "answer_md": "WSGI is a synchronous calling convention: the server calls `app(environ, start_response)` and the app returns the full body. Each in-flight request ties up a worker thread or process. ASGI is asynchronous: `await app(scope, receive, send)`, with the app receiving and sending *events*. This allows one process to multiplex thousands of connections waiting on I/O, and allows sending the body in multiple chunks.\n\nFor an LLM API this matters twice. First, LLM calls are slow (seconds) and I/O bound — with WSGI you'd need hundreds of threads to keep many users waiting; with ASGI an event loop handles them cheaply using an async HTTP client. Second, token streaming via Server-Sent Events needs incremental `send` calls; FastAPI's `StreamingResponse` relies on ASGI. A Flask/WSGI app can stream with generators, but each stream pins a worker for its whole duration. The catch: under ASGI you must never block the loop — use async clients or push sync code to the threadpool."
+    },
+    {
+      "question": "Your FastAPI service's p99 latency jumped after a teammate converted all handlers to `async def`. What do you suspect and how do you confirm it?",
+      "difficulty": "hard",
+      "answer_md": "Suspect blocking I/O now running on the event loop: psycopg2 queries, boto3 calls, `requests`, or `time.sleep` inside `async def`. Previously as `def` handlers they ran in the threadpool, so a slow call only tied up one thread; now a single slow call stalls every request on the worker, which shows up as p99 latency across *unrelated* endpoints.\n\nTo confirm: enable asyncio debug mode (`PYTHONASYNCIODEBUG=1` or `loop.set_debug(True)`, with `slow_callback_duration`) which logs callbacks that hold the loop too long; add a timing middleware plus per-dependency timing; profile with py-spy to see the loop thread sitting in socket reads. Fix by reverting to `def` for sync stacks, using async drivers (httpx.AsyncClient, psycopg3 async/asyncpg), or wrapping individual blocking calls in `run_in_threadpool`."
+    }
+  ]
+}

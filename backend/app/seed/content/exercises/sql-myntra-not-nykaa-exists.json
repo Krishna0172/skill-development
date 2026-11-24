@@ -1,0 +1,60 @@
+{
+  "slug": "sql-myntra-not-nykaa-exists",
+  "title": "Bought on Myntra but never on Nykaa (EXISTS / NOT EXISTS)",
+  "category": "sql",
+  "language": "sql",
+  "difficulty": "medium",
+  "skill": "sql-subqueries",
+  "concepts": [
+    "EXISTS",
+    "NOT EXISTS",
+    "semi-join",
+    "anti-join",
+    "NOT IN with NULLs"
+  ],
+  "related_topics": [
+    "sql-subqueries",
+    "sql-joins",
+    "sql-null-handling"
+  ],
+  "problem_md": "The beauty category team wants to cross-sell on Nykaa to fashion shoppers: find customers who have ordered on\n**Myntra** at least once but have **never** ordered on **Nykaa**. The `orders` table also contains guest orders\nwith `customer_id = NULL`.\n\n```sql\nCREATE TABLE customers (\n  customer_id INTEGER PRIMARY KEY,\n  name        TEXT NOT NULL\n);\n\nCREATE TABLE channels (\n  channel_id INTEGER PRIMARY KEY,\n  name       TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  order_id    INTEGER PRIMARY KEY,\n  customer_id INTEGER,          -- NULL = guest checkout\n  channel_id  INTEGER NOT NULL,\n  order_date  TEXT NOT NULL\n);\n```\n\n**Task.** Return `customer_id` and `name`, one row per customer (no duplicates even if they ordered on Myntra\nmany times). Order by `customer_id`.",
+  "examples": [
+    {
+      "input": "customer 1: Myntra + Nykaa; customer 2: Myntra twice; customer 4: Myntra + Blinkit; a guest order on Nykaa",
+      "output": "customer_id | name\n2           | Diya Sharma\n4           | Ananya Iyer\n6           | Meera Nair"
+    }
+  ],
+  "hints": [
+    "Start from `customers` and test two conditions per customer with subqueries rather than joining (a join would duplicate customer 2).",
+    "`EXISTS (SELECT 1 FROM orders ... WHERE customer matches AND channel is Myntra)` and `NOT EXISTS (... Nykaa)`.",
+    "Try writing the Nykaa condition with `NOT IN (SELECT o.customer_id ...)` too, and compare: the guest order's NULL silently empties the result."
+  ],
+  "starter_code": "-- Write your query here\nSELECT c.customer_id, c.name\nFROM customers c\n",
+  "solution_code": "SELECT c.customer_id, c.name\nFROM customers c\nWHERE EXISTS (\n        SELECT 1\n        FROM orders o\n        JOIN channels ch ON ch.channel_id = o.channel_id\n        WHERE o.customer_id = c.customer_id\n          AND ch.name = 'Myntra')\n  AND NOT EXISTS (\n        SELECT 1\n        FROM orders o\n        JOIN channels ch ON ch.channel_id = o.channel_id\n        WHERE o.customer_id = c.customer_id\n          AND ch.name = 'Nykaa')\nORDER BY c.customer_id;",
+  "solution_md": "**Semi-join and anti-join.** `EXISTS` asks \"is there at least one matching row?\" and stops at the first match\n(a *semi-join*); `NOT EXISTS` is the *anti-join*. Neither multiplies rows, so customer 2's two Myntra orders still\nyield a single output row - a plain `JOIN orders` would need `DISTINCT` to undo the fan-out.\n\n**Why not `NOT IN`?**\n\n```sql\nWHERE c.customer_id NOT IN (SELECT o.customer_id FROM orders o\n                            JOIN channels ch ON ch.channel_id = o.channel_id\n                            WHERE ch.name = 'Nykaa')\n```\n\nThe Nykaa subquery returns `(1, 3, NULL)` because of the guest order. `2 NOT IN (1, 3, NULL)` evaluates to\nUNKNOWN, so **every** customer is filtered out and the query returns nothing - silently. `NOT EXISTS` compares\nrow by row with `=` inside the subquery and is immune to this. `IN` (positive) is safe and equivalent to\n`EXISTS` here: `c.customer_id IN (SELECT o.customer_id ... 'Myntra')`.\n\n**Alternative with conditional aggregation** (single pass over orders):\n\n```sql\nSELECT c.customer_id, c.name\nFROM customers c\nJOIN orders o    ON o.customer_id = c.customer_id\nJOIN channels ch ON ch.channel_id = o.channel_id\nGROUP BY c.customer_id, c.name\nHAVING SUM(CASE WHEN ch.name = 'Myntra' THEN 1 ELSE 0 END) > 0\n   AND SUM(CASE WHEN ch.name = 'Nykaa'  THEN 1 ELSE 0 END) = 0\nORDER BY c.customer_id;\n```\n\n**Index.** `orders (customer_id, channel_id)` lets each `EXISTS` probe be an index-only lookup.",
+  "tests": {
+    "schema_sql": "CREATE TABLE customers (\n  customer_id INTEGER PRIMARY KEY,\n  name        TEXT NOT NULL\n);\n\nCREATE TABLE channels (\n  channel_id INTEGER PRIMARY KEY,\n  name       TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n  order_id    INTEGER PRIMARY KEY,\n  customer_id INTEGER,          -- NULL = guest checkout\n  channel_id  INTEGER NOT NULL,\n  order_date  TEXT NOT NULL\n);\n\nINSERT INTO customers VALUES\n (1,'Aarav Mehta'),(2,'Diya Sharma'),(3,'Kabir Rao'),\n (4,'Ananya Iyer'),(5,'Rohan Gupta'),(6,'Meera Nair');\n\nINSERT INTO channels VALUES (1,'Myntra'),(2,'Nykaa'),(3,'Blinkit');\n\nINSERT INTO orders VALUES\n (1, 1,1,'2024-03-01'),\n (2, 1,2,'2024-03-02'),\n (3, 2,1,'2024-03-02'),\n (4, 2,1,'2024-03-05'),\n (5, 3,2,'2024-03-03'),\n (6, 4,1,'2024-03-03'),\n (7, 4,3,'2024-03-04'),\n (8, 5,3,'2024-03-04'),\n (9, NULL,2,'2024-03-05'),\n (10,6,1,'2024-03-06');",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "customer_id",
+        "name"
+      ],
+      "rows": [
+        [
+          2,
+          "Diya Sharma"
+        ],
+        [
+          4,
+          "Ananya Iyer"
+        ],
+        [
+          6,
+          "Meera Nair"
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}

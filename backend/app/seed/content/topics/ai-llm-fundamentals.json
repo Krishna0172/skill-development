@@ -1,0 +1,155 @@
+{
+  "slug": "ai-llm-fundamentals",
+  "title": "How LLMs work (for backend engineers)",
+  "skill": "llm-applications",
+  "extra_skills": [
+    "nlp-basics"
+  ],
+  "difficulty": "intermediate",
+  "tags": [
+    "llm",
+    "next-token-prediction",
+    "sampling",
+    "temperature",
+    "top-p",
+    "hallucination"
+  ],
+  "summary": "A large language model repeatedly predicts a probability distribution over the next token and samples one, appending it and repeating. Temperature and top-p shape that sampling, which is why the same prompt can give different answers. The model only knows what was in its training data plus what you put in the prompt, so it can produce fluent, confident text that is simply wrong.",
+  "why_md": "- Every design decision in an LLM feature (prompting, RAG, validation, retries, evaluation) follows from 'it samples plausible tokens', not 'it looks up facts'.\n- Explains why text-to-SQL output must be validated before it runs and why answers vary between calls.\n- Interviewers routinely ask: what is temperature, why do LLMs hallucinate, base vs instruct model, how do you make output more deterministic.\n- Lets you reason about cost and latency: generation is one forward pass per output token.",
+  "details_md": "### Next-token prediction\nText is split into **tokens** (sub-word pieces). A transformer reads the whole token sequence and outputs a score (logit) for every token in its vocabulary. Softmax turns logits into probabilities, one token is chosen, appended, and the loop repeats until a stop token or a max-token limit. Input tokens are processed in parallel; output tokens are produced one at a time, which is why long answers are slow and output tokens usually cost more.\n\n### Sampling\n- **Greedy** (always pick the top token) is repeatable but can be bland or loop.\n- **Temperature** divides logits before softmax: `<1` sharpens the distribution (more deterministic), `>1` flattens it (more diverse). Near 0 is effectively greedy.\n- **Top-p (nucleus)** keeps the smallest set of tokens whose cumulative probability reaches p, then samples within it. **Top-k** keeps the k most likely.\nEven at temperature 0, providers do not always guarantee identical output (batching and floating-point effects), so design for variation rather than relying on it.\n\n### Base vs instruction-tuned\nA **base** model is trained only to continue text from the internet: ask it a question and it may continue with more questions. **Instruction-tuned / chat** models are further trained on instruction-response pairs and human preference data to follow instructions, use chat roles and refuse some requests. Applications almost always use chat models.\n\n### What an LLM cannot know\n- Anything after its **training cutoff**.\n- Your private data: your Postgres schema, today's orders, your return policy - unless you put it in the prompt (this is what RAG and tools are for).\n- Whether its own output is true. It has no built-in fact-check step.\n\n### Hallucination\nBecause the objective is 'plausible next token', the model will produce a confident column name that does not exist, a policy clause that was never written, or a citation that was never published. Mitigations: ground with retrieved context, ask it to say 'I don't know', constrain the output format, validate (e.g. run `EXPLAIN` on generated SQL against a read-only role), and evaluate on a test set.\n\n### Why outputs vary\nSampling randomness, model version updates behind the same alias, and small prompt changes all shift the distribution. Pin model versions where the provider allows, log the exact prompt and parameters, and treat prompts like code.\n",
+  "code_md": "```python\n# Temperature and softmax, from scratch (stdlib only)\nimport math\n\ndef softmax(logits, temperature=1.0):\n    scaled = [l / temperature for l in logits]\n    m = max(scaled)                       # subtract max for numerical stability\n    exps = [math.exp(s - m) for s in scaled]\n    total = sum(exps)\n    return [e / total for e in exps]\n\nlogits = {\"orders\": 3.0, \"order\": 2.5, \"sales\": 1.0}\nfor t in (0.2, 1.0, 2.0):\n    probs = softmax(list(logits.values()), t)\n    print(t, [round(p, 3) for p in probs])  # low t -> mass piles on 'orders'\n```\n\n```python\n# Same request against a hosted provider or a local Ollama server.\n# Both speak the OpenAI-compatible chat API; only base_url/model differ.\nfrom openai import OpenAI\n\nclient = OpenAI(base_url=\"http://localhost:11434/v1\", api_key=\"ollama\")  # local; key is ignored\nresp = client.chat.completions.create(\n    model=\"<a model you pulled with `ollama pull`>\",\n    messages=[{\"role\": \"user\", \"content\": \"Name one risk of running model-generated SQL.\"}],\n    temperature=0.2,   # low: we want consistent, factual-ish output\n    top_p=1.0,\n    max_tokens=100,\n)\nprint(resp.choices[0].message.content, resp.choices[0].finish_reason)\n```",
+  "use_cases_md": "- Text-to-SQL over orders/inventory: low temperature, schema in the prompt, validate before execution.\n- Product description drafts: higher temperature for variety, human review.\n- Support answers about return policy: ground in retrieved policy text; model alone would invent terms.\n- Classifying marketplace report rows or review sentiment: temperature ~0 for consistency.",
+  "mistakes_md": "- **Treating the model as a database** - asking for today's stock levels. It cannot know; fetch data and pass it in.\n- **Using high temperature for extraction/SQL** - adds randomness exactly where you want consistency.\n- **Assuming temperature 0 means reproducible** - still log outputs and validate.\n- **Tuning temperature and top-p together blindly** - change one at a time and measure.\n- **Trusting fluent output** - fluency is not correctness; validate.",
+  "best_practices_md": "- Low temperature for structured/factual tasks, higher only for creative text.\n- Ground answers in provided context and allow 'I don't know'.\n- Log model, version, parameters, prompt and output for every call.\n- Validate outputs (schema, SQL parse/EXPLAIN, allow-lists) before acting on them.\n- Look up model capabilities, context limits and cutoffs in the provider's model docs rather than memorising them.",
+  "my_context_md": "In `GetLlmData` / `ECSLlmQueryProcess` you stored the original and dynamic SQL the model produced and tracked user votes. That data is exactly what this topic explains: the SQL varies between runs because of sampling, and wrong-but-plausible SQL (a hallucinated column, a missing filter) is the hallucination failure mode. Down-voted rows in that table are a ready-made set of failure examples to study.",
+  "revision_notes_md": "- LLM = repeated next-token prediction over a vocabulary.\n- Logits -> softmax -> sample -> append -> repeat.\n- Temperature <1 sharpens, >1 flattens; ~0 is near-greedy.\n- Top-p keeps smallest set with cumulative prob >= p.\n- Base model continues text; instruct/chat model follows instructions.\n- Model doesn't know post-cutoff or private data unless it's in the prompt.\n- Hallucination = plausible but false; mitigate with grounding + validation.\n- Output tokens are generated sequentially -> latency and cost.",
+  "exercises_md": "1. Implement softmax with temperature and top-p filtering in plain Python; print which tokens survive p=0.9 for a sample logit list.\n2. Run the same text-to-SQL prompt 10 times locally via Ollama at temperature 0.0 and 1.0; diff the SQL produced.\n3. Ask a local model about a fictional return policy without context, then with the policy pasted in; record the hallucinations.\n4. Write a checklist of what your LLM chat backend should log per call to debug output variance.",
+  "related": [
+    "ai-transformers",
+    "ai-tokenization",
+    "ai-prompt-engineering",
+    "ai-llm-apis",
+    "ai-context-tokens-cost"
+  ],
+  "flashcards": [
+    {
+      "front": "What does an LLM compute at each generation step?",
+      "back": "A probability distribution over the next token (logits -> softmax); one token is sampled and appended."
+    },
+    {
+      "front": "Effect of temperature < 1?",
+      "back": "Sharpens the distribution: more probability on the top tokens, more deterministic output."
+    },
+    {
+      "front": "Top-p (nucleus) sampling?",
+      "back": "Sample only from the smallest set of tokens whose cumulative probability >= p."
+    },
+    {
+      "front": "Why do LLMs hallucinate?",
+      "back": "They are trained to produce plausible continuations, not verified facts; nothing checks truth unless you add grounding/validation."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "You generate SQL from questions and want the most consistent output. Which setting fits best?",
+      "options": [
+        "temperature close to 0",
+        "temperature 1.5",
+        "top_p 0.1 with temperature 2.0",
+        "max_tokens 5"
+      ],
+      "answer_index": 0,
+      "explanation": "Low temperature concentrates probability on the most likely tokens, making output more consistent. Very high temperature adds randomness; max_tokens only truncates."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Why can't an LLM answer 'how many orders did org 42 place yesterday?' on its own?",
+      "options": [
+        "Its context window is too small",
+        "Numbers can't be tokenized",
+        "Chat models refuse numeric questions",
+        "That data was never in its training data; it must be retrieved and passed in"
+      ],
+      "answer_index": 3,
+      "explanation": "Private and post-cutoff data is unknown to the model; you need tools (run SQL) or retrieval to supply it."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A model trained only to continue internet text, without instruction tuning, is called a ____ model.",
+      "answers": [
+        "base",
+        "base model",
+        "pretrained",
+        "pre-trained",
+        "foundation"
+      ],
+      "explanation": "Base (pretrained) models continue text; instruct/chat models are tuned to follow instructions."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Sampling only from the smallest set of tokens whose cumulative probability reaches p is called ____ sampling.",
+      "answers": [
+        "top-p",
+        "top p",
+        "nucleus",
+        "top-p (nucleus)",
+        "nucleus (top-p)"
+      ],
+      "explanation": "Top-p = nucleus sampling."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print? (top-p filtering over a sorted distribution)",
+      "code": "probs = {\"orders\": 0.5, \"order\": 0.25, \"sales\": 0.15, \"items\": 0.1}\n\ndef nucleus(probs, p):\n    kept, total = [], 0.0\n    for tok, pr in sorted(probs.items(), key=lambda kv: -kv[1]):\n        kept.append(tok)\n        total += pr\n        if total >= p:\n            break\n    return kept\n\nprint(nucleus(probs, 0.7))\nprint(nucleus(probs, 0.9))\nprint(len(nucleus(probs, 1.0)))",
+      "answers": [
+        "['orders', 'order']\n['orders', 'order', 'sales']\n4"
+      ],
+      "explanation": "0.5 < 0.7, 0.75 >= 0.7 -> two tokens. For 0.9: 0.5, 0.75, 0.9 >= 0.9 -> three tokens. For 1.0 all four are needed."
+    },
+    {
+      "type": "debug",
+      "prompt": "This text-to-SQL endpoint sometimes returns SQL referencing columns that don't exist, and results differ between identical requests. What's wrong and how do you fix it?",
+      "code": "def question_to_sql(client, question):\n    resp = client.chat.completions.create(\n        model=MODEL,\n        temperature=1.3,\n        messages=[{\"role\": \"user\", \"content\": f\"Write SQL for: {question}\"}],\n    )\n    sql = resp.choices[0].message.content\n    cur.execute(sql)          # run whatever came back\n    return cur.fetchall()",
+      "answer": "Three problems:\n1. **No schema in the prompt** - the model guesses table/column names (hallucination).\n2. **temperature=1.3** - adds randomness to a task that needs consistency.\n3. **Executes unvalidated output** with a privileged connection.\n\n```python\nSYSTEM = \"You write PostgreSQL SELECT queries only. Schema:\\n\" + SCHEMA_DDL\nresp = client.chat.completions.create(\n    model=MODEL, temperature=0,\n    messages=[{\"role\": \"system\", \"content\": SYSTEM},\n              {\"role\": \"user\", \"content\": question}])\nsql = resp.choices[0].message.content\nvalidate_select_only(sql)          # parse / allow-list, reject DML\nwith readonly_conn() as cur:      # read-only role + statement_timeout\n    cur.execute(\"EXPLAIN \" + sql)  # fails fast on bad columns\n    cur.execute(sql)\n```",
+      "rubric": [
+        "Provide schema context to stop hallucinated columns",
+        "Lower temperature for consistency",
+        "Validate SQL and run with a read-only role before executing"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a junior why the same prompt gives different answers and what you can do about it.",
+      "answer": "The model outputs a probability distribution for each next token and **samples** from it. With temperature > 0 a less-likely token is sometimes picked, and every later token is conditioned on that choice, so answers diverge. Other causes: the provider updating the model behind an alias, non-determinism in batched GPU inference, and tiny prompt differences (whitespace, ordering of retrieved context).\n\nMitigations: lower temperature for factual/structured tasks; pin a model version; keep prompts versioned; constrain output (JSON schema); validate; and evaluate on a fixed test set rather than eyeballing single runs.",
+      "rubric": [
+        "Sampling from a distribution; earlier choice conditions later tokens",
+        "Other sources: model updates, inference non-determinism, prompt changes",
+        "Mitigations: low temperature, pinned versions, constrained output, evaluation"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "What is the difference between a base model and an instruction-tuned model, and which would you use for a support chatbot?",
+      "answer": "A base model is pretrained to continue text; it doesn't reliably follow instructions or chat roles. An instruction-tuned (chat) model is additionally trained on instruction/response pairs and preference feedback, so it follows system/user messages, answers questions and has safety behaviour. For a support chatbot use an instruction-tuned model, grounded with retrieved policy documents.",
+      "rubric": [
+        "Base = text continuation",
+        "Instruct = trained to follow instructions/chat format",
+        "Chatbot uses instruct model + grounding"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What do temperature and top-p do, and how would you set them for a text-to-SQL feature?",
+      "difficulty": "easy",
+      "answer_md": "Both shape **sampling** from the next-token distribution. Temperature divides the logits before softmax: below 1 it sharpens the distribution (top token dominates), above 1 it flattens it (rarer tokens appear more). Top-p restricts sampling to the smallest set of tokens whose cumulative probability reaches p, cutting off the long tail.\n\nFor text-to-SQL you want consistency, so set temperature at or near 0 and leave top-p at its default; tune one knob at a time. Then don't rely on settings alone: put the schema in the prompt, validate the SQL (SELECT-only, `EXPLAIN` against a read-only role, statement timeout) and measure accuracy on a golden set of question -> expected result pairs. Creative tasks like product descriptions are where higher temperature is useful."
+    },
+    {
+      "question": "Why do LLMs hallucinate and how do you reduce it in a production backend?",
+      "difficulty": "medium",
+      "answer_md": "The training objective is predicting plausible next tokens, so the model produces text that *looks* right whether or not it is grounded in facts. When it lacks information (private data, post-cutoff events, your schema) it still produces a fluent answer.\n\nReduction strategies:\n- **Grounding**: retrieve relevant documents/rows and instruct it to answer only from them (RAG), citing sources.\n- **Allow abstention**: explicitly permit 'I don't know'.\n- **Tools**: let it call a function to fetch real data instead of guessing.\n- **Constrain and validate**: JSON schema, enum values, SQL validation, checking that cited IDs exist.\n- **Evaluate**: golden datasets and regression tests on faithfulness.\n\nExample: a returns-policy bot that only answers from retrieved policy chunks and refuses when nothing relevant is retrieved."
+    }
+  ],
+  "category": "AI"
+}

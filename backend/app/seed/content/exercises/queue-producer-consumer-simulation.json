@@ -1,0 +1,152 @@
+{
+  "slug": "queue-producer-consumer-simulation",
+  "title": "Producer/consumer with a bounded queue.Queue (no threads)",
+  "category": "advanced-python",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "python-concurrency",
+  "concepts": [
+    "queue.Queue",
+    "backpressure",
+    "put_nowait/get_nowait",
+    "queue.Full/queue.Empty",
+    "FIFO"
+  ],
+  "related_topics": [
+    "py-threading-patterns",
+    "message-queues",
+    "python-threading-gil"
+  ],
+  "problem_md": "Before wiring threads, model the scheduling deterministically. Several producers (report downloaders) push items into a **bounded** `queue.Queue(maxsize)`; one consumer (DB writer) drains it in batches.\n\n```python\ndef simulate(producers: list[list[str]], maxsize: int, batch: int) -> dict\n```\n\nRun in *ticks* until every producer is empty **and** the queue is empty. In each tick:\n1. Each producer, in list order, tries `put_nowait` of its **next** item. On `queue.Full` the item stays with the producer (it retries next tick) and you count one `full_events`.\n2. The consumer takes up to `batch` items with `get_nowait` (stop early on `queue.Empty`), appending each to `processed`.\n\nReturn `{\"processed\": [...], \"full_events\": int, \"ticks\": int}`. Raise `ValueError` if `maxsize < 1` or `batch < 1` (note `Queue(0)` would mean *unbounded*).",
+  "examples": [
+    {
+      "input": "simulate([['a1','a2'], ['b1']], maxsize=1, batch=1)",
+      "output": "{'processed': ['a1','a2','b1'], 'full_events': 2, 'ticks': 3}",
+      "explanation": "Tick 1: a1 queued, b1 hits Full, consumer takes a1. Tick 2: a2 queued, b1 Full again, consumer takes a2. Tick 3: b1 queued and consumed."
+    }
+  ],
+  "hints": [
+    "Keep each producer's remaining items in a `collections.deque`; only `popleft()` after `put_nowait` succeeds.",
+    "Loop condition: `while any(pending) or not q.empty():` - increment `ticks` at the start of each iteration."
+  ],
+  "starter_code": "import queue\n\n\ndef simulate(producers, maxsize, batch):\n    # Ignores the bound: everything is queued up-front.\n    q = queue.Queue()\n    for items in producers:\n        for item in items:\n            q.put(item)\n    processed = []\n    ticks = 0\n    while not q.empty():\n        ticks += 1\n        for _ in range(batch):\n            if q.empty():\n                break\n            processed.append(q.get())\n    return {'processed': processed, 'full_events': 0, 'ticks': ticks}\n",
+  "solution_code": "import queue\nfrom collections import deque\n\n\ndef simulate(producers, maxsize, batch):\n    if maxsize < 1 or batch < 1:\n        raise ValueError('maxsize and batch must be >= 1')\n    q = queue.Queue(maxsize=maxsize)\n    pending = [deque(items) for items in producers]\n    processed, full_events, ticks = [], 0, 0\n    while any(pending) or not q.empty():\n        ticks += 1\n        for items in pending:\n            if not items:\n                continue\n            try:\n                q.put_nowait(items[0])\n            except queue.Full:\n                full_events += 1\n            else:\n                items.popleft()\n        for _ in range(batch):\n            try:\n                processed.append(q.get_nowait())\n            except queue.Empty:\n                break\n    return {'processed': processed, 'full_events': full_events, 'ticks': ticks}\n",
+  "solution_md": "The bound is the point: with `maxsize`, a fast producer can't buffer an entire report in memory - it gets `queue.Full` (or, with blocking `put()`, waits). That is **backpressure**. `queue.Queue` is FIFO and thread-safe (internally a `deque` + `threading.Condition`), so this exact logic carries over to threads: producers call blocking `q.put(item)`, the consumer loops `q.get()` / `q.task_done()`, and shutdown uses a sentinel per consumer or `q.join()`. (Python 3.13 adds `Queue.shutdown()`.)\n\n`try/except queue.Full ... else: popleft()` only removes an item after it was actually queued - no lost items. Work is O(total items x ticks-per-item). The same model applies to SQS/Celery: bounded in-flight work, consumer batch size, and retry of rejected puts.",
+  "tests": {
+    "function": "simulate",
+    "cases": [
+      {
+        "args": [
+          [
+            [
+              "a1",
+              "a2"
+            ],
+            [
+              "b1"
+            ]
+          ],
+          1,
+          1
+        ],
+        "kwargs": {},
+        "expected": {
+          "processed": [
+            "a1",
+            "a2",
+            "b1"
+          ],
+          "full_events": 2,
+          "ticks": 3
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "a1",
+              "a2",
+              "a3"
+            ],
+            [
+              "b1",
+              "b2"
+            ]
+          ],
+          2,
+          1
+        ],
+        "kwargs": {},
+        "expected": {
+          "processed": [
+            "a1",
+            "b1",
+            "a2",
+            "a3",
+            "b2"
+          ],
+          "full_events": 2,
+          "ticks": 5
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "x1",
+              "x2",
+              "x3",
+              "x4"
+            ]
+          ],
+          3,
+          2
+        ],
+        "kwargs": {},
+        "expected": {
+          "processed": [
+            "x1",
+            "x2",
+            "x3",
+            "x4"
+          ],
+          "full_events": 0,
+          "ticks": 4
+        }
+      },
+      {
+        "args": [
+          [
+            [],
+            [
+              "only"
+            ]
+          ],
+          1,
+          5
+        ],
+        "kwargs": {},
+        "expected": {
+          "processed": [
+            "only"
+          ],
+          "full_events": 0,
+          "ticks": 1
+        }
+      },
+      {
+        "args": [
+          [
+            [
+              "a"
+            ]
+          ],
+          0,
+          1
+        ],
+        "raises": "ValueError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

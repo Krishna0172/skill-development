@@ -1,0 +1,133 @@
+{
+  "slug": "ai-bm25-ranking",
+  "title": "BM25 keyword scoring from scratch",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "hard",
+  "skill": "rag",
+  "concepts": [
+    "BM25",
+    "IDF",
+    "term frequency saturation",
+    "length normalisation",
+    "lexical search"
+  ],
+  "related_topics": [
+    "ai-hybrid-search",
+    "ai-semantic-search",
+    "ai-retrieval-pipelines"
+  ],
+  "problem_md": "Embeddings are weak on exact identifiers (ASINs, SKUs, error codes); BM25 is strong there. Implement the Okapi BM25 ranking used by Elasticsearch/Lucene:\n\n```python\ndef bm25_rank(query: str, docs: list[str], k1: float = 1.5, b: float = 0.75) -> list[list]\n```\n\nTokenise with `text.lower().split()`. Let `N` = number of docs, `n(t)` = number of docs containing term `t`, `f(t, d)` = count of `t` in doc `d`, `|d|` = doc length in tokens, `avgdl` = mean doc length.\n\n```\nidf(t)      = ln( (N - n(t) + 0.5) / (n(t) + 0.5) + 1 )\nscore(d, q) = sum over query terms t (each occurrence in the query counts):\n              idf(t) * f(t,d) * (k1 + 1) / ( f(t,d) + k1 * (1 - b + b * |d| / avgdl) )\n```\n\nReturn `[[doc_index, round(score, 4)], ...]` for docs with score `> 0`, sorted by score desc, ties by index asc. Empty `docs` -> `[]`. If `avgdl` is 0 (all docs empty) return `[]`.",
+  "examples": [
+    {
+      "input": "bm25_rank('refund policy', ['refund policy for returns', 'shipping policy', 'refund refund refund'])",
+      "output": "[[0, 0.8174], [2, 0.7833], [1, 0.5529]]",
+      "explanation": "Doc 0 matches both terms; doc 2 repeats 'refund' three times but saturation (k1) limits the gain."
+    }
+  ],
+  "hints": [
+    "Precompute `tokens = [d.lower().split() for d in docs]`, `Counter`s per doc, `avgdl`, and document frequency `df[t] = sum(t in set(toks) for toks in tokens)`.",
+    "Loop over docs, then over `query.lower().split()`; skip terms with `f == 0`. Use `math.log` (natural log). Sort with `key=lambda t: (-t[1], t[0])` after rounding."
+  ],
+  "starter_code": "def bm25_rank(query, docs, k1=1.5, b=0.75):\n    # Plain term-count scoring - replace with BM25.\n    terms = query.lower().split()\n    scores = []\n    for i, d in enumerate(docs):\n        toks = d.lower().split()\n        s = sum(toks.count(t) for t in terms)\n        if s > 0:\n            scores.append([i, float(s)])\n    scores.sort(key=lambda t: (-t[1], t[0]))\n    return scores\n",
+  "solution_code": "import math\nfrom collections import Counter\n\n\ndef bm25_rank(query, docs, k1=1.5, b=0.75):\n    if not docs:\n        return []\n    tokens = [d.lower().split() for d in docs]\n    n_docs = len(tokens)\n    avgdl = sum(len(t) for t in tokens) / n_docs\n    if avgdl == 0:\n        return []\n    tfs = [Counter(t) for t in tokens]\n    df = Counter(term for tf in tfs for term in tf)   # each doc counted once per term\n\n    def idf(term):\n        n = df.get(term, 0)\n        return math.log((n_docs - n + 0.5) / (n + 0.5) + 1)\n\n    q_terms = query.lower().split()\n    results = []\n    for i, tf in enumerate(tfs):\n        dl = len(tokens[i])\n        score = 0.0\n        for t in q_terms:\n            f = tf.get(t, 0)\n            if f:\n                score += idf(t) * f * (k1 + 1) / (f + k1 * (1 - b + b * dl / avgdl))\n        if score > 0:\n            results.append([i, round(score, 4)])\n    results.sort(key=lambda r: (-r[1], r[0]))\n    return results\n",
+  "solution_md": "BM25 improves raw term counts in three ways: **IDF** weights rare terms (an ASIN) above common ones ('policy'); **saturation** via `k1` means the 10th occurrence adds little over the 2nd (the starter rewards keyword stuffing); **length normalisation** via `b` stops long docs winning just by being long. The `+1` inside the log (Lucene's variant) keeps IDF positive even for terms in most docs.\n\nCost: O(total tokens) to index, O(|q| x N) to score here; real engines use an inverted index so only docs containing a query term are touched.\n\nIn RAG, BM25 + embeddings (**hybrid search**) fused with RRF usually beats either alone. PostgreSQL's `ts_rank` is *not* BM25; extensions such as ParadeDB add it.",
+  "tests": {
+    "function": "bm25_rank",
+    "cases": [
+      {
+        "args": [
+          "refund policy",
+          [
+            "refund policy for returns",
+            "shipping policy",
+            "refund refund refund"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            0,
+            0.8174
+          ],
+          [
+            2,
+            0.7833
+          ],
+          [
+            1,
+            0.5529
+          ]
+        ]
+      },
+      {
+        "args": [
+          "B07XYZ stock",
+          [
+            "sku B07XYZ low stock alert",
+            "stock report for all skus in warehouse today",
+            "B07ABC price"
+          ]
+        ],
+        "kwargs": {},
+        "expected": [
+          [
+            0,
+            1.4508
+          ],
+          [
+            1,
+            0.3701
+          ]
+        ]
+      },
+      {
+        "args": [
+          "missing",
+          [
+            "a b",
+            "c d"
+          ]
+        ],
+        "kwargs": {},
+        "expected": []
+      },
+      {
+        "args": [
+          "fast delivery",
+          [
+            "Fast delivery fast",
+            "delivery delayed",
+            "fast"
+          ]
+        ],
+        "kwargs": {
+          "k1": 1.2,
+          "b": 0.5
+        },
+        "expected": [
+          [
+            0,
+            1.0045
+          ],
+          [
+            2,
+            0.5442
+          ],
+          [
+            1,
+            0.47
+          ]
+        ]
+      },
+      {
+        "args": [
+          "x",
+          []
+        ],
+        "kwargs": {},
+        "expected": []
+      }
+    ]
+  }
+}

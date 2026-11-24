@@ -1,0 +1,140 @@
+{
+  "slug": "refactor-swallowed-exceptions",
+  "title": "Refactor: stop swallowing errors with except Exception: pass",
+  "category": "refactoring",
+  "language": "python",
+  "difficulty": "medium",
+  "skill": "python-exceptions-logging",
+  "concepts": [
+    "specific exceptions",
+    "error reporting",
+    "fail loudly",
+    "partial failure"
+  ],
+  "related_topics": [
+    "python-exceptions",
+    "py-logging",
+    "be-api-error-handling"
+  ],
+  "problem_md": "**Refactor-your-own-habits kata.** The starter code works on clean data - and that's the problem. Its `except Exception: pass` silently drops bad payout rows (the totals just come out low) **and** hides real programming bugs.\n\n```python\ndef parse_payouts(rows: list) -> dict   # {\"total\": float, \"parsed\": int, \"errors\": [...]}\n```\n\nRefactor so that:\n- Each row is a dict like `{\"order_id\": \"A1\", \"amount\": \"1,250.50\"}`. `amount` may be a string (commas allowed) or a number. `total` is the sum rounded to 2 dp; `parsed` counts good rows.\n- A row **without** `amount` is reported as `{\"row\": i, \"order_id\": <order_id or None>, \"error\": \"missing amount\"}`.\n- An amount that can't be parsed as a number (including `None`) is reported as `{\"row\": i, \"order_id\": ..., \"error\": \"invalid amount: <repr(value)>\"}`, e.g. `invalid amount: 'N/A'`.\n- Anything that isn't a data problem must **not** be swallowed: a row that isn't a dict raises `TypeError`.\n- Catch only the specific exceptions you expect, as narrowly as possible.",
+  "examples": [
+    {
+      "input": "parse_payouts([{'order_id':'A1','amount':'1,000.50'}, {'order_id':'A2','amount':'N/A'}, {'order_id':'A3'}])",
+      "output": "{'total': 1000.5, 'parsed': 1, 'errors': [{'row': 1, 'order_id': 'A2', 'error': \"invalid amount: 'N/A'\"}, {'row': 2, 'order_id': 'A3', 'error': 'missing amount'}]}"
+    }
+  ],
+  "hints": [
+    "Check `isinstance(row, dict)` first and `raise TypeError(...)` - that's a caller bug, not bad data. Use `'amount' not in row` for the missing case instead of catching `KeyError` around everything.",
+    "Wrap only the conversion: `try: value = float(str(raw).replace(',', '')) except ValueError: errors.append(...); continue`. `float('None')` raises `ValueError`, so `None` is covered."
+  ],
+  "starter_code": "def parse_payouts(rows):\n    total = 0.0\n    parsed = 0\n    for row in rows:\n        try:\n            amount = float(str(row['amount']).replace(',', ''))\n            total += amount\n            parsed += 1\n        except Exception:\n            pass\n    return {'total': round(total, 2), 'parsed': parsed, 'errors': []}\n",
+  "solution_code": "def parse_payouts(rows):\n    total = 0.0\n    parsed = 0\n    errors = []\n    for i, row in enumerate(rows):\n        if not isinstance(row, dict):\n            raise TypeError(f'row {i} must be a dict, got {type(row).__name__}')\n        order_id = row.get('order_id')\n        if 'amount' not in row:\n            errors.append({'row': i, 'order_id': order_id, 'error': 'missing amount'})\n            continue\n        raw = row['amount']\n        try:\n            amount = float(str(raw).replace(',', ''))\n        except ValueError:\n            errors.append({'row': i, 'order_id': order_id, 'error': f'invalid amount: {raw!r}'})\n            continue\n        total += amount\n        parsed += 1\n    return {'total': round(total, 2), 'parsed': parsed, 'errors': errors}\n",
+  "solution_md": "Two kinds of failure deserve different handling. **Bad data** (missing / unparseable amount) is expected: report it with enough context (row index, order id, the raw value) to fix it upstream, and keep processing the rest. **Bugs** (a non-dict row means the caller passed the wrong thing) must crash loudly.\n\nThe `try` now wraps one line and catches only `ValueError`, so a typo like `totl += amount` raises `NameError` instead of silently zeroing totals - the starter would have hidden it. Checking `'amount' in row` is clearer than catching `KeyError` across a block.\n\nNext steps in a real service: persist `errors` into the upload-status table, `logger.warning` a summary, and use `Decimal` for money. Where you really must catch broadly (top-level job loop), use `logger.exception(...)` and re-raise or mark the job failed - never `pass`.",
+  "tests": {
+    "function": "parse_payouts",
+    "cases": [
+      {
+        "args": [
+          [
+            {
+              "order_id": "A1",
+              "amount": "1,000.50"
+            },
+            {
+              "order_id": "A2",
+              "amount": "N/A"
+            },
+            {
+              "order_id": "A3"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "total": 1000.5,
+          "parsed": 1,
+          "errors": [
+            {
+              "row": 1,
+              "order_id": "A2",
+              "error": "invalid amount: 'N/A'"
+            },
+            {
+              "row": 2,
+              "order_id": "A3",
+              "error": "missing amount"
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "order_id": "B1",
+              "amount": 10
+            },
+            {
+              "order_id": "B2",
+              "amount": "5.25"
+            },
+            {
+              "order_id": "B3",
+              "amount": null
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "total": 15.25,
+          "parsed": 2,
+          "errors": [
+            {
+              "row": 2,
+              "order_id": "B3",
+              "error": "invalid amount: None"
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "amount": "abc"
+            },
+            {
+              "order_id": "C2",
+              "amount": "-20"
+            }
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "total": -20.0,
+          "parsed": 1,
+          "errors": [
+            {
+              "row": 0,
+              "order_id": null,
+              "error": "invalid amount: 'abc'"
+            }
+          ]
+        }
+      },
+      {
+        "args": [
+          [
+            {
+              "order_id": "D1",
+              "amount": "1"
+            },
+            null
+          ]
+        ],
+        "raises": "TypeError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

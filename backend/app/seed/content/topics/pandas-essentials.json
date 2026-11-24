@@ -1,0 +1,122 @@
+{
+  "slug": "pandas-essentials",
+  "title": "pandas Essentials",
+  "skill": "pandas",
+  "extra_skills": [
+    "etl-data-processing",
+    "python"
+  ],
+  "category": "Python",
+  "difficulty": "intermediate",
+  "tags": [
+    "pandas",
+    "dataframe",
+    "etl",
+    "groupby",
+    "merge",
+    "indexing"
+  ],
+  "summary": "pandas gives you the DataFrame: a table of named, typed columns you can filter, transform, group and join with fast vectorised operations. Select with `.loc` (labels) and `.iloc` (positions), filter with boolean masks, aggregate with `groupby`, and combine tables with `merge`. Think in whole columns, not row-by-row loops.",
+  "details_md": "### Core objects\n- **Series**: a 1-D labelled array with a single dtype.\n- **DataFrame**: a dict-like collection of Series sharing an **index** (row labels). Each column has its own dtype (`int64`, `float64`, `bool`, `datetime64[ns]`, `category`, `object`, `string`/`str`).\n- **Index**: row labels used for alignment. Arithmetic between Series aligns on index labels, not positions - a frequent source of NaNs.\n\n### Reading data\n`read_csv`, `read_excel` (engine `openpyxl` for xlsx, `xlrd` for xls, `pyxlsb` for xlsb, or `calamine` for all of them - fast, pandas 2.2+), `read_json`, `read_parquet`, `read_sql`. Key `read_csv` options: `usecols`, `dtype`, `parse_dates`, `na_values`, `encoding`, `chunksize`, `dtype_backend=\"pyarrow\"`. All readers accept file-like objects such as `io.BytesIO(response.content)`.\n\n### Selection\n- `df[\"col\"]` -> Series; `df[[\"a\", \"b\"]]` -> DataFrame.\n- `df.loc[row_labels_or_mask, col_labels]` - label based, slices **inclusive**.\n- `df.iloc[0:5, 0:2]` - position based, slices exclusive.\n- Boolean masks: `df[(df.qty > 0) & df.sku.notna()]` - use `&`, `|`, `~` with parentheses, never `and`/`or`.\n- `df.query(\"qty > 0 and channel == @ch\")` for readable filters.\n- `isin`, `between`, `str.contains`.\n\n### Transforming\n- New columns with vectorised expressions: `df[\"total\"] = df.price * df.qty`.\n- `assign()` for chainable column creation, `rename(columns=mapping)`, `astype`, `pd.to_numeric(..., errors=\"coerce\")`, `pd.to_datetime`.\n- `np.where(cond, a, b)` / `np.select` for conditional columns; `Series.map(dict)` for lookups.\n- `apply` with a Python function is a loop in disguise - a last resort.\n\n### Grouping\n`df.groupby(keys)` splits rows, then you aggregate: `.agg(total=(\"amount\", \"sum\"), orders=(\"order_id\", \"nunique\"))` (named aggregation), `.transform(\"sum\")` returns a result aligned to the original rows (e.g. share of group total), `.filter` drops whole groups. Use `as_index=False` or `.reset_index()` to get flat columns back. Missing keys are dropped unless `dropna=False`.\n\n### Combining\n- `pd.merge(left, right, on=..., how=\"left\"|\"inner\"|\"outer\"|\"right\", validate=\"many_to_one\", indicator=True)` - SQL-style joins. `validate` catches unexpected duplicate keys that silently multiply rows.\n- `pd.concat([df1, df2], ignore_index=True)` stacks frames.\n- `pivot_table`, `melt` for reshaping.\n\n### Missing data\n`NaN` (float), `NaT` (datetime), `None` and `pd.NA` (nullable dtypes). Use `isna/notna`, `fillna`, `dropna(subset=...)`. Integer columns with missing values become float unless you use nullable `Int64`.\n\n### Copy-on-Write\npandas 3.0 makes **Copy-on-Write** the default (opt-in in 2.x via `pd.options.mode.copy_on_write = True`): any derived DataFrame behaves as a copy, so modifying a subset never mutates the parent, and chained assignment like `df[df.a > 0][\"b\"] = 1` never updates `df`. Always assign with a single `.loc[mask, \"b\"] = 1`. pandas 3.0 also infers text columns as a dedicated string dtype instead of `object`.\n\n### Writing out\n`to_csv`, `to_parquet`, `to_dict(\"records\")`, and `itertuples(index=False, name=None)` to get plain tuples for DB inserts.",
+  "code_md": "```python\n# Read, select, filter, derive\nimport pandas as pd\nimport numpy as np\n\ndf = pd.DataFrame({\n    \"order_id\": [\"o1\", \"o2\", \"o3\", \"o4\"],\n    \"sku\": [\"A\", \"B\", \"A\", None],\n    \"qty\": [2, 1, 5, 3],\n    \"price\": [100.0, 250.0, 100.0, 80.0],\n    \"channel\": [\"amazon\", \"flipkart\", \"amazon\", \"amazon\"],\n})\n\nvalid = df[df[\"sku\"].notna() & (df[\"qty\"] > 0)]          # boolean mask\nvalid = valid.assign(revenue=valid[\"qty\"] * valid[\"price\"])  # vectorised column\nvalid[\"size\"] = np.where(valid[\"qty\"] >= 3, \"bulk\", \"single\")\nprint(valid.loc[:, [\"order_id\", \"revenue\", \"size\"]])\n```\n\n```python\n# groupby with named aggregation and transform\nsummary = (\n    df.groupby(\"channel\", as_index=False)\n      .agg(orders=(\"order_id\", \"nunique\"), units=(\"qty\", \"sum\"), avg_price=(\"price\", \"mean\"))\n)\nprint(summary)\n\ndf[\"channel_share\"] = df[\"qty\"] / df.groupby(\"channel\")[\"qty\"].transform(\"sum\")\n```\n\n```python\n# merge with validation and indicator\nskus = pd.DataFrame({\"sku\": [\"A\", \"B\"], \"cost\": [60.0, 180.0]})\njoined = df.merge(skus, on=\"sku\", how=\"left\", validate=\"many_to_one\", indicator=True)\nprint(joined[joined[\"_merge\"] == \"left_only\"])   # orders with unknown SKU\njoined[\"profit\"] = (joined[\"price\"] - joined[\"cost\"]) * joined[\"qty\"]\n```\n\n```python\n# Reading an Excel/CSV payload downloaded over HTTP and preparing DB tuples\nimport io, requests\n\ndef load(url: str, ext: str) -> pd.DataFrame:\n    content = requests.get(url, timeout=60).content\n    buf = io.BytesIO(content)\n    if ext == \"csv\":\n        return pd.read_csv(buf, dtype={\"sku\": \"string\"})\n    engine = {\"xlsx\": \"openpyxl\", \"xls\": \"xlrd\", \"xlsb\": \"pyxlsb\"}[ext]\n    return pd.read_excel(buf, engine=engine)\n\n# rows ready for psycopg2 execute_batch; convert NaN -> None first\n# clean = df.astype(object).where(df.notna(), None)\n# records = list(clean.itertuples(index=False, name=None))\n```",
+  "use_cases_md": "- Parsing marketplace/OMS report files (CSV, XLSX, XLS, XLSB) into a normalised shape.\n- Renaming and validating columns, coercing types, de-duplicating rows before a DB upsert.\n- Reconciling two sources (e.g. payment gateway settlements vs orders) with `merge(indicator=True)`.\n- Aggregations for reports: revenue by channel, SKU-level profitability, daily counts.\n- Reshaping wide/long data for downstream analytics.",
+  "mistakes_md": "- **Using `and`/`or` with Series** - `ValueError: truth value is ambiguous`. Fix: `&`, `|`, `~` with parentheses.\n- **Chained assignment** `df[mask][\"col\"] = x` - doesn't modify `df` (never under Copy-on-Write). Fix: `df.loc[mask, \"col\"] = x`.\n- **Row loops with `iterrows`/`apply(axis=1)`** for arithmetic - 10-1000x slower. Fix: vectorised column operations, `np.where`, `map`.\n- **Merging on keys with unexpected duplicates** - row explosion. Fix: `validate=\"one_to_one\"/\"many_to_one\"` and check `len` before/after.\n- **Forgetting index alignment** - adding Series with different indexes produces NaN. Fix: `reset_index(drop=True)` or align explicitly.\n- **Letting pandas infer IDs as numbers** - leading zeros lost, big IDs become floats. Fix: `dtype={\"id\": \"string\"}` on read.\n- **Passing NaN to the database** - psycopg2 writes `NaN` into numeric columns or fails for text. Fix: convert NaN/NaT to `None`.",
+  "best_practices_md": "- Specify `dtype`, `usecols` and `parse_dates` when reading to get correct types and lower memory.\n- Prefer method chaining (`assign`, `pipe`, `rename`) for readable pipelines.\n- Always use `.loc` for assignment; enable Copy-on-Write on pandas 2.x to match 3.0 semantics.\n- Validate joins and check row counts at each step of an ETL pipeline.\n- Use named aggregation for clear output column names.\n- Keep business logic in small functions that take and return DataFrames (easy to test).",
+  "my_context_md": "- `read_and_validate()` in ECSMarketplaceDataUpload is a pandas pipeline: it downloads presigned S3 URLs with `requests`, parses CSV/XLSX/XLS/XLSB/ZIP, validates required columns and renames them - reading from `io.BytesIO`, per-extension engines and `rename(columns=...)` are exactly the tools above.\n- Before `execute_batch`, DataFrame rows need NaN/NaT converted to `None` so psycopg2 writes SQL NULLs - which also matters for your orders upsert, since `COALESCE(EXCLUDED.col, table.col)` only preserves existing values when the incoming value is a real NULL.\n- Your payment/logistics reconciliation work (PayU, Easebuzz, Shiprocket, Shippigo) maps naturally onto `merge(..., how=\"outer\", indicator=True)` to find unmatched records on each side.",
+  "related": [
+    "pandas-cleaning-performance",
+    "sql-joins",
+    "sql-group-by",
+    "psycopg2-essentials",
+    "s3-presigned-urls"
+  ],
+  "flashcards": [
+    {
+      "front": "`.loc` vs `.iloc`?",
+      "back": "`.loc` selects by label (slices inclusive) and boolean masks; `.iloc` by integer position (slices exclusive)."
+    },
+    {
+      "front": "How do you combine boolean conditions in pandas?",
+      "back": "`&`, `|`, `~` with parentheses: `df[(df.a > 0) & (df.b == 'x')]`."
+    },
+    {
+      "front": "groupby `.agg` vs `.transform`?",
+      "back": "`agg` returns one row per group; `transform` returns a result aligned to the original rows."
+    },
+    {
+      "front": "How do you detect unmatched rows in a merge?",
+      "back": "`merge(..., how='outer', indicator=True)` and check `_merge` for `left_only`/`right_only`."
+    },
+    {
+      "front": "What does `validate='many_to_one'` in merge do?",
+      "back": "Raises MergeError if the right-side keys are not unique - prevents silent row multiplication."
+    },
+    {
+      "front": "What does Copy-on-Write change (default in pandas 3.0)?",
+      "back": "Derived frames act as copies; chained assignment never updates the original. Use a single `.loc[mask, col] = value`."
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Which correctly sets `status` to 'bad' where qty < 0?",
+      "options": [
+        "df[df.qty < 0]['status'] = 'bad'",
+        "df.loc[df.qty < 0, 'status'] = 'bad'",
+        "df.status[df.qty < 0] == 'bad'",
+        "df.iloc[df.qty < 0, 'status'] = 'bad'"
+      ],
+      "answer_index": 1,
+      "explanation": "Single `.loc` assignment with a mask and column label; chained indexing assigns to a temporary copy."
+    },
+    {
+      "question": "A left merge of 1,000 orders onto a SKU table returns 1,240 rows. Most likely cause?",
+      "options": [
+        "pandas bug",
+        "NaN in the left table",
+        "Duplicate keys in the right (SKU) table",
+        "Wrong `how` parameter"
+      ],
+      "answer_index": 2,
+      "explanation": "Duplicate keys on the right multiply matching left rows; use `validate='many_to_one'` to catch it."
+    },
+    {
+      "question": "What is the result of `df.groupby('channel')['qty'].transform('sum')`?",
+      "options": [
+        "A Series the same length as df with each row's channel total",
+        "One row per channel",
+        "A scalar",
+        "A DataFrame with a MultiIndex"
+      ],
+      "answer_index": 0,
+      "explanation": "transform broadcasts the group result back onto the original rows."
+    },
+    {
+      "question": "Why read ID columns with `dtype={'id': 'string'}`?",
+      "options": [
+        "It's faster to sort",
+        "Required by read_csv",
+        "To enable groupby",
+        "To preserve leading zeros and avoid float conversion of large/missing IDs"
+      ],
+      "answer_index": 3,
+      "explanation": "Inferred numeric types drop leading zeros and become float64 when NaNs exist, corrupting identifiers."
+    }
+  ],
+  "interview": [
+    {
+      "question": "How would you load a CSV/Excel file from a URL, validate required columns, and prepare it for a database insert?",
+      "difficulty": "medium",
+      "answer_md": "```python\nimport io, requests, pandas as pd\n\nREQUIRED = {\"Order ID\", \"SKU\", \"Quantity\"}\nRENAME = {\"Order ID\": \"order_id\", \"SKU\": \"sku\", \"Quantity\": \"qty\"}\n\ndef load_report(url: str, ext: str) -> list[tuple]:\n    resp = requests.get(url, timeout=60)\n    resp.raise_for_status()\n    buf = io.BytesIO(resp.content)\n    df = (pd.read_csv(buf, dtype=str) if ext == \"csv\"\n          else pd.read_excel(buf, dtype=str))\n    df.columns = df.columns.str.strip()\n    missing = REQUIRED - set(df.columns)\n    if missing:\n        raise ValueError(f\"missing columns: {sorted(missing)}\")\n    df = df[list(REQUIRED)].rename(columns=RENAME)\n    df[\"qty\"] = pd.to_numeric(df[\"qty\"], errors=\"coerce\").astype(\"Int64\")\n    df = df.dropna(subset=[\"order_id\"]).drop_duplicates([\"order_id\", \"sku\"])\n    df = df.astype(object).where(df.notna(), None)   # NaN/NA -> None for SQL NULL\n    return list(df.itertuples(index=False, name=None))\n```\nPoints: timeout + `raise_for_status`, read as strings first so IDs aren't mangled, normalise header whitespace, fail fast with a clear message listing missing columns, coerce types explicitly, de-duplicate on the business key (otherwise `ON CONFLICT` in a single statement can hit the same row twice), convert missing values to `None`, then bulk insert with `execute_batch`/`execute_values`."
+    },
+    {
+      "question": "Explain the difference between merge, join and concat.",
+      "difficulty": "easy",
+      "answer_md": "- **`pd.merge(left, right, on=..., how=...)`** - SQL-style join on one or more key columns (or indexes with `left_index/right_index`). Supports `inner`, `left`, `right`, `outer`, `cross`, plus `validate` and `indicator`. The general-purpose tool.\n- **`left.join(right)`** - convenience method that joins on the **index** of `right` (and index or a column of `left`). Defaults to a left join. Handy when lookup tables are indexed by key.\n- **`pd.concat([df1, df2])`** - stacks objects along an axis (rows by default) without matching keys; columns are aligned by name, missing ones become NaN. With `axis=1` it aligns on the index side by side.\n\n```python\norders.merge(skus, on=\"sku\", how=\"left\", validate=\"many_to_one\")\norders.join(skus.set_index(\"sku\"), on=\"sku\")\npd.concat([jan, feb, mar], ignore_index=True)\n```\nRules of thumb: merge for relational joins, concat for appending batches/files (e.g. all sheets of a workbook or files from a ZIP), join for quick index lookups."
+    },
+    {
+      "question": "What is the SettingWithCopyWarning / chained assignment problem and how does Copy-on-Write change it?",
+      "difficulty": "hard",
+      "answer_md": "Selecting a subset like `df[df.qty > 0]` may return a view or a copy depending on internal memory layout. Writing to it - `df[df.qty > 0][\"status\"] = \"ok\"` - performs **two** operations: a `__getitem__` that produces an intermediate object, then a `__setitem__` on that intermediate. If it's a copy, `df` is unchanged; pandas 1.x/2.x warned with `SettingWithCopyWarning` because the outcome was unpredictable.\n\n**Copy-on-Write** (opt-in in 2.x, default in pandas 3.0) makes semantics predictable: every derived object *behaves* like a copy. Data is shared lazily and only copied when one side is modified. Consequences:\n- Chained assignment **never** modifies the original (pandas emits a `ChainedAssignmentError` warning).\n- Modifying a subset/derived frame never mutates the parent.\n- Fewer defensive `.copy()` calls are needed, and many operations got faster since copies are deferred.\n\nCorrect pattern regardless of version:\n```python\ndf.loc[df[\"qty\"] > 0, \"status\"] = \"ok\"   # single indexing operation\nsub = df[df[\"qty\"] > 0].copy()           # explicit copy when you want a separate frame (pre-CoW)\n```"
+    }
+  ]
+}

@@ -1,0 +1,182 @@
+{
+  "slug": "sql-select-filter-sort",
+  "title": "SELECT, WHERE, ORDER BY and LIMIT (from zero)",
+  "skill": "postgresql",
+  "extra_skills": [],
+  "category": "Database",
+  "difficulty": "beginner",
+  "tags": [
+    "sql",
+    "select",
+    "where",
+    "order-by",
+    "limit",
+    "basics"
+  ],
+  "summary": "A table is a grid of rows and columns, and SELECT is how you ask for some of it. You learn to pick columns, keep only the rows you want (WHERE), put them in order (ORDER BY), cap how many come back (LIMIT) and remove repeats (DISTINCT). Everything else in SQL builds on these five ideas.",
+  "why_md": "- Almost every backend feature that reads data starts with a SELECT; if this is shaky, everything built on it is shaky.\n- Interviews open with 'write a query that...' and expect WHERE, ORDER BY and LIMIT without hesitation.\n- Knowing that a table has **no inherent order** prevents a whole class of flaky bugs and flaky tests.\n- Filtering in the database, not in Python, moves less data over the network.",
+  "details_md": "### What a table looks like\nA table is like a spreadsheet: named **columns** (each with a type) and many **rows**. Imagine `products(id, name, price, category)`. A query never changes the table; it describes a result set.\n\n### SELECT: choose columns\n`SELECT name, price FROM products;` returns only those two columns for every row. `SELECT *` returns all columns; fine for exploring, avoid it in application code because adding a column later silently changes what you receive. You can rename output with `AS`: `SELECT price * 1.18 AS price_with_tax`.\n\n### WHERE: choose rows\n`WHERE` keeps rows for which the condition is true. Comparison operators: `=`, `<>` (not equal), `<`, `<=`, `>`, `>=`. Combine with `AND`, `OR`, `NOT`; use parentheses because `AND` binds tighter than `OR`.\n- `IN ('toys','books')` means equal to any item of a list.\n- `BETWEEN 10 AND 20` is inclusive on both ends (`>= 10 AND <= 20`).\n- `LIKE 'pen%'` matches text patterns: `%` is any run of characters, `_` is exactly one. In PostgreSQL `LIKE` is case-sensitive; `ILIKE` ignores case.\n- `IS NULL` / `IS NOT NULL` test for missing values. `= NULL` never works, because comparing with NULL gives NULL (unknown), and WHERE keeps only true.\n\n### ORDER BY and LIMIT\nWithout `ORDER BY` the database may return rows in any order, and the order can change between runs. `ORDER BY price DESC, name` sorts by price high to low, ties broken by name (default is ascending, `ASC`). `LIMIT 5` returns at most five rows; `OFFSET 10` skips the first ten. Always pair `LIMIT` with `ORDER BY`, otherwise you get five arbitrary rows. Big `OFFSET` values are slow because the database still walks the skipped rows.\n\n### DISTINCT\n`SELECT DISTINCT category FROM products` removes duplicate result rows. With several columns it removes duplicate combinations. (PostgreSQL also has `DISTINCT ON (col)`, which keeps the first row per value of `col` according to ORDER BY; it is Postgres-specific.)\n\n### Logical order of evaluation\nYou write SELECT first but the database logically does: FROM, WHERE, SELECT, DISTINCT, ORDER BY, LIMIT. That is why a column alias defined in SELECT can be used in ORDER BY but not in WHERE.\n\n### Parameters\nNever paste user input into SQL text. Use placeholders (`%s` in psycopg2) and pass values separately.",
+  "code_md": "```sql\n-- Pick columns and filter rows\nSELECT name, price\nFROM products\nWHERE category = 'toys' AND price BETWEEN 10 AND 50\nORDER BY price DESC, name\nLIMIT 5;\n```\n```sql\n-- IN, LIKE, ILIKE and NULL checks\nSELECT id, name\nFROM products\nWHERE category IN ('toys', 'books')\n  AND name ILIKE 'pen%'          -- starts with \"pen\", any case\n  AND discontinued_at IS NULL;   -- never \"= NULL\"\n```\n```sql\n-- Distinct values, and Postgres DISTINCT ON (latest order per customer)\nSELECT DISTINCT category FROM products;\n\nSELECT DISTINCT ON (customer_id) customer_id, id, created_at\nFROM orders\nORDER BY customer_id, created_at DESC;\n```\n```python\n# Safe parameters with psycopg2: values never go into the SQL string\ncur.execute(\"SELECT name FROM products WHERE category = %s LIMIT %s\", (\"toys\", 10))\n```",
+  "use_cases_md": "- Product listing page: category filter, price range, sort by price, `LIMIT/OFFSET` for pages.\n- 'Latest 20 orders' dashboard: `ORDER BY created_at DESC LIMIT 20`.\n- Search box: `name ILIKE %s` with the pattern passed as a parameter.\n- Data clean-up: `WHERE email IS NULL` to find incomplete rows.\n- Dropdown values: `SELECT DISTINCT category`.",
+  "mistakes_md": "- **`WHERE col = NULL`**: always returns nothing. Use `IS NULL`.\n- **`LIMIT` without `ORDER BY`**: results are arbitrary and can change; add a sort (with a unique tiebreaker such as `id`).\n- **`a OR b AND c`** read as `(a OR b) AND c`; it is actually `a OR (b AND c)`. Use parentheses.\n- **`SELECT *` in application code**: breaks when columns are added or reordered. List the columns.\n- **Building SQL with f-strings**: SQL injection. Use placeholders.\n- **Using an alias in WHERE**: aliases from SELECT do not exist yet when WHERE runs. Repeat the expression.",
+  "best_practices_md": "- Name the columns you need; avoid `SELECT *` in code.\n- Always add `ORDER BY` (plus a unique tiebreaker) when using `LIMIT`.\n- Use parentheses whenever you mix AND and OR.\n- Prefer `IN (...)` over long chains of OR.\n- Pass values as parameters, never concatenate.\n- Use `ILIKE` for case-insensitive search, knowing a leading `%` cannot use a normal index.",
+  "my_context_md": "",
+  "revision_notes_md": "- Order written: SELECT, FROM, WHERE, ORDER BY, LIMIT. Logical order: FROM, WHERE, SELECT, ORDER BY, LIMIT.\n- WHERE filters rows; true keeps the row, false and NULL drop it.\n- `IS NULL`, never `= NULL`.\n- `BETWEEN a AND b` is inclusive both sides.\n- `LIKE`: `%` many chars, `_` one char; `ILIKE` case-insensitive (Postgres).\n- No ORDER BY means no guaranteed order; LIMIT needs ORDER BY.\n- `DISTINCT` removes duplicate rows; `DISTINCT ON (col)` keeps one row per col (Postgres).\n- AND binds tighter than OR; parenthesise.\n- Always parameterise values.",
+  "exercises_md": "1. Create a `products` table with 10 rows and write: the 3 most expensive items, items between two prices, and names that start with a chosen letter.\n2. Insert some rows with a NULL `category` and show that `WHERE category <> 'toys'` hides them; fix the query so they appear.\n3. Run the same `LIMIT 3` query without ORDER BY, then add rows and see whether the result changes; add a deterministic ORDER BY.\n4. Write `SELECT DISTINCT category` and then `SELECT DISTINCT category, price` and explain the difference in row count.",
+  "related": [
+    "sql-aggregates-having-basics",
+    "sql-null-handling",
+    "sql-joins",
+    "sql-insert-update-delete"
+  ],
+  "flashcards": [
+    {
+      "front": "What does WHERE do?",
+      "back": "Keeps only rows for which the condition is true; false and NULL rows are dropped."
+    },
+    {
+      "front": "Why does `WHERE x = NULL` return nothing?",
+      "back": "Any comparison with NULL yields NULL (unknown). Use `x IS NULL`."
+    },
+    {
+      "front": "Is BETWEEN 10 AND 20 inclusive?",
+      "back": "Yes, both ends: `>= 10 AND <= 20`."
+    },
+    {
+      "front": "LIKE vs ILIKE?",
+      "back": "LIKE is case-sensitive; ILIKE (PostgreSQL) ignores case. `%` = any characters, `_` = one character."
+    },
+    {
+      "front": "Is row order guaranteed without ORDER BY?",
+      "back": "No. It is arbitrary and can change; always ORDER BY when order matters."
+    },
+    {
+      "front": "What does DISTINCT do?",
+      "back": "Removes duplicate rows from the result (whole-row combinations)."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "Which condition correctly finds products with no category recorded?",
+      "options": [
+        "WHERE NOT category",
+        "WHERE category = NULL",
+        "WHERE category IS NULL",
+        "WHERE category == ''"
+      ],
+      "answer_index": 2,
+      "explanation": "NULL means unknown, so only IS NULL / IS NOT NULL work."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does `ORDER BY price DESC, name` do?",
+      "options": [
+        "Sorts by price high to low, ties by name ascending",
+        "Sorts both columns descending",
+        "Random order",
+        "Sorts by name then price"
+      ],
+      "answer_index": 0,
+      "explanation": "DESC applies only to the column it follows; name uses the default ASC."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which statement about LIMIT is true?",
+      "options": [
+        "LIMIT must come before WHERE",
+        "LIMIT sorts the table",
+        "LIMIT guarantees the first rows by id",
+        "Without ORDER BY the rows returned are arbitrary"
+      ],
+      "answer_index": 3,
+      "explanation": "LIMIT just cuts the result; without ORDER BY, which rows survive is not defined."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Complete: SELECT name FROM products WHERE price ____ 10 AND 20;",
+      "answers": [
+        "between"
+      ],
+      "explanation": "BETWEEN is inclusive of both bounds."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Complete: SELECT name FROM products WHERE name ____ 'pen%'; (PostgreSQL, ignore case)",
+      "answers": [
+        "ilike"
+      ],
+      "explanation": "ILIKE is the case-insensitive LIKE in PostgreSQL."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table p(id integer primary key, name text, price integer);\"\n                \"insert into p values (1,'pen',2),(2,'ink',5),(3,'pad',3),(4,'cap',5);\")\nrows = c.execute(\"select name from p where price between 3 and 5 order by price desc, name\").fetchall()\nprint([r[0] for r in rows])",
+      "answers": [
+        "['cap', 'ink', 'pad']"
+      ],
+      "explanation": "price 5: cap, ink (name asc), then price 3: pad."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table p(id integer, cat text);\"\n                \"insert into p values (1,'toys'),(2,NULL),(3,'books'),(4,'toys');\")\nprint(c.execute(\"select count(*) from p where cat <> 'toys'\").fetchone()[0])\nprint(c.execute(\"select count(*) from p where cat is null\").fetchone()[0])\nprint(c.execute(\"select count(*) from (select distinct cat from p)\").fetchone()[0])",
+      "answers": [
+        "1\n1\n3"
+      ],
+      "explanation": "NULL <> 'toys' is unknown so only 'books' counts (1); one NULL row; distinct values: toys, NULL, books = 3."
+    },
+    {
+      "type": "debug",
+      "prompt": "This should list products that are not discontinued, cheapest first, top 3. It returns nothing useful. What's wrong?",
+      "code": "SELECT name, price\nFROM products\nWHERE discontinued_at = NULL\nLIMIT 3\nORDER BY price;",
+      "answer": "Two bugs. `= NULL` is never true, use `IS NULL`. Also `LIMIT` must come after `ORDER BY`.\n```sql\nSELECT name, price FROM products\nWHERE discontinued_at IS NULL\nORDER BY price, id\nLIMIT 3;\n```",
+      "rubric": [
+        "IS NULL instead of = NULL",
+        "ORDER BY before LIMIT",
+        "A tiebreaker or deterministic order is a plus"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain to a newcomer the order in which SQL evaluates SELECT, WHERE and ORDER BY, and why it matters.",
+      "answer": "Logically: FROM picks the table, WHERE filters rows, SELECT computes columns and aliases, DISTINCT removes duplicates, ORDER BY sorts, LIMIT cuts. So aliases from SELECT are usable in ORDER BY but not in WHERE, because WHERE runs before SELECT.",
+      "rubric": [
+        "FROM then WHERE then SELECT",
+        "ORDER BY and LIMIT happen last",
+        "Aliases not visible in WHERE"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "Why is `WHERE a = 1 OR b = 2 AND c = 3` risky, and how do you write it clearly?",
+      "answer": "AND has higher precedence than OR, so it means `a = 1 OR (b = 2 AND c = 3)`. If you meant `(a = 1 OR b = 2) AND c = 3`, add the parentheses. Always parenthesise mixed conditions.",
+      "rubric": [
+        "AND binds tighter than OR",
+        "Use parentheses to state intent"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between WHERE and HAVING, at a basic level?",
+      "difficulty": "easy",
+      "answer_md": "WHERE filters individual rows before any grouping happens. HAVING filters groups after GROUP BY and aggregation. Example: `WHERE price > 10` removes cheap rows first; `HAVING COUNT(*) > 5` keeps only categories with more than five of the remaining rows."
+    },
+    {
+      "question": "Why can't you rely on row order without ORDER BY?",
+      "difficulty": "easy",
+      "answer_md": "A table is an unordered set. The planner may use an index scan, a parallel scan or a different physical order after updates and vacuum, so results can differ between runs. Pagination or tests that depend on implicit order become flaky. Add ORDER BY with a unique tiebreaker, e.g. `ORDER BY created_at DESC, id DESC`."
+    },
+    {
+      "question": "Why is `NULL = NULL` not true?",
+      "difficulty": "medium",
+      "answer_md": "NULL means unknown. Is one unknown equal to another unknown? Unknown. SQL uses three-valued logic (true, false, unknown) and WHERE keeps only true. Use `IS NULL`, or `IS NOT DISTINCT FROM` when you want NULL-safe equality in PostgreSQL."
+    },
+    {
+      "question": "How would you paginate a product list?",
+      "difficulty": "medium",
+      "answer_md": "Simple: `ORDER BY id LIMIT 20 OFFSET 40`, but OFFSET walks skipped rows so deep pages get slow. Better is keyset pagination: `WHERE id > :last_id ORDER BY id LIMIT 20`, which uses the index and stays fast."
+    }
+  ]
+}

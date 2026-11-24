@@ -1,0 +1,147 @@
+{
+  "slug": "ai-precision-recall-f1",
+  "title": "Precision, recall and F1 for a classifier",
+  "category": "ai-engineering",
+  "language": "python",
+  "difficulty": "easy",
+  "skill": "ai-evaluation",
+  "concepts": [
+    "confusion matrix",
+    "precision",
+    "recall",
+    "F1",
+    "zero division"
+  ],
+  "related_topics": [
+    "ai-model-evaluation",
+    "ai-evaluation-observability",
+    "ai-supervised-learning"
+  ],
+  "problem_md": "An LLM classifies review texts as `\"complaint\"` or not. Score it against human labels:\n\n```python\ndef prf(y_true: list[str], y_pred: list[str], positive: str = \"complaint\") -> dict\n```\n\nReturn `{\"tp\", \"fp\", \"fn\", \"precision\", \"recall\", \"f1\"}` for the `positive` class, metrics rounded to 4 decimals. Any division by zero yields `0.0` (sklearn's `zero_division=0`). Mismatched lengths or empty input -> `ValueError`.",
+  "examples": [
+    {
+      "input": "prf(['complaint','ok','complaint','ok'], ['complaint','complaint','ok','ok'])",
+      "output": "{'tp': 1, 'fp': 1, 'fn': 1, 'precision': 0.5, 'recall': 0.5, 'f1': 0.5}"
+    }
+  ],
+  "hints": [
+    "tp: true==pos and pred==pos; fp: true!=pos and pred==pos; fn: true==pos and pred!=pos.",
+    "`precision = tp/(tp+fp)`, `recall = tp/(tp+fn)`, `f1 = 2pr/(p+r)` - guard each denominator."
+  ],
+  "starter_code": "def prf(y_true, y_pred, positive='complaint'):\n    tp = sum(1 for t, p in zip(y_true, y_pred) if t == p == positive)\n    fp = sum(1 for t, p in zip(y_true, y_pred) if p == positive and t != positive)\n    fn = sum(1 for t, p in zip(y_true, y_pred) if t == positive and p != positive)\n    precision = tp / (tp + fp)\n    recall = tp / (tp + fn)\n    f1 = 2 * precision * recall / (precision + recall)\n    return {'tp': tp, 'fp': fp, 'fn': fn, 'precision': round(precision, 4),\n            'recall': round(recall, 4), 'f1': round(f1, 4)}\n",
+  "solution_code": "def _div(a, b):\n    return a / b if b else 0.0\n\n\ndef prf(y_true, y_pred, positive='complaint'):\n    if len(y_true) != len(y_pred) or not y_true:\n        raise ValueError('y_true and y_pred must be non-empty and the same length')\n    tp = fp = fn = 0\n    for t, p in zip(y_true, y_pred):\n        if p == positive and t == positive:\n            tp += 1\n        elif p == positive:\n            fp += 1\n        elif t == positive:\n            fn += 1\n    precision = _div(tp, tp + fp)\n    recall = _div(tp, tp + fn)\n    f1 = _div(2 * precision * recall, precision + recall)\n    return {'tp': tp, 'fp': fp, 'fn': fn, 'precision': round(precision, 4),\n            'recall': round(recall, 4), 'f1': round(f1, 4)}\n",
+  "solution_md": "Precision = \"of what we flagged, how much was right\"; recall = \"of what was there, how much we found\"; F1 is their harmonic mean, which punishes a lopsided pair. Accuracy hides problems on imbalanced data: if 5% of reviews are complaints, predicting \"ok\" always is 95% accurate with recall 0.\n\nA classifier that never predicts the positive class makes `tp + fp == 0` - the starter crashes exactly on the degenerate model you most need to detect. Single pass, O(n).\n\nPick the trade-off by cost: missed complaints (fn) vs false alarms (fp). For multi-class, compute per class and macro/micro-average; `sklearn.metrics.precision_recall_fscore_support` does this.",
+  "tests": {
+    "function": "prf",
+    "cases": [
+      {
+        "args": [
+          [
+            "complaint",
+            "ok",
+            "complaint",
+            "ok"
+          ],
+          [
+            "complaint",
+            "complaint",
+            "ok",
+            "ok"
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "tp": 1,
+          "fp": 1,
+          "fn": 1,
+          "precision": 0.5,
+          "recall": 0.5,
+          "f1": 0.5
+        }
+      },
+      {
+        "args": [
+          [
+            "ok",
+            "ok",
+            "complaint"
+          ],
+          [
+            "ok",
+            "ok",
+            "ok"
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "tp": 0,
+          "fp": 0,
+          "fn": 1,
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0
+        }
+      },
+      {
+        "args": [
+          [
+            "spam",
+            "ham",
+            "spam",
+            "spam",
+            "ham"
+          ],
+          [
+            "spam",
+            "spam",
+            "spam",
+            "ham",
+            "ham"
+          ]
+        ],
+        "kwargs": {
+          "positive": "spam"
+        },
+        "expected": {
+          "tp": 2,
+          "fp": 1,
+          "fn": 1,
+          "precision": 0.6667,
+          "recall": 0.6667,
+          "f1": 0.6667
+        }
+      },
+      {
+        "args": [
+          [
+            "complaint",
+            "complaint"
+          ],
+          [
+            "complaint",
+            "complaint"
+          ]
+        ],
+        "kwargs": {},
+        "expected": {
+          "tp": 2,
+          "fp": 0,
+          "fn": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0
+        }
+      },
+      {
+        "args": [
+          [
+            "ok"
+          ],
+          []
+        ],
+        "raises": "ValueError",
+        "kwargs": {}
+      }
+    ]
+  }
+}

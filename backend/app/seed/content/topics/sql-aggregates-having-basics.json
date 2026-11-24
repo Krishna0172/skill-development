@@ -1,0 +1,183 @@
+{
+  "slug": "sql-aggregates-having-basics",
+  "title": "Aggregates basics: COUNT, SUM, AVG, FILTER, HAVING",
+  "skill": "postgresql",
+  "extra_skills": [],
+  "category": "Database",
+  "difficulty": "beginner",
+  "tags": [
+    "aggregates",
+    "count",
+    "sum",
+    "avg",
+    "having",
+    "filter"
+  ],
+  "summary": "An aggregate function collapses many rows into one value: how many, the total, the average, the smallest. This topic covers the five core aggregates, the PostgreSQL FILTER clause for conditional counting, and the difference between WHERE (filters rows) and HAVING (filters groups).",
+  "why_md": "- Reports, dashboards and sanity checks ('how many orders per day?') are all aggregates.\n- COUNT(*) vs COUNT(col) and NULL handling in SUM/AVG are among the most common interview traps.\n- Understanding WHERE vs HAVING prevents slow or wrong queries.\n- FILTER gives clean conditional metrics without CASE gymnastics.",
+  "details_md": "### The aggregates\n- `COUNT(*)` counts rows. `COUNT(col)` counts rows where `col` is not NULL. `COUNT(DISTINCT col)` counts distinct non-null values.\n- `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)`.\nAll aggregates except `COUNT(*)` **ignore NULLs**. `AVG` divides by the number of non-null values, not the number of rows. On an empty set (or all NULLs) `SUM`, `AVG`, `MIN`, `MAX` return NULL while `COUNT` returns 0; wrap with `COALESCE(SUM(x), 0)` when you need zero.\n\n### One summary row\nWithout GROUP BY, an aggregate query returns exactly one row: `SELECT COUNT(*), AVG(price) FROM products;`. You cannot mix a plain column with an aggregate unless you group by that column.\n\n### GROUP BY\n`GROUP BY category` makes one output row per category, and aggregates are computed per group: `SELECT category, COUNT(*) FROM products GROUP BY category;`. Every selected column must be either in GROUP BY or inside an aggregate. (More in `sql-group-by`.)\n\n### WHERE vs HAVING\nOrder of evaluation: FROM, **WHERE**, GROUP BY, aggregates, **HAVING**, SELECT, ORDER BY. So WHERE removes rows before grouping (and cannot use aggregates); HAVING removes whole groups after aggregation. Use WHERE whenever the condition concerns single rows (it is cheaper); use HAVING only for conditions on aggregates: `HAVING COUNT(*) >= 5`.\n\n### FILTER clause\n`COUNT(*) FILTER (WHERE status = 'shipped')` counts only the matching rows within each group, so one query can produce several metrics side by side: total orders, shipped orders and cancelled orders. It is the readable PostgreSQL (SQL standard) alternative to `SUM(CASE WHEN ... THEN 1 ELSE 0 END)`.\n\n### Integer division trap\n`SUM(a) / COUNT(*)` with integers does integer division in PostgreSQL. Cast: `SUM(a)::numeric / COUNT(*)`, or use `AVG`.\n\n### Rounding\n`ROUND(AVG(price), 2)` works on `numeric`; for `double precision` cast to numeric first.\n\n### Reading a query top to bottom\nTake `SELECT customer_id, COUNT(*) FROM orders WHERE status <> 'cancelled' GROUP BY customer_id HAVING COUNT(*) > 3`. The database first keeps non-cancelled orders (WHERE), then buckets them by customer (GROUP BY), computes each bucket's count, drops buckets with three orders or fewer (HAVING), and only then produces the selected columns. Thinking in this order explains almost every error message you will meet with aggregates.",
+  "code_md": "```sql\n-- Whole-table summary: exactly one row\nSELECT COUNT(*)              AS orders,\n       COUNT(shipped_at)     AS shipped,        -- ignores NULL\n       COALESCE(SUM(total), 0) AS revenue,\n       ROUND(AVG(total), 2)  AS avg_order\nFROM orders;\n```\n```sql\n-- Per group, with a conditional metric via FILTER\nSELECT customer_id,\n       COUNT(*)                                  AS orders,\n       COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled,\n       SUM(total) FILTER (WHERE status = 'paid')    AS paid_revenue\nFROM orders\nGROUP BY customer_id\nORDER BY orders DESC;\n```\n```sql\n-- WHERE filters rows; HAVING filters groups\nSELECT customer_id, COUNT(*) AS n\nFROM orders\nWHERE created_at >= date '2026-01-01'   -- before grouping\nGROUP BY customer_id\nHAVING COUNT(*) >= 5;                   -- after grouping\n```\n```sql\n-- Integer division trap\nSELECT 7 / 2          AS int_div,     -- 3\n       7 / 2.0        AS dec_div,     -- 3.5000000000000000\n       SUM(qty)::numeric / COUNT(*) AS avg_qty\nFROM order_lines;\n```",
+  "use_cases_md": "- Daily revenue and order count per marketplace.\n- 'Customers with more than 3 cancelled orders' via `HAVING`.\n- Data-quality checks: `COUNT(*) - COUNT(email)` gives rows with a missing email.\n- Funnel-style dashboards: one row with several FILTER counts.\n- Detecting duplicates: `GROUP BY key HAVING COUNT(*) > 1`.",
+  "mistakes_md": "- **`COUNT(col)` when you meant `COUNT(*)`**: silently skips NULLs.\n- **Using HAVING for row conditions**: slower (rows are grouped before being dropped). Use WHERE.\n- **Aggregates in WHERE** (`WHERE COUNT(*) > 1`): not allowed; use HAVING.\n- **Selecting an ungrouped column** with an aggregate: error (or wrong semantic in other databases).\n- **Integer division** in ratios.\n- **Expecting SUM of nothing to be 0**: it is NULL; COALESCE it.",
+  "best_practices_md": "- Filter with WHERE first, aggregate second, HAVING last.\n- Use `COUNT(*)` for row counts, `COUNT(col)` only when you want non-nulls.\n- Use FILTER for conditional aggregates.\n- COALESCE sums that feed APIs or reports.\n- Cast to numeric before dividing and rounding.\n- Always alias aggregate columns.",
+  "my_context_md": "",
+  "revision_notes_md": "- `COUNT(*)` counts rows; `COUNT(col)` skips NULLs; `COUNT(DISTINCT col)`.\n- SUM/AVG/MIN/MAX ignore NULLs; empty input gives NULL (COUNT gives 0).\n- Without GROUP BY: one result row.\n- Evaluation: WHERE, GROUP BY, HAVING, SELECT, ORDER BY.\n- WHERE = rows (no aggregates); HAVING = groups.\n- `agg(...) FILTER (WHERE cond)` is conditional aggregation.\n- `7/2 = 3` for integers; cast to numeric.\n- Duplicate hunt: `GROUP BY k HAVING COUNT(*) > 1`.",
+  "exercises_md": "1. For an `orders` table, write one query returning total orders, orders with a shipped date, revenue and average order value.\n2. Add per-customer counts of paid vs cancelled orders using FILTER, then reproduce them with SUM(CASE ...).\n3. Find customers with at least 3 orders since the start of the year; first put the date test in HAVING, then move it to WHERE and compare.\n4. Find duplicate emails in a `customers` table with GROUP BY and HAVING.",
+  "related": [
+    "sql-group-by",
+    "sql-null-handling",
+    "sql-select-filter-sort",
+    "sql-case-set-operations"
+  ],
+  "flashcards": [
+    {
+      "front": "COUNT(*) vs COUNT(col)?",
+      "back": "COUNT(*) counts rows; COUNT(col) counts rows where col is not NULL."
+    },
+    {
+      "front": "Do aggregates ignore NULL?",
+      "back": "All except COUNT(*) do; AVG divides by the count of non-null values."
+    },
+    {
+      "front": "WHERE vs HAVING?",
+      "back": "WHERE filters rows before grouping (no aggregates); HAVING filters groups after aggregation."
+    },
+    {
+      "front": "What does FILTER do?",
+      "back": "`agg(x) FILTER (WHERE cond)` aggregates only rows meeting cond."
+    },
+    {
+      "front": "SUM over zero rows?",
+      "back": "NULL (COUNT gives 0); use COALESCE(SUM(x), 0)."
+    },
+    {
+      "front": "7 / 2 in PostgreSQL?",
+      "back": "3, integer division; cast one side to numeric."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "A table has 10 rows and 3 have NULL email. What does COUNT(email) return?",
+      "options": [
+        "NULL",
+        "10",
+        "7",
+        "3"
+      ],
+      "answer_index": 2,
+      "explanation": "COUNT(col) skips NULLs."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which clause can use an aggregate such as COUNT(*) > 5?",
+      "options": [
+        "HAVING",
+        "FROM",
+        "LIMIT",
+        "WHERE"
+      ],
+      "answer_index": 0,
+      "explanation": "HAVING runs after aggregation."
+    },
+    {
+      "type": "mcq",
+      "prompt": "What does SUM(total) return on an empty set?",
+      "options": [
+        "Error",
+        "-1",
+        "0",
+        "NULL"
+      ],
+      "answer_index": 3,
+      "explanation": "SUM of no rows is NULL; COALESCE it."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "Count only shipped rows per group with COUNT(*) ____ (WHERE status = 'shipped').",
+      "answers": [
+        "filter"
+      ],
+      "explanation": "FILTER (WHERE ...) is conditional aggregation."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To keep only groups having more than 5 rows use GROUP BY k ____ COUNT(*) > 5.",
+      "answers": [
+        "having"
+      ],
+      "explanation": "HAVING filters groups."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table o(id integer, cust text, total integer, shipped text);\"\n                \"insert into o values (1,'a',10,'x'),(2,'a',20,NULL),(3,'b',30,'y'),(4,'b',NULL,NULL),(5,'b',50,'z');\")\nprint(c.execute(\"select count(*), count(total), count(shipped), sum(total), avg(total) from o\").fetchone())",
+      "answers": [
+        "(5, 4, 3, 110, 27.5)"
+      ],
+      "explanation": "avg = 110/4 = 27.5 because NULL is ignored."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\nc = sqlite3.connect(\":memory:\")\nc.executescript(\"create table o(cust text, status text, total integer);\"\n                \"insert into o values ('a','paid',10),('a','cancelled',5),('b','paid',7),('b','paid',8),('c','cancelled',9);\")\nq = (\"select cust, count(*), sum(total) filter (where status='paid') \"\n     \"from o group by cust having count(*) >= 2 order by cust\")\nfor r in c.execute(q):\n    print(r)",
+      "answers": [
+        "('a', 2, 10)\n('b', 2, 15)"
+      ],
+      "explanation": "c has only 1 row so is removed by HAVING; a's paid sum is 10, b's is 15."
+    },
+    {
+      "type": "debug",
+      "prompt": "This query errors out. What is wrong and what is the fix?",
+      "code": "SELECT customer_id, COUNT(*)\nFROM orders\nWHERE COUNT(*) > 3\nGROUP BY customer_id;",
+      "answer": "Aggregates cannot be used in WHERE because WHERE runs before grouping. Use HAVING.\n```sql\nSELECT customer_id, COUNT(*)\nFROM orders\nGROUP BY customer_id\nHAVING COUNT(*) > 3;\n```",
+      "rubric": [
+        "Aggregate not allowed in WHERE",
+        "Use HAVING after GROUP BY",
+        "WHERE is for row conditions"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain why WHERE is preferred over HAVING for row-level conditions.",
+      "answer": "WHERE runs before grouping, so rows that do not matter are dropped early and fewer rows are grouped; it can also use indexes. HAVING filters after every group has been built and aggregated, which wastes work. HAVING is only needed for conditions on aggregate results.",
+      "rubric": [
+        "WHERE evaluated before GROUP BY",
+        "Less data to aggregate / index use",
+        "HAVING only for aggregate conditions"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How do you compute total orders, shipped orders and cancelled orders per customer in one query?",
+      "answer": "GROUP BY customer_id and use `COUNT(*)`, `COUNT(*) FILTER (WHERE status = 'shipped')` and `COUNT(*) FILTER (WHERE status = 'cancelled')`. Alternative: `SUM(CASE WHEN status = 'shipped' THEN 1 ELSE 0 END)`.",
+      "rubric": [
+        "GROUP BY customer",
+        "FILTER or CASE per metric",
+        "One scan of the table"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "What is the difference between COUNT(*), COUNT(1) and COUNT(col)?",
+      "difficulty": "easy",
+      "answer_md": "COUNT(*) and COUNT(1) both count rows, same result and same plan in PostgreSQL. COUNT(col) counts only rows where col is not NULL. COUNT(DISTINCT col) counts unique non-null values."
+    },
+    {
+      "question": "WHERE vs HAVING?",
+      "difficulty": "easy",
+      "answer_md": "WHERE filters rows before grouping and cannot reference aggregates. HAVING filters groups after aggregation. Example: sales since January in WHERE, 'customers with more than 5 orders' in HAVING."
+    },
+    {
+      "question": "How do you get 0 instead of NULL for a customer with no orders?",
+      "difficulty": "medium",
+      "answer_md": "SUM over no rows is NULL, so use `COALESCE(SUM(total), 0)`. If customers with zero orders must appear at all, start from `customers LEFT JOIN orders` and aggregate; an inner join would drop them."
+    },
+    {
+      "question": "How would you find duplicate rows by email?",
+      "difficulty": "medium",
+      "answer_md": "`SELECT email, COUNT(*) FROM customers GROUP BY email HAVING COUNT(*) > 1;`. To see the full duplicate rows, join back or use a window function with `COUNT(*) OVER (PARTITION BY email)`."
+    }
+  ]
+}

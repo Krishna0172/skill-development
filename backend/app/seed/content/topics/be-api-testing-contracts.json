@@ -1,0 +1,191 @@
+{
+  "slug": "be-api-testing-contracts",
+  "title": "Testing APIs: TestClient, httpx and OpenAPI contracts",
+  "skill": "api-design",
+  "extra_skills": [
+    "fastapi",
+    "python-testing"
+  ],
+  "category": "Backend",
+  "difficulty": "intermediate",
+  "tags": [
+    "testing",
+    "pytest",
+    "fastapi",
+    "httpx",
+    "openapi",
+    "contract"
+  ],
+  "summary": "Test an API at the HTTP boundary: pytest with FastAPI's TestClient for fast in-process tests, httpx for real-server and async tests, dependency overrides for isolation, and OpenAPI schemas as the contract between producers and consumers.",
+  "why_md": "- API tests catch what unit tests miss: routing, validation, serialization, auth and status codes.\n- A contract (OpenAPI/JSON Schema) lets frontend, partners and services evolve without breaking each other.\n- Fast, isolated tests are what make safe refactors and CI possible.\n- Interviewers ask how you test endpoints, mock the database and avoid breaking clients.",
+  "details_md": "### The test pyramid for APIs\n- **Unit tests**: pure functions and services with no HTTP.\n- **API/integration tests**: call endpoints, hit a real (test) database or a faked dependency.\n- **Contract tests**: verify that responses conform to the published schema and that consumers' expectations still hold.\n- **A few end-to-end tests** against a deployed environment.\n\n### TestClient\nFastAPI ships `fastapi.testclient.TestClient` (built on httpx). It calls the ASGI app **in-process**: no port, no network, very fast.\n```python\nclient = TestClient(app)\nr = client.post(\"/orders\", json={\"sku\": \"PEN\", \"qty\": 2})\nassert r.status_code == 201\nassert r.json()[\"qty\"] == 2\n```\nUsing it as a context manager (`with TestClient(app) as c:`) runs startup/shutdown (lifespan) events.\n\n### Isolating dependencies\nFastAPI's dependency injection makes faking easy: `app.dependency_overrides[get_db] = fake_db`. Replace the database session, current user or external HTTP client; clear overrides after each test (use a fixture with `yield`). For a real database use a transaction per test that is rolled back, or a disposable container.\n\n### httpx\n`httpx` is the HTTP client behind TestClient. Use `httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=\"http://test\")` for async tests (with `pytest-asyncio` or `anyio`), and the same API to test a deployed service. To fake *outgoing* calls from your code to third parties use `httpx.MockTransport` or a library such as `respx`, never real network in unit tests.\n\n### What to assert\nStatus code, response schema, headers (`Location` on 201), error format (e.g. 422 for validation, 404 for missing, 401/403 for auth), and side effects in the database. Parametrise cases: `@pytest.mark.parametrize(\"payload,status\", [...])`.\n\n### OpenAPI as a contract\nFastAPI generates `/openapi.json` from route signatures and Pydantic models. Treat it as the contract:\n- Snapshot it in a test (`assert app.openapi() == json.load(...)`) so accidental changes show up in code review.\n- Validate responses against the schema with `jsonschema` or a tool like **schemathesis** (property-based tests generated from the spec that find 500s and schema violations).\n- Detect breaking changes between versions (removed field, narrowed type, new required request field) in CI with an OpenAPI diff tool.\n- **Consumer-driven contracts** (Pact): each consumer records what it needs; the provider verifies those expectations.\n\n### Backwards compatibility rules\nAdding optional fields or new endpoints is safe. Removing/renaming fields, changing types, or making an optional request field required is breaking: version the API (`/v2`) or deprecate gradually.",
+  "code_md": "```python\n# test_orders.py - pytest + TestClient + dependency override\nimport pytest\nfrom fastapi import FastAPI, Depends, HTTPException\nfrom fastapi.testclient import TestClient\nfrom pydantic import BaseModel\n\napp = FastAPI()\n\nclass OrderIn(BaseModel):\n    sku: str\n    qty: int\n\ndef get_repo():\n    raise RuntimeError(\"real DB not available in tests\")\n\n@app.post(\"/orders\", status_code=201)\ndef create_order(order: OrderIn, repo=Depends(get_repo)):\n    if order.qty <= 0:\n        raise HTTPException(422, \"qty must be positive\")\n    return repo.save(order)\n\nclass FakeRepo:\n    def save(self, order): return {\"id\": 1, **order.model_dump()}\n\n@pytest.fixture\ndef client():\n    app.dependency_overrides[get_repo] = lambda: FakeRepo()\n    yield TestClient(app)\n    app.dependency_overrides.clear()\n\n@pytest.mark.parametrize(\"payload,status\", [\n    ({\"sku\": \"PEN\", \"qty\": 2}, 201),\n    ({\"sku\": \"PEN\", \"qty\": \"x\"}, 422),       # Pydantic validation\n    ({\"sku\": \"PEN\"}, 422),                    # missing field\n])\ndef test_create_order(client, payload, status):\n    assert client.post(\"/orders\", json=payload).status_code == status\n```\n\n```python\n# Mocking an outgoing HTTP call with httpx.MockTransport\nimport httpx\n\ndef handler(request: httpx.Request) -> httpx.Response:\n    return httpx.Response(200, json={\"price\": 9.99})\n\ndef fetch_price(client: httpx.Client, sku: str) -> float:\n    return client.get(f\"https://pricing.example.com/{sku}\").json()[\"price\"]\n\ndef test_fetch_price():\n    client = httpx.Client(transport=httpx.MockTransport(handler))\n    assert fetch_price(client, \"PEN\") == 9.99\n```\n\n```python\n# Contract guard: fail CI if the OpenAPI schema changes unexpectedly\nimport json, pathlib\ndef test_openapi_snapshot():\n    expected = json.loads(pathlib.Path(\"openapi.snapshot.json\").read_text())\n    assert app.openapi() == expected\n```",
+  "use_cases_md": "- Regression tests for every endpoint of an orders/inventory service in CI.\n- Faking the payment gateway and database so tests run in seconds.\n- Publishing OpenAPI so a frontend/mobile team can generate clients and mocks.\n- Running schemathesis nightly against staging to find 500s with generated inputs.\n- Breaking-change checks on pull requests that modify response models.",
+  "mistakes_md": "- **Hitting real third-party APIs in tests**: flaky and slow. Mock the transport.\n- **Leaking dependency overrides** between tests: clear them in fixture teardown.\n- **Only testing the happy path**: assert 422/404/401 cases too.\n- **Sharing mutable database state** between tests: use per-test transactions or fresh schemas.\n- **Asserting entire response blobs with timestamps/ids**: assert stable fields.\n- **Forgetting the lifespan** when the app needs startup (use `with TestClient(app)`).\n- **Treating the OpenAPI file as docs only**: unreviewed schema changes break consumers.",
+  "best_practices_md": "- Test through the public HTTP interface; keep business logic testable without HTTP.\n- Use fixtures for client, database and auth; parametrise edge cases.\n- Override dependencies, do not monkeypatch internals.\n- Snapshot and diff OpenAPI in CI.\n- Keep response models explicit (`response_model`) so the contract is deliberate.\n- Version APIs and deprecate before removing fields.",
+  "my_context_md": "The learner's `ECSInventoryPriceTracking/app/fetchers/spapi.py` already has an async httpx client with pytest tests: practise swapping the real transport for `httpx.MockTransport` to test token refresh and rate-limit header handling without network access. Look in other services for HTTP handlers or Flask routes (for example the Flask-based `GetLlmData` and `ECSLlmQueryProcess`) that have no endpoint-level tests and consider what a status-code and schema test would catch.",
+  "revision_notes_md": "- TestClient runs the ASGI app in-process: no network, fast.\n- `app.dependency_overrides[dep] = fake`; clear in fixture teardown.\n- Use `with TestClient(app)` to run lifespan events.\n- httpx AsyncClient + ASGITransport for async tests; MockTransport/respx to fake outgoing calls.\n- Assert status, body schema, headers, error format, DB side effects.\n- Parametrise edge cases, including 422/404/401/403.\n- OpenAPI = contract: snapshot it, diff it, fuzz it (schemathesis).\n- Breaking: remove/rename fields, change types, new required inputs. Safe: add optional.\n- Consumer-driven contracts (Pact) verify what consumers really need.",
+  "exercises_md": "1. Write TestClient tests for a `POST /products` endpoint covering 201, 422 (bad price) and 409 (duplicate SKU).\n2. Add a fixture that overrides the DB dependency with an in-memory fake and verify overrides are cleared between tests.\n3. Write a client function that calls an external pricing API and test it with `httpx.MockTransport`, including a 429 response with `Retry-After`.\n4. Dump `app.openapi()` to a snapshot file, add a test comparing them, then change a response model and see the failure.",
+  "related": [
+    "pytest-essentials",
+    "py-testing-mocking",
+    "fastapi-essentials",
+    "be-dependency-injection",
+    "rest-api-design",
+    "be-pydantic-validation"
+  ],
+  "flashcards": [
+    {
+      "front": "What does TestClient do?",
+      "back": "Calls the ASGI app in-process through httpx without a real server or network."
+    },
+    {
+      "front": "How do you fake a database in FastAPI tests?",
+      "back": "`app.dependency_overrides[get_db] = fake`, cleared after each test."
+    },
+    {
+      "front": "How to mock outgoing HTTP with httpx?",
+      "back": "Use `httpx.MockTransport` (or respx) so no real request is made."
+    },
+    {
+      "front": "Which changes break an API contract?",
+      "back": "Removing/renaming fields, changing types, making optional request fields required."
+    },
+    {
+      "front": "What is schemathesis?",
+      "back": "A tool that generates tests from your OpenAPI spec to find crashes and schema violations."
+    }
+  ],
+  "questions": [
+    {
+      "type": "mcq",
+      "prompt": "What is the main advantage of FastAPI's TestClient?",
+      "options": [
+        "It deploys the app",
+        "It calls the app in-process without a network server",
+        "It generates the database",
+        "It replaces pytest"
+      ],
+      "answer_index": 1,
+      "explanation": "In-process ASGI calls are fast."
+    },
+    {
+      "type": "mcq",
+      "prompt": "How do you replace a database dependency in a test?",
+      "options": [
+        "monkeypatch os.environ",
+        "app.dependency_overrides[get_db] = fake",
+        "Delete the route",
+        "Change the OpenAPI file"
+      ],
+      "answer_index": 1,
+      "explanation": "dependency_overrides."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which change is backwards-compatible for API consumers?",
+      "options": [
+        "Renaming a response field",
+        "Making an optional request field required",
+        "Adding a new optional response field",
+        "Changing int to string"
+      ],
+      "answer_index": 2,
+      "explanation": "Adding optional output fields is safe."
+    },
+    {
+      "type": "mcq",
+      "prompt": "Which tool mocks outgoing httpx requests without network?",
+      "options": [
+        "httpx.MockTransport",
+        "uvicorn",
+        "alembic",
+        "TestClient"
+      ],
+      "answer_index": 0,
+      "explanation": "MockTransport."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "A request body that fails Pydantic validation in FastAPI returns status ____.",
+      "answers": [
+        "422"
+      ],
+      "explanation": "FastAPI returns 422 Unprocessable Entity."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "FastAPI exposes its generated OpenAPI document at /____.json.",
+      "answers": [
+        "openapi"
+      ],
+      "explanation": "/openapi.json."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import json\nschema = {'required': ['sku', 'qty'], 'props': {'sku': 'str', 'qty': 'int'}}\nbody = {'sku': 'PEN'}\nmissing = [k for k in schema['required'] if k not in body]\nprint(json.dumps({'status': 422 if missing else 201, 'missing': missing}))",
+      "answers": [
+        "{\"status\": 422, \"missing\": [\"qty\"]}"
+      ],
+      "explanation": "One required key missing."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import unittest\nfrom unittest import mock\n\ndef price(client):\n    return client.get('/p')['v'] * 2\n\nm = mock.Mock()\nm.get.return_value = {'v': 21}\nprint(price(m))\nprint(m.get.call_args.args)",
+      "answers": [
+        "42\n('/p',)"
+      ],
+      "explanation": "Mock returns the canned dict; call_args holds the arguments."
+    },
+    {
+      "type": "debug",
+      "prompt": "Tests pass individually but the second test fails when run together. What is wrong?",
+      "code": "app.dependency_overrides[get_user] = lambda: admin\n\ndef test_admin_can_delete():\n    assert client.delete('/items/1').status_code == 204\n\ndef test_anonymous_cannot_delete():\n    assert client.delete('/items/1').status_code == 401",
+      "answer": "The override leaks into later tests because it is never cleared. Use a fixture with yield and `app.dependency_overrides.clear()` (or pop the key) in teardown.",
+      "rubric": [
+        "Override persists across tests",
+        "Use fixture with teardown",
+        "Clear/pop the override"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain what an API contract is and how OpenAPI helps enforce it.",
+      "answer": "A contract is the agreed shape of requests and responses between provider and consumers. OpenAPI describes endpoints, schemas and status codes in a machine-readable spec generated from code. You can snapshot and diff it in CI, generate clients, and fuzz-test the live API against it so accidental breaking changes are caught.",
+      "rubric": [
+        "Agreed request/response shape",
+        "Machine-readable spec",
+        "Automated checks in CI"
+      ]
+    },
+    {
+      "type": "qa",
+      "prompt": "How do you test an endpoint that depends on a database and a third-party HTTP API?",
+      "answer": "Use TestClient and override the DB dependency with a fake or a transactional test database, and replace the outgoing HTTP client with `httpx.MockTransport`/respx returning canned responses (including error cases such as 429 and 500). Assert status, body schema and the DB side effect. Add a few integration tests against a real DB container.",
+      "rubric": [
+        "Override DB dependency",
+        "Mock outgoing HTTP transport",
+        "Assert status/schema/side effects"
+      ]
+    }
+  ],
+  "interview": [
+    {
+      "question": "How do you structure tests for a FastAPI service?",
+      "difficulty": "medium",
+      "answer_md": "Keep business logic in plain functions/services with unit tests. Add API tests with TestClient that exercise routing, validation and auth; override dependencies for the database and external clients. Use fixtures for the client and a per-test transaction rolled back at the end. Parametrise failure cases, and run a small set of integration tests against real Postgres in CI."
+    },
+    {
+      "question": "What is consumer-driven contract testing?",
+      "difficulty": "hard",
+      "answer_md": "Each consumer publishes the interactions it relies on (request and minimal expected response) as a contract file (Pact). The provider's CI replays those contracts against the real implementation and fails if it can no longer satisfy a consumer. This catches breaking changes that a schema alone misses (for example a consumer reading a field you meant to remove) and lets teams deploy independently."
+    },
+    {
+      "question": "How do you detect breaking API changes automatically?",
+      "difficulty": "medium",
+      "answer_md": "Export `/openapi.json` on every build, store the previous release's spec, and run an OpenAPI diff tool in CI that flags removed endpoints/fields, type changes and newly required request fields. Complement it with schemathesis against staging to validate responses. Breaking changes require a new version or a deprecation period."
+    }
+  ]
+}

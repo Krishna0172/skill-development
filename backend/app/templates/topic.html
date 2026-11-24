@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% from "macros.html" import card, kv, empty %}
+{% block title %}{{ t.title }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <div class="small faint">{% if module %}<a href="/learn/{{ module.track }}#{{ module.slug }}">{{ module.title }}</a> · {% endif %}{{ t.skill.name if t.skill else t.category }}</div>
+    <h1>{{ t.title }}</h1>
+    <div class="row">{{ badge(t.status) }}{{ badge(t.difficulty) }}{% for tag in t.tags or [] %}<span class="chip">{{ tag }}</span>{% endfor %}</div>
+  </div>
+  <div class="actions">
+    <form method="post" action="/topics/{{ t.id }}/start" class="inline-form"><button class="btn">▶ Study</button></form>
+    <a class="btn primary" href="/topics/{{ t.id }}/assess">Assess{% if t.question_count %} ({{ t.question_count }}){% endif %}</a>
+    <a class="btn" href="/topics/{{ t.id }}/edit">Edit</a>
+  </div>
+</div>
+
+<div class="grid g-side">
+  <div class="stack">
+    {% call card() %}
+      {% if t.summary %}<p class="muted" style="margin-top:0">{{ t.summary }}</p>{% endif %}
+      {% for key, heading in [("why_md", "Why it matters"), ("details_md", "Explanation"), ("code_md", "Code"),
+                              ("use_cases_md", "Use cases"), ("mistakes_md", "Common mistakes"),
+                              ("best_practices_md", "Best practices"), ("my_context_md", "In your work"),
+                              ("revision_notes_md", "Revision notes"), ("exercises_md", "Exercises")] %}
+        {% if t[key] %}<div class="topic-section mt"><h3>{{ heading }}</h3><div class="md">{{ t[key]|md }}</div></div>{% endif %}
+      {% endfor %}
+    {% endcall %}
+
+    {% call card("Try it (Python)") %}
+      <textarea class="code" id="scratch-code" name="code" rows="10" spellcheck="false" placeholder="# Work out the exercises here, e.g. print(1037 // 25)"></textarea>
+      <div class="row mt">
+        <button type="button" class="btn primary" hx-post="/topics/{{ t.id }}/scratch/run" hx-include="#scratch-code" hx-target="#scratch-result" hx-swap="innerHTML">▶ Run</button>
+        <span class="tiny faint htmx-indicator">running…</span>
+        <span class="tiny faint">Scratchpad — not recorded. Code is kept in this browser.</span>
+      </div>
+      <div id="scratch-result" class="mt"></div>
+      <script>
+        (function () {
+          var el = document.getElementById("scratch-code"), key = "scratch-topic-{{ t.id }}";
+          try { el.value = localStorage.getItem(key) || ""; } catch (e) {}
+          el.addEventListener("input", function () { try { localStorage.setItem(key, el.value); } catch (e) {} });
+          el.addEventListener("keydown", function (ev) {
+            if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); htmx.trigger(el.closest(".card").querySelector("button.primary"), "click"); }
+          });
+        })();
+      </script>
+    {% endcall %}
+
+    {% call card("My notes") %}
+      <form method="post" action="/topics/{{ t.id }}/notes" id="notes" class="form-grid">
+        <textarea name="notes_md" rows="6" placeholder="Markdown notes in your own words…">{{ t.notes_md or "" }}</textarea>
+        <div><button class="btn">Save notes</button></div>
+      </form>
+    {% endcall %}
+
+    {% call card("Flashcards (" ~ t.flashcards|length ~ ")") %}
+      <div id="flashcards">
+      {% for c in t.flashcards %}
+        <details class="fold mb"><summary>{{ c.front }}</summary><div class="md">{{ c.back|md }}</div>
+          {% if c.review %}<div class="tiny faint mt">next revision {{ c.review.due_date|rel }}</div>{% endif %}</details>
+      {% endfor %}
+      <form method="post" action="/topics/{{ t.id }}/flashcards" class="form-grid mt">
+        <input name="front" placeholder="Front (question)" required>
+        <textarea name="back" rows="3" placeholder="Back (answer, markdown)" required></textarea>
+        <div><button class="btn">+ Add flashcard</button></div>
+      </form>
+      </div>
+    {% endcall %}
+
+    {% if t.interview %}
+      {% call card("Interview questions") %}
+        {% for q in t.interview %}<details class="fold mb"><summary>{{ q.question }} {{ badge(q.difficulty) }}</summary><div class="md">{{ q.answer_md|md }}</div></details>{% endfor %}
+      {% endcall %}
+    {% endif %}
+  </div>
+
+  <div class="stack">
+    {% call card("Progress") %}
+      {{ kv("Best score", (t.best_score|round|int ~ "%") if t.best_score is not none else "not assessed") }}
+      {{ kv("Pass / mastery", pass_pct ~ "% / " ~ mastery_pct ~ "%") }}
+      {{ kv("Questions", t.question_count ~ (" · " ~ t.question_types|map("label")|join(", ") if t.question_types else "")) }}
+      {{ kv("Time spent", t.minutes_spent|minutes) }}
+      {{ kv("Practice attempts", t.practice_attempts) }}
+      {% if t.review %}{{ kv("Next revision", t.review.due_date|rel) }}{% endif %}
+      <form method="post" action="/topics/{{ t.id }}/confidence" class="row mt">
+        <span class="small muted">Confidence</span>
+        {% for n in range(1, 6) %}<button class="btn sm {{ 'primary' if t.confidence == n }}" name="confidence" value="{{ n }}">{{ n }}</button>{% endfor %}
+      </form>
+    {% endcall %}
+
+    {% call card("Status") %}
+      <form method="post" action="/topics/{{ t.id }}/status" class="form-grid">
+        <select name="status">{% for s in ["not_started", "learning", "practised", "learned", "needs_revision", "difficult", "mastered"] %}<option value="{{ s }}" {{ 'selected' if s == t.status }}>{{ s|label }}</option>{% endfor %}</select>
+        <input name="note" placeholder="Why? (optional)">
+        <button class="btn">Update status</button>
+        <div class="tiny faint">Learned needs a passed assessment (≥ {{ pass_pct }}%); mastered needs ≥ {{ mastery_pct }}% plus spaced revisions.</div>
+      </form>
+    {% endcall %}
+
+    {% if t.assessments %}
+      {% call card("Assessments", flush=True) %}
+        <ul class="list">{% for a in t.assessments %}<li class="between small"><a href="/assessments/{{ a.id }}">{{ a.at|date }}</a><strong class="{{ 'good' if a.passed else 'warn' }}">{{ a.score_pct|round|int }}%</strong></li>{% endfor %}</ul>
+      {% endcall %}
+    {% endif %}
+
+    {% if t.related or t.exercises or t.projects %}
+      {% call card("Linked") %}
+        {% if t.related %}<div class="small muted">Related topics</div><ul class="list compact">{% for r in t.related %}<li><a href="/topics/{{ r.id }}">{{ r.title }}</a> {{ badge(r.status) }}</li>{% endfor %}</ul>{% endif %}
+        {% if t.exercises %}<div class="small muted mt">Exercises</div><ul class="list compact">{% for e in t.exercises %}<li><a href="/practice/{{ e.id }}">{{ e.title }}</a> {{ badge(e.status) }}</li>{% endfor %}</ul>{% endif %}
+        {% if t.projects %}<div class="small muted mt">Projects</div><ul class="list compact">{% for p in t.projects %}<li><a href="/projects/{{ p.id }}">{{ p.name }}</a></li>{% endfor %}</ul>{% endif %}
+      {% endcall %}
+    {% endif %}
+
+    {% if t.history %}
+      {% call card("History", flush=True) %}
+        <ul class="list">{% for h in t.history[:12] %}<li class="small"><span class="faint">{{ h.at|rel }}</span> · {{ h.summary }}</li>{% endfor %}</ul>
+      {% endcall %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

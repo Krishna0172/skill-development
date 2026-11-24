@@ -1,0 +1,66 @@
+{
+  "slug": "web-security-owasp",
+  "why_md": "- Backend developers own most OWASP Top 10 risks: injection, broken access control, SSRF, secrets handling.\n- In a multi-tenant SaaS, one missing `orgid` check exposes another customer's data.\n- AI features add new vectors: model-generated SQL, prompt injection, and URLs fetched on a model's behalf all need the same controls.\n- Security questions show up in nearly every backend interview.",
+  "revision_notes_md": "- Broken access control (incl. IDOR) is #1: always scope queries by the caller's tenant/user, server-side.\n- Injection: parameterize values; allow-list identifiers; never build SQL/shell commands with f-strings.\n- SSRF: allow-list hosts/schemes, resolve DNS and block private/link-local IPs (169.254.169.254), disable redirects or re-check them.\n- Secrets in a secrets manager / env injected at runtime — never in code, images or logs.\n- Compare tokens/signatures with `hmac.compare_digest` (constant time).\n- Hash passwords with a slow KDF (argon2/bcrypt/scrypt), never plain SHA-256.\n- Validate input at the boundary (types, sizes, formats); limit request/upload size.\n- Log security events without logging secrets or full PII.",
+  "exercises_md": "1. Grep one service for SQL built with f-strings and classify each: value interpolation (fix with `%s`), identifier (fix with `sql.Identifier` + allow-list), or constant. Fix the three riskiest.\n2. Write a `safe_fetch(url)` helper that only allows https, resolves the host, rejects private/loopback/link-local addresses, and caps response size; write pytest cases for each rejection.",
+  "my_context_md": "The audit of `python-postgres` found 619 SQL strings built with f-strings — the single biggest injection risk to address, especially in `ECSLlmQueryProcess`, which stores and handles model-generated (text-to-SQL) queries. On the positive side, `AmazonVendorBankRecon/db.py` fetches the DB secret from AWS Secrets Manager (cached with a TTL) instead of hard-coding it.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "Changing `/api/orders/5012` to `/api/orders/5013` and seeing another tenant's order is an insecure direct object reference, part of the OWASP category broken ____ control.",
+      "answers": [
+        "access"
+      ],
+      "explanation": "IDOR is a form of Broken Access Control: the server doesn't check ownership."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "To compare a received webhook signature with the expected one in constant time, use `hmac.____(a, b)`.",
+      "answers": [
+        "compare_digest"
+      ],
+      "explanation": "hmac.compare_digest avoids timing side channels that `==` can leak."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import sqlite3\ndb = sqlite3.connect(\":memory:\")\ndb.executescript('''CREATE TABLE orders(id INT, org INT);\nINSERT INTO orders VALUES (1,7),(2,7),(3,9),(4,9);''')\nuser_input = \"7 OR 1=1\"\nunsafe = db.execute(f\"SELECT COUNT(*) FROM orders WHERE org = {user_input}\").fetchone()[0]\nsafe = db.execute(\"SELECT COUNT(*) FROM orders WHERE org = ?\", (user_input,)).fetchone()[0]\nprint(unsafe, safe)",
+      "answers": [
+        "4 0"
+      ],
+      "explanation": "Interpolated, the input becomes `org = 7 OR 1=1` and returns every tenant's rows. Bound as a parameter, it's just a string that matches nothing."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "import ipaddress\ndef blocked(ip):\n    a = ipaddress.ip_address(ip)\n    return a.is_private or a.is_loopback or a.is_link_local\nfor ip in [\"169.254.169.254\", \"10.0.3.7\", \"127.0.0.1\", \"52.95.110.1\"]:\n    print(ip, blocked(ip))",
+      "answers": [
+        "169.254.169.254 True\n10.0.3.7 True\n127.0.0.1 True\n52.95.110.1 False"
+      ],
+      "explanation": "SSRF defences must block the cloud metadata address (link-local), private ranges and loopback after DNS resolution; only the public address passes."
+    },
+    {
+      "type": "debug",
+      "prompt": "This endpoint passes all functional tests. What's the security bug and how do you fix it?",
+      "code": "@app.get(\"/orders/{order_id}\")\ndef get_order(order_id: int, user=Depends(current_user)):\n    with db_transaction() as cur:\n        cur.execute(\"SELECT * FROM orders WHERE id = %s\", (order_id,))\n        return cur.fetchone()",
+      "answer": "The query is parameterized (no injection), but it never checks that the order belongs to the caller's organisation — any authenticated user can read any tenant's order by changing the ID (IDOR / broken access control).\n\n```python\ncur.execute(\n    \"SELECT * FROM orders WHERE id = %s AND orgid = %s\",\n    (order_id, user.orgid),\n)\nrow = cur.fetchone()\nif row is None:\n    raise HTTPException(404)   # don't reveal that it exists for another tenant\nreturn row\n```\nEnforce tenant scoping in a shared data-access layer so it can't be forgotten, and add a test where user A requests user B's order.",
+      "rubric": [
+        "Missing ownership/tenant check (IDOR)",
+        "Scope the query by the caller's orgid",
+        "Return 404 rather than leaking existence",
+        "Centralize the check + add a cross-tenant test"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Your product lets an LLM generate SQL from a user's question and runs it. What security controls would you put around it?",
+      "answer": "Treat model output as untrusted input:\n- **Least-privilege DB role**: read-only, only on the views the feature needs; no DDL, no access to other tenants' schemas.\n- **Tenant isolation enforced by the database**, not the prompt: row-level security policies or per-tenant views keyed on a session setting (`SET app.orgid`), so a query that 'forgets' the filter still can't see other orgs.\n- **Validation before execution**: parse the SQL, allow only a single SELECT, block functions like `pg_read_file`, and check `EXPLAIN` cost.\n- **Resource limits**: `statement_timeout`, row limits, a separate connection pool.\n- **Audit**: store the original prompt and generated SQL, who ran it and the cost.\n- Defend against prompt injection in user text and in data the model reads back.",
+      "rubric": [
+        "Model-generated SQL is untrusted input",
+        "Read-only least-privilege role + DB-enforced tenant isolation (RLS/views)",
+        "Validate statement type, timeouts and row limits",
+        "Audit logging of prompts and SQL"
+      ]
+    }
+  ]
+}

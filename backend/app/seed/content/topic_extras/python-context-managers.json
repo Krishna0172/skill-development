@@ -1,0 +1,56 @@
+{
+  "slug": "python-context-managers",
+  "why_md": "Every resource in a backend - DB connections, transactions, locks, files, HTTP clients - needs guaranteed cleanup on error. Context managers make that structural instead of relying on discipline, and they're the idiom interviewers expect when asked 'how do you make sure the connection goes back to the pool?'.",
+  "revision_notes_md": "- `with x as v:` calls `x.__enter__()` (returns v) and `x.__exit__(exc_type, exc, tb)` always.\n- `__exit__` returning True suppresses the exception - almost never what you want.\n- `@contextlib.contextmanager`: code before `yield` = enter, after = exit; wrap yield in try/finally (or try/except/raise).\n- psycopg2 `with conn:` commits/rolls back but does NOT close or return the connection.\n- `contextlib.suppress(FileNotFoundError)`, `ExitStack` for a dynamic number of resources.\n- `async with` uses `__aenter__/__aexit__`; `@asynccontextmanager` for async.\n- `threading.Lock` is a context manager - always `with lock:`.",
+  "exercises_md": "1. Write `@contextmanager def timer(label)` that logs elapsed time even when the body raises; verify with a body that raises.\n2. Write a class-based `PooledConnection` context manager for a psycopg2 pool that commits on success, rolls back on exception, and always calls `putconn` - then test it with a fake pool object.",
+  "my_context_md": "`AmazonVendorBankRecon/db.py` already has a `@contextmanager db_transaction()` that commits, rolls back and returns the connection to a `ThreadedConnectionPool` - exactly the pattern this topic teaches; the same file's double-checked-locking pool creation uses `threading.Lock` as a context manager. Reusing that helper in services that still call commit/rollback by hand is a concrete improvement.",
+  "questions": [
+    {
+      "type": "fill_blank",
+      "prompt": "In a @contextmanager function, the code before the ____ statement runs on entry to the with block.",
+      "answers": [
+        "yield"
+      ],
+      "explanation": "Everything after yield is the exit/cleanup part."
+    },
+    {
+      "type": "fill_blank",
+      "prompt": "If __exit__ returns a ____ value, the exception raised in the with block is suppressed.",
+      "answers": [
+        "true",
+        "truthy"
+      ],
+      "explanation": "Returning True/truthy swallows the exception."
+    },
+    {
+      "type": "output",
+      "prompt": "What does this print?",
+      "code": "from contextlib import contextmanager\n\n@contextmanager\ndef tx(name):\n    print(\"begin\", name)\n    try:\n        yield name\n        print(\"commit\", name)\n    except ValueError:\n        print(\"rollback\", name)\n        raise\n    finally:\n        print(\"release\", name)\n\ntry:\n    with tx(\"t1\"):\n        raise ValueError(\"bad row\")\nexcept ValueError as e:\n    print(\"caught\", e)",
+      "answers": [
+        "begin t1\nrollback t1\nrelease t1\ncaught bad row"
+      ],
+      "explanation": "The exception is thrown into the generator at yield: rollback, re-raise, finally releases, then the outer handler catches it."
+    },
+    {
+      "type": "debug",
+      "prompt": "Connections leak from the pool under errors. Why?",
+      "code": "from contextlib import contextmanager\n\n@contextmanager\ndef get_conn(pool):\n    conn = pool.getconn()\n    yield conn\n    conn.commit()\n    pool.putconn(conn)",
+      "answer": "If the `with` body raises, the exception is re-raised at `yield`, so `commit()` and `putconn()` never run - the connection leaks (and the transaction stays open).\n\n```python\n@contextmanager\ndef get_conn(pool):\n    conn = pool.getconn()\n    try:\n        yield conn\n        conn.commit()\n    except Exception:\n        conn.rollback()\n        raise\n    finally:\n        pool.putconn(conn)\n```",
+      "rubric": [
+        "Exception from the body surfaces at yield, skipping later lines",
+        "Use try/except/finally: rollback on error, putconn in finally",
+        "Re-raise after rollback"
+      ]
+    },
+    {
+      "type": "explain",
+      "prompt": "Explain what psycopg2's `with conn:` does and doesn't do, and how you'd wrap it properly.",
+      "answer": "`with conn:` wraps a transaction: on normal exit it commits, on exception it rolls back. It does not close the connection and does not return it to a pool - the connection stays open for reuse. With a pool you need your own context manager: `getconn()` on enter, commit/rollback, and `putconn()` in `finally`. `with conn.cursor() as cur:` separately closes the cursor.",
+      "rubric": [
+        "with conn = transaction scope (commit / rollback)",
+        "Does not close or return the connection to the pool",
+        "Own context manager with putconn in finally"
+      ]
+    }
+  ]
+}

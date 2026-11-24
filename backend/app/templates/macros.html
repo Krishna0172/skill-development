@@ -1,0 +1,65 @@
+{% macro card(title=None, actions=None, flush=False, cls="") -%}
+<section class="card {{ cls }}">
+  {% if title %}<header><h2>{{ title }}</h2>{% if actions %}<div class="actions">{{ actions }}</div>{% endif %}</header>{% endif %}
+  <div class="{{ 'flush' if flush else 'body' }}">{{ caller() }}</div>
+</section>
+{%- endmacro %}
+
+{% macro stat(label, value, sub=None, href=None) -%}
+{% if href %}<a class="stat" href="{{ href }}">{% else %}<div class="stat">{% endif %}
+  <div class="label">{{ label }}</div><div class="value">{{ value }}</div>{% if sub %}<div class="sub">{{ sub }}</div>{% endif %}
+{% if href %}</a>{% else %}</div>{% endif %}
+{%- endmacro %}
+
+{% macro kv(k, v) -%}<div class="kv"><span>{{ k }}</span><span>{{ v }}</span></div>{%- endmacro %}
+
+{% macro empty(title, body=None) -%}<div class="empty"><strong>{{ title }}</strong>{% if body %}<div class="small mt">{{ body }}</div>{% endif %}</div>{%- endmacro %}
+
+{% macro chips(name, options, current, base) -%}
+<div class="chips">{% for value, text in options %}
+  <a class="chip {{ 'on' if (current or '') == value }}" href="{{ base }}{{ '&' if '?' in base else '?' }}{{ name }}={{ value }}">{{ text }}</a>
+{% endfor %}</div>
+{%- endmacro %}
+
+{% macro question_form(q, idx, revealed=None) -%}
+{# Renders one question for answering. `revealed` = graded detail dict to show results. #}
+{% set name = "q" ~ q.id %}
+<div class="q {% if revealed and revealed.correct == True %}correct{% elif revealed and revealed.correct == False %}incorrect{% endif %}">
+  <div class="qhead"><span class="badge">{{ {"mcq": "Multiple choice", "fill_blank": "Fill in the blank", "output": "Predict the output", "debug": "Debugging", "explain": "Explain the concept", "qa": "Question"}[q.type] }}</span><span>#{{ idx }}</span>
+    {% if revealed %}{% if revealed.correct == True %}<span class="good">✓ correct</span>{% elif revealed.correct == False %}<span class="bad">✗ incorrect</span>{% else %}<span>self-graded {{ (revealed.points * 100)|round|int }}%</span>{% endif %}{% endif %}
+  </div>
+  <div class="md">{{ q.prompt|md }}</div>
+  {% if q.code %}{{ code_block(q.code, "sql" if q.code.lstrip().upper().startswith(("SELECT", "WITH", "INSERT", "UPDATE", "CREATE")) else "python") }}{% endif %}
+
+  {% if q.type == "mcq" %}
+    {% for opt in q.options %}
+      <label class="opt {% if revealed %}{% if loop.index0 == q.answer_index %}right{% elif revealed.response == loop.index0|string %}wrong{% endif %}{% endif %}">
+        <input type="radio" name="{{ name }}" value="{{ loop.index0 }}" {% if revealed %}disabled {% if revealed.response == loop.index0|string %}checked{% endif %}{% endif %}>
+        <span class="faint">{{ "ABCDEFGH"[loop.index0] }}</span><span>{{ opt }}</span>
+      </label>
+    {% endfor %}
+  {% elif q.type == "fill_blank" %}
+    <input name="{{ name }}" placeholder="Your answer for ____" value="{{ revealed.response if revealed else '' }}" {% if revealed %}disabled{% endif %} autocomplete="off">
+    {% if revealed %}<div class="small mt">Accepted: {% for a in q.answers %}<code>{{ a }}</code>{% if not loop.last %} / {% endif %}{% endfor %}</div>{% endif %}
+  {% elif q.type == "output" %}
+    <textarea class="code" name="{{ name }}" rows="3" style="min-height:70px" placeholder="Exact output, line by line" {% if revealed %}disabled{% endif %}>{{ revealed.response if revealed else '' }}</textarea>
+    {% if revealed %}<div class="small mt">Expected output:</div><pre class="block">{{ q.answers[0] }}</pre>{% endif %}
+  {% else %}
+    {% if not revealed %}
+      <textarea name="{{ name }}" rows="4" placeholder="Write your answer first — then reveal the model answer and tick what you covered."></textarea>
+      <details class="fold mt"><summary>Reveal model answer & self-grade</summary>
+        {{ q.answer_md|md }}
+        <div class="rubric mt"><div class="small muted">Tick each point your answer covered:</div>
+          {% for point in (q.rubric or ["Covered the main point of the model answer"]) %}
+            <label><input type="checkbox" name="{{ name }}_tick" value="{{ loop.index0 }}"> {{ point }}</label>
+          {% endfor %}
+        </div>
+      </details>
+    {% else %}
+      {% if revealed.response %}<div class="small muted">Your answer:</div><div class="md">{{ revealed.response|md }}</div>{% endif %}
+      <details class="fold mt" open><summary>Model answer</summary>{{ q.answer_md|md }}</details>
+    {% endif %}
+  {% endif %}
+  {% if revealed and q.explanation %}<div class="callout mt small">{{ q.explanation|md }}</div>{% endif %}
+</div>
+{%- endmacro %}

@@ -1,0 +1,85 @@
+{
+  "slug": "pg-channel-percent-of-month",
+  "title": "Percent of monthly revenue per channel (window SUM over an aggregate)",
+  "category": "postgresql",
+  "language": "sql",
+  "difficulty": "medium",
+  "skill": "sql-window-functions",
+  "concepts": [
+    "SUM() OVER",
+    "window over GROUP BY",
+    "PARTITION BY",
+    "percent of total",
+    "integer division"
+  ],
+  "related_topics": [
+    "sql-window-functions",
+    "sql-group-by",
+    "sql-ctes"
+  ],
+  "problem_md": "The monthly business review wants each channel's share of revenue.\n\n```sql\nCREATE TABLE orders (\n  order_id   INTEGER PRIMARY KEY,\n  channel    TEXT    NOT NULL,\n  order_date TEXT    NOT NULL,   -- 'YYYY-MM-DD'\n  amount     REAL    NOT NULL,\n  status     TEXT    NOT NULL\n);\n```\n\n**Task.** Exclude `CANCELLED` and `RETURNED` orders. For each month (`'YYYY-MM'`, i.e. `substr(order_date, 1, 7)` in SQLite / `to_char(order_date, 'YYYY-MM')` in PostgreSQL) and channel return `month`, `channel`, `revenue` (sum of amount) and `pct_of_month` = channel revenue x 100 / that month's total revenue, rounded to 2 decimals. Order by `month`, `revenue DESC`, `channel`.",
+  "examples": [
+    {
+      "input": "2024-04 valid revenue: amazon 1500, flipkart 800, myntra 500 (total 2800)",
+      "output": "2024-04 | amazon | 1500 | 53.57\n2024-04 | flipkart | 800 | 28.57\n2024-04 | myntra | 500 | 17.86"
+    }
+  ],
+  "hints": [
+    "Group by month and channel first; a window can then run over the grouped rows: `SUM(SUM(amount)) OVER (PARTITION BY month)` is the month total.",
+    "Multiply by `100.0` (not `100`) before dividing to avoid integer division, then `ROUND(..., 2)`."
+  ],
+  "starter_code": "-- Write your query here\nSELECT substr(order_date, 1, 7) AS month,\n       channel,\n       SUM(amount) AS revenue\nFROM orders\nGROUP BY 1, 2\nORDER BY month, revenue DESC, channel;\n",
+  "solution_code": "SELECT substr(order_date, 1, 7) AS month,\n       channel,\n       SUM(amount) AS revenue,\n       ROUND(100.0 * SUM(amount)\n             / SUM(SUM(amount)) OVER (PARTITION BY substr(order_date, 1, 7)), 2) AS pct_of_month\nFROM orders\nWHERE status NOT IN ('CANCELLED', 'RETURNED')\nGROUP BY substr(order_date, 1, 7), channel\nORDER BY month, revenue DESC, channel;",
+  "solution_md": "Window functions run **after** `GROUP BY`, so they see one row per (month, channel). `SUM(SUM(amount)) OVER (PARTITION BY month)` sums the grouped revenues per month - the inner `SUM` is the aggregate, the outer one the window. No self-join or subquery needed. `OVER ()` with no partition would give percent of the grand total instead.\n\nPitfalls: `100 * a / b` on integer/bigint columns truncates in PostgreSQL - use `100.0` or cast to numeric; in PostgreSQL `ROUND(double precision, int)` doesn't exist, so cast: `ROUND((...)::numeric, 2)` (amounts should be `numeric` anyway). Filtering in `WHERE` happens before both grouping and the window, so excluded orders don't inflate the denominator. If a month's total could be 0, wrap the divisor in `NULLIF(..., 0)`.",
+  "tests": {
+    "schema_sql": "CREATE TABLE orders (\n  order_id   INTEGER PRIMARY KEY,\n  channel    TEXT    NOT NULL,\n  order_date TEXT    NOT NULL,   -- 'YYYY-MM-DD'\n  amount     REAL    NOT NULL,\n  status     TEXT    NOT NULL\n);\n\nINSERT INTO orders VALUES\n (1,  'amazon',   '2024-04-02', 1200.00, 'DELIVERED'),\n (2,  'flipkart', '2024-04-05',  800.00, 'DELIVERED'),\n (3,  'amazon',   '2024-04-10',  300.00, 'CANCELLED'),\n (4,  'myntra',   '2024-04-15',  500.00, 'SHIPPED'),\n (5,  'amazon',   '2024-04-20',  300.00, 'DELIVERED'),\n (6,  'flipkart', '2024-05-01',  450.00, 'DELIVERED'),\n (7,  'amazon',   '2024-05-03',  900.00, 'DELIVERED'),\n (8,  'myntra',   '2024-05-09',  450.00, 'DELIVERED'),\n (9,  'myntra',   '2024-05-12', 1000.00, 'CANCELLED'),\n (10, 'flipkart', '2024-05-28',  200.00, 'SHIPPED'),\n (11, 'amazon',   '2024-05-30',  100.00, 'RETURNED');",
+    "ordered": true,
+    "expected": {
+      "columns": [
+        "month",
+        "channel",
+        "revenue",
+        "pct_of_month"
+      ],
+      "rows": [
+        [
+          "2024-04",
+          "amazon",
+          1500.0,
+          53.57
+        ],
+        [
+          "2024-04",
+          "flipkart",
+          800.0,
+          28.57
+        ],
+        [
+          "2024-04",
+          "myntra",
+          500.0,
+          17.86
+        ],
+        [
+          "2024-05",
+          "amazon",
+          900.0,
+          45.0
+        ],
+        [
+          "2024-05",
+          "flipkart",
+          650.0,
+          32.5
+        ],
+        [
+          "2024-05",
+          "myntra",
+          450.0,
+          22.5
+        ]
+      ]
+    },
+    "check_sql": null
+  }
+}
